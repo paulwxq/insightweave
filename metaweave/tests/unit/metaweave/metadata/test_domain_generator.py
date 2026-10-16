@@ -1,0 +1,154 @@
+import os
+from pathlib import Path
+
+import pytest
+import yaml
+
+from metaweave.core.metadata.domain_generator import DomainGenerator
+
+
+class _DummyLLMService:
+    model = "test-model"
+    response = """
+{
+  "database": {
+    "name": "电商分析库",
+    "description": "该数据库覆盖订单、支付、履约与商品信息，支持交易分析和运营分析。"
+  },
+  "domains": [
+    {"name": "_未分类_", "description": "忽略我"},
+    {"name": "订单履约", "description": "管理订单与履约流程"}
+  ]
+}
+"""
+    last_prompt = ""
+
+    def __init__(self, _config):
+        pass
+
+    def _call_llm(self, prompt: str) -> str:
+        type(self).last_prompt = prompt
+        return type(self).response
+
+
+def _make_config(database_name: str = "") -> dict:
+    config = {
+        "llm": {
+            "active": "test",
+            "providers": {"test": {"model": "test-model"}},
+        }
+    }
+    if database_name:
+        config["database"] = {"database": database_name}
+    return config
+
+
+def _write_md_file(md_dir: Path) -> None:
+    md_dir.mkdir(parents=True, exist_ok=True)
+    (md_dir / "shop.public.orders.md").write_text(
+        "# 订单表\n\n用于存储订单主信息。",
+        encoding="utf-8",
+    )
+
+
+def test_generate_domains_initializes_missing_yaml_and_writes_full_config(tmp_path, monkeypatch):
+    monkeypatch.setattr("metaweave.core.metadata.domain_generator.LLMService", _DummyLLMService)
+
+    md_dir = tmp_path / "md"
+    _write_md_file(md_dir)
+    yaml_path = tmp_path / "configs" / "db_domains.yaml"
+
+    generator = DomainGenerator(
+        config=_make_config("shopdb"),
+        yaml_path=str(yaml_path),
+        md_context_dir=str(md_dir),
+        md_context_mode="name_comment",
+        md_context_limit=100,
+    )
+
+    payload = generator.generate_from_context(user_description="这是一个电商交易库")
+    final_domains = generator.write_to_yaml(payload)
+
+    assert yaml_path.exists()
+    written = yaml.safe_load(yaml_path.read_text(encoding="utf-8"))
+
+    # database.name 使用配置中的真实数据库名，而非 LLM 返回值
+    assert written["database"]["name"] == "shopdb"
+    assert "订单" in written["database"]["description"]
+    assert written["llm_inference"]["max_domains_per_table"] == 3
+    assert written["domains"][0]["name"] == "_未分类_"
+    assert sum(1 for d in written["domains"] if d["name"] == "_未分类_") == 1
+    assert len(final_domains) == 2
+    assert "用户补充说明" in _DummyLLMService.last_prompt
+    assert "这是一个电商交易库" in _DummyLLMService.last_prompt
+
+
+def test_generate_domains_skips_symlinked_md_files(tmp_path, monkeypatch):
+    """md 读取不跟随符号链接（doc 21.1 §13.2）：链接指向的目录外内容不进入提示词。"""
+    monkeypatch.setattr("metaweave.core.metadata.domain_generator.LLMService", _DummyLLMService)
+
+    md_dir = tmp_path / "md"
+    _write_md_file(md_dir)
+    outside = tmp_path / "outside.txt"
+    outside.write_text("# 外部内容不该进入摘要\n", encoding="utf-8")
+    (md_dir / "linked.md").symlink_to(outside)
+
+    generator = DomainGenerator(
+        config=_make_config("shopdb"),
+        yaml_path=str(tmp_path / "out" / "db_domains.yaml"),
+        md_context_dir=str(md_dir),
+    )
+    generator.generate_from_context(user_description=None)
+
+    assert "外部内容不该进入摘要" not in _DummyLLMService.last_prompt
+    assert "订单表" in _DummyLLMService.last_prompt
+
+
+def test_generate_domains_skips_fifo_md_files(tmp_path, monkeypatch):
+    """非常规文件（FIFO）在读取侧被跳过，不因打开阻塞（doc 21.1 §13.2）。"""
+    monkeypatch.setattr("metaweave.core.metadata.domain_generator.LLMService", _DummyLLMService)
+
+    md_dir = tmp_path / "md"
+    _write_md_file(md_dir)
+    os.mkfifo(md_dir / "pipe.md")
+
+    generator = DomainGenerator(
+        config=_make_config("shopdb"),
+        yaml_path=str(tmp_path / "out" / "db_domains.yaml"),
+        md_context_dir=str(md_dir),
+    )
+    generator.generate_from_context(user_description=None)
+
+    assert "订单表" in _DummyLLMService.last_prompt
+    assert "pipe" not in _DummyLLMService.last_prompt
+
+
+def test_generate_domains_requires_md_files(tmp_path, monkeypatch):
+    monkeypatch.setattr("metaweave.core.metadata.domain_generator.LLMService", _DummyLLMService)
+
+    generator = DomainGenerator(
+        config=_make_config(),
+        yaml_path=str(tmp_path / "db_domains.yaml"),
+        md_context_dir=str(tmp_path / "missing_md"),
+    )
+
+    with pytest.raises(FileNotFoundError) as exc:
+        generator.generate_from_context()
+
+    assert "--step md" in str(exc.value)
+
+
+def test_prompt_without_description_uses_auto_mode(tmp_path, monkeypatch):
+    monkeypatch.setattr("metaweave.core.metadata.domain_generator.LLMService", _DummyLLMService)
+    md_dir = tmp_path / "md"
+    _write_md_file(md_dir)
+
+    generator = DomainGenerator(
+        config=_make_config(),
+        yaml_path=str(tmp_path / "db_domains.yaml"),
+        md_context_dir=str(md_dir),
+    )
+
+    generator.generate_from_context(user_description=None)
+    assert "用户补充说明" not in _DummyLLMService.last_prompt
+    assert "表结构摘要" in _DummyLLMService.last_prompt

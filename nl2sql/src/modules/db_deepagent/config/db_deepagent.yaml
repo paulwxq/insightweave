@@ -1,0 +1,156 @@
+# ==============================================================================
+# db_deepagent 运行配置（docs/v4/5_db_deepagent详细设计.md §4.1）
+# ==============================================================================
+# 说明：
+# - 使用现有 ConfigLoader(path).load() 读取（支持 ${VAR:default}，并加载根 .env）
+# - 下例即默认值；带“需实测调整”注释的数值在实现阶段按实际模型确定
+# ==============================================================================
+
+model:
+  llm_profile: qwen3_8_max               # 引用全局 config.yaml 的 llm_profiles（2026-10-15 起 qwen3-max 已下线）
+  overrides:
+    temperature: 0
+  # 可选：显式声明期望的 SDK 匹配键；声明后与实际解析结果不一致则初始化失败
+  expected_harness_key: null             # 例如 "tongyi:qwen3.8-max"
+  request_timeout_seconds: 120           # 单次模型 HTTP 请求超时（§11.1），需实测调整
+
+embedding:
+  profile: qwen3_7_text_embedding        # 引用全局 embedding_profiles，不跟随 active
+  release_record: src/modules/db_deepagent/config/embedding_release.yaml
+  request_timeout_seconds: 30
+
+business_db:
+  host: ${DB_HOST:localhost}
+  port: ${DB_PORT:5432}
+  database: ${DB_NAME}
+  user: ${DB_USER}
+  password: ${DB_PASSWORD}
+  expected_database: orders              # 解析后与 database、current_database() 双重核对
+  table_key_prefix: orders               # Milvus / Neo4j 三段表键的首段
+  timezone: Asia/Shanghai                # 连接级 TimeZone
+  pool_min_size: 1
+  pool_max_size: 5
+  explain_timeout_seconds: 5
+  statement_timeout_seconds: 30
+  max_saved_rows: 10000                  # 单次查询最多保存行数，超出即 source_truncated
+
+platform_db:
+  host: ${LANGGRAPH_DB_HOST:localhost}
+  port: ${LANGGRAPH_DB_PORT:5432}
+  database: ${LANGGRAPH_DB_NAME}
+  user: ${LANGGRAPH_DB_USER:postgres}
+  password: ${LANGGRAPH_DB_PASSWORD:}
+  expected_database: lg_persist
+  schema: db_deepagent
+  sslmode: disable
+  connect_timeout_seconds: 5
+  statement_timeout_ms: 5000
+  pool_min_size: 1
+  pool_max_size: 4
+
+maintenance:
+  statement_timeout_ms: 60000            # 清理专用连接，每条语句的初始超时，待实测
+  lock_timeout_ms: 5000                  # 不长时间等待锁；不修改交互平台池的 5000 ms 超时
+
+neo4j:
+  uri: ${NEO4J_URI:bolt://localhost:7687}
+  user: ${NEO4J_USER:neo4j}
+  password: ${NEO4J_PASSWORD}
+  database: ${NEO4J_DATABASE:neo4j}
+  join_max_hops: 5
+  join_strategy: apoc_dijkstra           # apoc_dijkstra | shortest_path
+  allow_shortest_path_fallback: true
+  connection_timeout_seconds: 10
+  query_timeout_seconds: 15
+
+milvus:
+  host: ${MILVUS_HOST:localhost}
+  port: ${MILVUS_PORT:19530}
+  database: ${MILVUS_DATABASE:nl2sql}
+  user: ${MILVUS_USER:}
+  password: ${MILVUS_PASSWORD:}
+  alias: db_deepagent
+  timeout: 30
+  search_params:
+    metric_type: COSINE
+    params: {ef: 100}
+  collections:
+    table_schema: table_schema_embeddings
+    dim_value: dim_value_embeddings
+    sql_example: sql_example_embeddings
+
+retrieval:
+  table_top_k: 10
+  table_min_score: 0.45
+  column_top_k: 10
+  column_min_score: 0.45
+  dim_value_top_k: 3
+  dim_value_min_score: 0.75
+  sql_example_top_k: 3
+  sql_example_min_score: 0.6
+  max_top_k: 30                          # 模型可传的 top_k 上限
+  table_category_mapping:                # 与旧子图配置取值一致，独立维护
+    fact: [fact, 事实表, 交易表, 明细表, 流水表, 快照表, 汇总表]
+    dimension: [dim, dimension, 维度表, 实体表, 枚举表, 查找表]
+    bridge: [bridge, 桥接表, 关联表]
+
+validation:                              # 三层校验，键名与旧子图 validation 段一致
+  enable_syntax_check: true
+  enable_security_check: true
+  enable_semantic_check: true
+  syntax: {allow_multiple_statements: false}
+  security:
+    allowed_statement_types: [SELECT, WITH, UNKNOWN]
+    forbidden_keywords: [DROP, DELETE, TRUNCATE, ALTER, CREATE, INSERT, UPDATE, GRANT, REVOKE, EXEC, EXECUTE]
+    allow_comments: false
+  semantic:
+    explain_analyze: false               # 固定 false；配置为 true 时初始化报错
+    warnings: {seq_scan_warn: true, nested_loop_warn: true, estimated_rows_threshold: 100000}
+  guard:
+    enabled: true
+    forbid_realtime_clock_in_filters: true
+    require_time_evidence: true
+    require_dimension_evidence: true
+
+results:
+  preview_rows: 20                       # execute_sql 返回的预览行数
+  read_max_rows: 200                     # read_result 单次最多行数
+  max_tool_output_chars: 12000           # 业务工具返回文本上限，保证不触发 SDK 大结果转存
+  placeholder_max_values: 1000           # 结果占位符展开的最大值个数
+  probe_max_values: 50
+
+budget:
+  max_model_calls_per_run: 40            # 主 Agent 模型节点的步骤预占上限，不是全部模型／HTTP 请求上限
+  max_tool_calls_per_run: 80             # 需实测调整
+  max_execute_calls_per_run: 20          # 数据库执行次数，含探针与下推（§11.1）
+  run_timeout_seconds: 300               # 协作式时限（§11.1）
+  final_answer_reminders: 1              # 模型未提交就结束时的提醒次数（§11.3）
+
+summarization:                           # qwen3_max 的初始默认值，待实测；更换模型时重新确定
+  summary_trigger_tokens: 96000          # 须低于模型实际输入上限并留余量
+  recent_context_tokens: 24000           # 必须小于 summary_trigger_tokens
+  trim_tokens_to_summarize: null         # 显式传 None，所选待摘要历史不再按 SDK 默认 4000 Token 裁剪
+
+filesystem:
+  tool_token_limit_before_evict: 20000   # SDK 默认值，显式写出便于核对
+
+thread:
+  rotate_after_messages: 400             # 线程消息数超过该值时，下一轮前轮换线程
+  carry_max_evidence: 200                # 轮换时携带的证据条数上限（§13.4）
+  checkpoint_retention_days: 30
+  archive_retention_days: 180
+  result_retention_days: 30
+
+workspace:
+  root: ${DB_DEEPAGENT_WORKSPACE:var/db_deepagent}
+
+clock:
+  timezone: Asia/Shanghai
+  fixed_now: null                        # 测试时设为 "2026-10-13T12:00:00+08:00"
+
+features:
+  todo_list: false                       # 为 true 时追加 LangChain TodoListMiddleware（新增 write_todos 工具）
+  memory: false                          # 为 true 时加载 /memory/memory_context.md
+
+persistence:
+  mode: postgres                         # postgres | memory（memory 仅调试，必须显式选择）

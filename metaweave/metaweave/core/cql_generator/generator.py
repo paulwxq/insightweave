@@ -1,0 +1,226 @@
+"""Step 4 CQL 生成器
+
+主生成器类，协调整个 Cypher 生成流程。
+"""
+
+import logging
+import math
+from pathlib import Path
+from typing import Dict, Any
+
+from metaweave.core.cql_generator.models import CQLGenerationResult
+from metaweave.core.cql_generator.reader import JSONReader
+from metaweave.core.cql_generator.writer import CypherWriter
+from metaweave.utils.file_utils import resolve_project_path
+from services.config_loader import ConfigLoader
+
+logger = logging.getLogger("metaweave.cql_generator")
+
+DEFAULT_COMPOSITE_SCORE_THRESHOLD = 0.9  # 与 decision.high_confidence_threshold 语义对齐
+
+
+class CQLGenerator:
+    """CQL 生成器
+
+    负责整体流程：
+    1. 加载配置
+    2. 读取 Step 2 和 Step 3 的 JSON 文件
+    3. 生成 Cypher 脚本文件
+    """
+
+    def __init__(
+        self,
+        config_path: Path,
+        domain_resolver=None,
+        config: dict | None = None,
+        provenance: tuple | None = None,
+    ):
+        """初始化生成器
+
+        Args:
+            config_path: 配置文件路径（config 已注入时仅作来源标识，不触发读盘）
+            domain_resolver: DomainResolver 实例，用于从 YAML 获取 table_domains
+            config: 完整主配置快照（doc 26 §6.2）；缺失时从路径读取一次
+            provenance: (source_id, publish_id) 溯源对（doc 23.2 §5.4）——
+                透传给 writer，仅 Table 节点写入两属性；缺省 None 省略（D9）
+        """
+        self.domain_resolver = domain_resolver
+        self.provenance = provenance
+        self.config_path = Path(config_path)
+        if not self.config_path.exists():
+            raise FileNotFoundError(f"配置文件不存在: {self.config_path}")
+
+        # doc 26 §6.2：注入快照优先，路径仅为来源标识
+        self.config = config if config is not None else self._load_config()
+        logger.info(f"加载配置: {self.config_path}")
+
+        # 解析配置路径
+        self.json_dir = self._resolve_path(
+            self.config.get("output", {}).get("json_directory", "output/json")
+        )
+        self.rel_dir = self._resolve_path(
+            self.config.get("output", {}).get("rel_directory", "output/rel")
+        )
+        self.cql_dir = self._resolve_path(
+            self.config.get("output", {}).get("cql_directory", "output/cql")
+        )
+
+        # CQL 置信度阈值（doc 18）：缺失/字段缺失 → 默认 0.9；显式非法值报错
+        cql_generation = self.config.get("cql_generation") or {}
+        raw_threshold = cql_generation.get(
+            "composite_score_threshold", DEFAULT_COMPOSITE_SCORE_THRESHOLD
+        )
+        self.composite_score_threshold = self._validate_threshold(raw_threshold)
+
+        logger.info(f"JSON 目录: {self.json_dir}")
+        logger.info(f"关系目录: {self.rel_dir}")
+        logger.info(f"CQL 输出目录: {self.cql_dir}")
+        logger.info(f"CQL 置信度阈值: {self.composite_score_threshold}")
+
+    @staticmethod
+    def _validate_threshold(raw: Any) -> float:
+        """校验 cql_generation.composite_score_threshold（doc 18 §3）
+
+        顺序：拒绝 bool → 接受 int/float → math.isfinite → [0, 1]。
+        显式声明非法值 → 报错（非法配置不静默）。
+        """
+        if isinstance(raw, bool):
+            raise ValueError(
+                f"cql_generation.composite_score_threshold 不允许布尔值: {raw!r}"
+            )
+        if not isinstance(raw, (int, float)):
+            raise ValueError(
+                f"cql_generation.composite_score_threshold 必须是数值,得到: {raw!r}"
+            )
+        if not math.isfinite(raw):
+            raise ValueError(
+                f"cql_generation.composite_score_threshold 必须是有限数值,得到: {raw!r}"
+            )
+        if not (0.0 <= raw <= 1.0):
+            raise ValueError(
+                f"cql_generation.composite_score_threshold 必须在 [0, 1] 内,得到: {raw!r}"
+            )
+        return float(raw)
+
+    def _load_config(self) -> Dict[str, Any]:
+        """通过 ConfigLoader 加载 YAML 配置文件（支持环境变量替换）"""
+        try:
+            config = ConfigLoader(str(self.config_path)).load()
+            return config
+        except Exception as e:
+            logger.error(f"加载配置文件失败: {e}")
+            raise
+
+    def _resolve_path(self, path_str: str) -> Path:
+        """解析路径（doc 26 §6.2：统一走共享项目路径 resolver）"""
+        return resolve_project_path(path_str)
+
+    def generate(self, step_name: str = "cql") -> CQLGenerationResult:
+        """执行 CQL 生成
+
+        Args:
+            step_name: 执行的步骤名称，用于元数据记录
+
+        Returns:
+            生成结果
+        """
+        try:
+            logger.info("=" * 60)
+            logger.info("开始 Step 4: Neo4j CQL 生成")
+            logger.info("=" * 60)
+
+            # 1. 读取 JSON 数据
+            logger.info("\n[1/2] 读取 Step 2 和 Step 3 的 JSON 文件...")
+            reader = JSONReader(
+                self.json_dir,
+                self.rel_dir,
+                domain_resolver=self.domain_resolver,
+                composite_score_threshold=self.composite_score_threshold,
+            )
+            tables, columns, has_column_rels, join_on_rels, filter_stats = reader.read_all()
+
+            logger.info(f"  - 表节点: {len(tables)}")
+            logger.info(f"  - 列节点: {len(columns)}")
+            logger.info(f"  - HAS_COLUMN 关系: {len(has_column_rels)}")
+            logger.info(f"  - JOIN_ON 关系: {len(join_on_rels)}")
+            logger.info(
+                f"  - 关系过滤统计: 候选 {filter_stats.candidate_count} / "
+                f"通过阈值 {filter_stats.threshold_passed_count} / "
+                f"被过滤 {filter_stats.threshold_filtered_count} / "
+                f"重复组 {filter_stats.duplicate_group_count} / "
+                f"去重丢弃 {filter_stats.duplicate_discarded_count}"
+            )
+
+            # 2. 生成 Cypher 文件
+            logger.info("\n[2/2] 生成 Cypher 脚本文件...")
+            writer = CypherWriter(self.cql_dir)
+            output_files = writer.write_all(
+                tables,
+                columns,
+                has_column_rels,
+                join_on_rels,
+                provenance=self.provenance,
+            )
+
+            logger.info(f"  - 生成文件: {len(output_files)} 个")
+            for file_path in output_files:
+                logger.info(f"    * {file_path}")
+
+            # 3. 生成元数据文档
+            logger.info("\n[额外] 生成元数据文档...")
+
+            # ✅ 实施时建议：添加调试日志确认数据可用性
+            logger.debug(f"has_column_rels count: {len(has_column_rels)}")
+            logger.debug(f"join_on_rels count: {len(join_on_rels)}")
+            logger.debug("Calling write_metadata after write_all")
+
+            # ✅ 保护主流程：元数据生成失败不应影响 CQL 生成
+            errors = []
+            try:
+                metadata_file = writer.write_metadata(
+                    tables=tables,
+                    columns=columns,
+                    has_column_rels=has_column_rels,
+                    join_on_rels=join_on_rels,
+                    step_name=step_name,
+                    json_dir=self.json_dir,
+                    rel_dir=self.rel_dir,
+                    filter_stats=filter_stats,
+                    composite_score_threshold=self.composite_score_threshold,
+                )
+                logger.info(f"  - 元数据文档: {metadata_file}")
+                output_files.append(str(metadata_file))
+            except Exception as e:
+                error_msg = f"元数据文档生成失败: {e}"
+                logger.warning(f"{error_msg}（不影响主流程）")
+                errors.append(error_msg)
+
+            # 构造结果
+            result = CQLGenerationResult(
+                success=True,
+                output_files=output_files,
+                tables_count=len(tables),
+                columns_count=len(columns),
+                has_column_count=len(has_column_rels),
+                relationships_count=len(join_on_rels),
+                errors=errors,
+                filter_stats=filter_stats
+            )
+
+            logger.info("\n" + "=" * 60)
+            logger.info("✅ Step 4 完成")
+            logger.info("=" * 60)
+            logger.info(str(result))
+
+            return result
+
+        except Exception as e:
+            logger.error(f"CQL 生成失败: {e}", exc_info=True)
+            return CQLGenerationResult(
+                success=False,
+                output_files=[],
+                tables_count=0,
+                columns_count=0,
+                relationships_count=0,
+                errors=[str(e)]
+            )

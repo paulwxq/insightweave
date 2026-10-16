@@ -1,0 +1,66 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+.venv-wsl
+.venv-win
+
+# Environment variables (contains sensitive information)
+.env
+
+# Logs
+logs/
+*.log
+CLAUDE.md
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Pytest
+.pytest_cache/
+.coverage
+htmlcov/
+
+# MyPy
+.mypy_cache/
+
+# Ruff
+.ruff_cache/
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+
+# Temporary files
+*.tmp
+*.bak
+*.orig
+
+# Debug output
+logs/debug/
+
+# MetaWeave output and cache
+#output/metaweave/
+cache/metaweave/
+logs/metaweave/
+
+# MetaWeave local configs
+configs/metaweave/.env
+configs/metaweave/*_local.yaml
+
+tmp/
+var/

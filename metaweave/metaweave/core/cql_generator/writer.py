@@ -1,0 +1,548 @@
+"""Step 4 Cypher 文件写入器
+
+生成符合 v3.2 规范的 Neo4j Cypher 脚本文件。
+"""
+
+import json
+import logging
+from pathlib import Path
+from typing import List, Optional
+from datetime import datetime, timezone
+
+from metaweave.core.cql_generator.models import (
+    TableNode,
+    ColumnNode,
+    HASColumnRelation,
+    JOINOnRelation,
+    RelationshipFilterStats,
+)
+from metaweave.utils.time_utils import utc_isoformat
+
+logger = logging.getLogger("metaweave.cql_generator.writer")
+
+
+class CypherWriter:
+    """Cypher 文件写入器
+
+    负责生成 Neo4j Cypher 脚本文件（.cypher），确保幂等性。
+    """
+
+    def __init__(self, output_dir: Path):
+        """初始化写入器
+
+        Args:
+            output_dir: 输出目录（./output/cql/）
+        """
+        self.output_dir = Path(output_dir)
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        logger.info(f"初始化 Cypher 写入器，输出目录: {self.output_dir}")
+
+    @staticmethod
+    def _resolve_database_name(tables: List[TableNode], columns: List[ColumnNode]) -> str:
+        candidates = {
+            value
+            for value in [*(t.database for t in tables), *(c.database for c in columns)]
+            if value
+        }
+        if not candidates:
+            return "unknown"
+        if len(candidates) > 1:
+            raise ValueError(f"检测到多个 database: {sorted(candidates)}")
+        return next(iter(candidates))
+
+    def write_all(
+        self,
+        tables: List[TableNode],
+        columns: List[ColumnNode],
+        has_column_rels: List[HASColumnRelation],
+        join_on_rels: List[JOINOnRelation],
+        provenance: Optional[tuple] = None,
+    ) -> List[str]:
+        """写入 Cypher 文件（默认 global 模式，生成单个完整文件）
+
+        Args:
+            tables: Table 节点列表
+            columns: Column 节点列表
+            has_column_rels: HAS_COLUMN 关系列表
+            join_on_rels: JOIN_ON 关系列表
+            provenance: (source_id, publish_id) 溯源对（doc 23.2 §5.4，D3）——
+                非 None 时仅 Table 节点写入 source_id/publish_id 属性；缺省
+                None 省略（CLI ``--step cql`` 行为不变，D9），仅 Web rel 发布
+                显式传入
+
+        Returns:
+            生成的文件路径列表
+        """
+        output_files = []
+
+        logger.info("开始生成 Cypher 文件 (global 模式)...")
+
+        database_name = self._resolve_database_name(tables, columns)
+
+        # 生成单个完整的 import_all.{db}.cypher 文件
+        import_all_file = self._write_import_all(
+            tables,
+            columns,
+            has_column_rels,
+            join_on_rels,
+            database_name=database_name,
+            provenance=provenance,
+        )
+        output_files.append(str(import_all_file))
+
+        logger.info(f"Cypher 文件生成完成: {import_all_file.name}")
+        return output_files
+
+    def _write_constraints(self) -> Path:
+        """生成 01_constraints.cypher"""
+        output_file = self.output_dir / "01_constraints.cypher"
+
+        content = """// 01_constraints.cypher
+// 创建唯一约束（幂等）
+
+	CREATE CONSTRAINT table_id IF NOT EXISTS FOR (t:Table) REQUIRE t.id IS UNIQUE;
+	CREATE CONSTRAINT table_full_name IF NOT EXISTS FOR (t:Table) REQUIRE t.full_name IS UNIQUE;
+	CREATE CONSTRAINT column_id IF NOT EXISTS FOR (c:Column) REQUIRE c.id IS UNIQUE;
+	CREATE CONSTRAINT column_full_name IF NOT EXISTS FOR (c:Column) REQUIRE c.full_name IS UNIQUE;
+"""
+
+        with open(output_file, "w", encoding="utf-8") as f:
+            f.write(content)
+
+        logger.info(f"生成约束文件: {output_file}")
+        return output_file
+
+    def _write_table_nodes(self, tables: List[TableNode]) -> Path:
+        """生成 02_nodes_tables.cypher"""
+        output_file = self.output_dir / "02_nodes_tables.cypher"
+
+        # 转换为 Cypher 参数格式
+        tables_data = [t.to_cypher_dict() for t in tables]
+        tables_json = json.dumps(tables_data, ensure_ascii=False, indent=2)
+
+        content = f"""// 02_nodes_tables.cypher
+// 生成 Table 节点（MERGE + SET，确保幂等性）
+
+	UNWIND {tables_json} AS t
+	MERGE (n:Table {{full_name: t.full_name}})
+	SET n.id       = t.id,
+	    n.database = t.database,
+	    n.schema   = t.schema,
+	    n.name     = t.name,
+	    n.comment  = t.comment,
+	    n.object_type = t.object_type,
+	    n.pk       = t.pk,
+	    n.uk       = t.uk,
+    n.fk       = t.fk,
+    n.logic_pk = t.logic_pk,
+    n.logic_fk = t.logic_fk,
+    n.logic_uk = t.logic_uk,
+    n.indexes  = t.indexes,
+    n.table_domains = t.table_domains,
+    n.table_category = CASE
+        WHEN t.table_category IS NOT NULL
+            THEN t.table_category
+        ELSE n.table_category
+    END;
+"""
+
+        with open(output_file, "w", encoding="utf-8") as f:
+            f.write(content)
+
+        logger.info(f"生成 Table 节点文件: {output_file} ({len(tables)} 个节点)")
+        return output_file
+
+    def _write_column_nodes(self, columns: List[ColumnNode]) -> Path:
+        """生成 03_nodes_columns.cypher"""
+        output_file = self.output_dir / "03_nodes_columns.cypher"
+
+        # 转换为 Cypher 参数格式
+        columns_data = [c.to_cypher_dict() for c in columns]
+        columns_json = json.dumps(columns_data, ensure_ascii=False, indent=2)
+
+        content = f"""// 03_nodes_columns.cypher
+// 生成 Column 节点（MERGE + SET，确保幂等性）
+
+	UNWIND {columns_json} AS c
+	MERGE (n:Column {{full_name: c.full_name}})
+	SET n.id           = c.id,
+	    n.database     = c.database,
+	    n.schema       = c.schema,
+	    n.table        = c.table,
+	    n.name         = c.name,
+	    n.comment      = c.comment,
+	    n.data_type    = c.data_type,
+	    n.semantic_role= c.semantic_role,
+    n.is_pk        = c.is_pk,
+    n.is_uk        = c.is_uk,
+    n.is_fk        = c.is_fk,
+    n.is_time      = c.is_time,
+    n.is_measure   = c.is_measure,
+    n.pk_position  = c.pk_position,
+    n.uniqueness   = c.uniqueness,
+    n.null_rate    = c.null_rate;
+"""
+
+        with open(output_file, "w", encoding="utf-8") as f:
+            f.write(content)
+
+        logger.info(f"生成 Column 节点文件: {output_file} ({len(columns)} 个节点)")
+        return output_file
+
+    def _write_has_column_rels(self, rels: List[HASColumnRelation]) -> Path:
+        """生成 04_rels_has_column.cypher"""
+        output_file = self.output_dir / "04_rels_has_column.cypher"
+
+        # 转换为 Cypher 参数格式
+        rels_data = [r.to_cypher_dict() for r in rels]
+        rels_json = json.dumps(rels_data, ensure_ascii=False, indent=2)
+
+        content = f"""// 04_rels_has_column.cypher
+// 建立 HAS_COLUMN 关系（MERGE，确保幂等性）
+
+UNWIND {rels_json} AS hc
+MATCH (t:Table {{full_name: hc.table_full_name}})
+MATCH (c:Column {{full_name: hc.column_full_name}})
+MERGE (t)-[:HAS_COLUMN]->(c);
+"""
+
+        with open(output_file, "w", encoding="utf-8") as f:
+            f.write(content)
+
+        logger.info(f"生成 HAS_COLUMN 关系文件: {output_file} ({len(rels)} 个关系)")
+        return output_file
+
+    def _write_join_on_rels(self, rels: List[JOINOnRelation]) -> Path:
+        """生成 05_rels_join_on.cypher"""
+        output_file = self.output_dir / "05_rels_join_on.cypher"
+
+        # 转换为 Cypher 参数格式
+        rels_data = [r.to_cypher_dict() for r in rels]
+        
+        # 添加 src_full_name 和 dst_full_name 用于 MATCH（不存储到边属性）
+        for i, rel in enumerate(rels):
+            rels_data[i]["src_full_name"] = rel.src_full_name
+            rels_data[i]["dst_full_name"] = rel.dst_full_name
+        
+        rels_json = json.dumps(rels_data, ensure_ascii=False, indent=2)
+
+        content = f"""// 05_rels_join_on.cypher
+// 建立 JOIN_ON 关系（MERGE + SET，确保幂等性）
+
+UNWIND {rels_json} AS j
+MATCH (src:Table {{full_name: j.src_full_name}})
+MATCH (dst:Table {{full_name: j.dst_full_name}})
+MERGE (src)-[r:JOIN_ON {{relationship_id: j.relationship_id}}]->(dst)
+SET r.cardinality     = j.cardinality,
+    r.constraint_name = j.constraint_name,
+    r.join_type       = coalesce(j.join_type, 'INNER JOIN'),
+    r.on              = j.on,
+    r.source_columns  = j.source_columns,
+    r.target_columns  = j.target_columns,
+    r.source_table    = j.source_table,
+    r.target_table    = j.target_table;
+"""
+
+        with open(output_file, "w", encoding="utf-8") as f:
+            f.write(content)
+
+        logger.info(f"生成 JOIN_ON 关系文件: {output_file} ({len(rels)} 个关系)")
+        return output_file
+
+    def _write_import_all(
+        self,
+        tables: List[TableNode],
+        columns: List[ColumnNode],
+        has_column_rels: List[HASColumnRelation],
+        join_on_rels: List[JOINOnRelation],
+        database_name: str,
+        provenance: Optional[tuple] = None,
+    ) -> Path:
+        """生成 import_all.{db}.cypher（完整的 global 模式 CQL 脚本）"""
+        output_file = self.output_dir / f"import_all.{database_name}.cypher"
+
+        timestamp = utc_isoformat(datetime.now(timezone.utc))
+
+        # 转换为 Cypher 参数格式
+        tables_data = [t.to_cypher_dict() for t in tables]
+        columns_data = [c.to_cypher_dict() for c in columns]
+        has_column_data = [r.to_cypher_dict() for r in has_column_rels]
+        join_on_data = [r.to_cypher_dict() for r in join_on_rels]
+        
+        # 添加 src_full_name 和 dst_full_name 用于 MATCH（不存储到边属性）
+        for i, rel in enumerate(join_on_rels):
+            join_on_data[i]["src_full_name"] = rel.src_full_name
+            join_on_data[i]["dst_full_name"] = rel.dst_full_name
+
+        # provenance 行注入（doc 23.2 §5.4：照抄上面的行注入先例）——仅
+        # Table 节点带 source_id/publish_id；Column/边不注入（D3）
+        if provenance is not None:
+            source_id, publish_id = provenance
+            for row in tables_data:
+                row["source_id"] = source_id
+                row["publish_id"] = publish_id
+            provenance_set = (
+                "    n.source_id = t.source_id,\n"
+                "    n.publish_id = t.publish_id,\n"
+            )
+        else:
+            provenance_set = ""
+
+        tables_json = json.dumps(tables_data, ensure_ascii=False, indent=2)
+        columns_json = json.dumps(columns_data, ensure_ascii=False, indent=2)
+        has_column_json = json.dumps(has_column_data, ensure_ascii=False, indent=2)
+        join_on_json = json.dumps(join_on_data, ensure_ascii=False, indent=2)
+
+        content = f"""// import_all.{database_name}.cypher
+// Neo4j 元数据导入脚本（global 模式，包含所有表和关系）
+// 生成时间: {timestamp}
+// 统计: {len(tables)} 张表, {len(columns)} 个列, {len(join_on_rels)} 个关系
+
+// =====================================================================
+// 1. 创建唯一约束
+// =====================================================================
+
+	CREATE CONSTRAINT table_id IF NOT EXISTS FOR (t:Table) REQUIRE t.id IS UNIQUE;
+	CREATE CONSTRAINT table_full_name IF NOT EXISTS FOR (t:Table) REQUIRE t.full_name IS UNIQUE;
+	CREATE CONSTRAINT column_id IF NOT EXISTS FOR (c:Column) REQUIRE c.id IS UNIQUE;
+	CREATE CONSTRAINT column_full_name IF NOT EXISTS FOR (c:Column) REQUIRE c.full_name IS UNIQUE;
+
+// =====================================================================
+// 2. 创建 Table 节点
+// =====================================================================
+
+	UNWIND {tables_json} AS t
+	MERGE (n:Table {{full_name: t.full_name}})
+	SET n.id       = t.id,
+	    n.database = t.database,
+	    n.schema   = t.schema,
+	    n.name     = t.name,
+	    n.comment  = t.comment,
+	    n.object_type = t.object_type,
+	    n.pk       = t.pk,
+	    n.uk       = t.uk,
+    n.fk       = t.fk,
+    n.logic_pk = t.logic_pk,
+    n.logic_fk = t.logic_fk,
+    n.logic_uk = t.logic_uk,
+    n.indexes  = t.indexes,
+    n.table_domains = t.table_domains,
+{provenance_set}    n.table_category = CASE
+        WHEN t.table_category IS NOT NULL
+            THEN t.table_category
+        ELSE n.table_category
+    END;
+
+// =====================================================================
+// 3. 创建 Column 节点
+// =====================================================================
+
+	UNWIND {columns_json} AS c
+	MERGE (n:Column {{full_name: c.full_name}})
+	SET n.id           = c.id,
+	    n.database     = c.database,
+	    n.schema       = c.schema,
+	    n.table        = c.table,
+	    n.name         = c.name,
+	    n.comment      = c.comment,
+	    n.data_type    = c.data_type,
+	    n.semantic_role= c.semantic_role,
+    n.is_pk        = c.is_pk,
+    n.is_uk        = c.is_uk,
+    n.is_fk        = c.is_fk,
+    n.is_time      = c.is_time,
+    n.is_measure   = c.is_measure,
+    n.pk_position  = c.pk_position,
+    n.uniqueness   = c.uniqueness,
+    n.null_rate    = c.null_rate;
+
+// =====================================================================
+// 4. 建立 HAS_COLUMN 关系
+// =====================================================================
+
+UNWIND {has_column_json} AS hc
+MATCH (t:Table {{full_name: hc.table_full_name}})
+MATCH (c:Column {{full_name: hc.column_full_name}})
+MERGE (t)-[:HAS_COLUMN]->(c);
+
+// =====================================================================
+// 5. 建立 JOIN_ON 关系
+// =====================================================================
+
+UNWIND {join_on_json} AS j
+MATCH (src:Table {{full_name: j.src_full_name}})
+MATCH (dst:Table {{full_name: j.dst_full_name}})
+MERGE (src)-[r:JOIN_ON {{relationship_id: j.relationship_id}}]->(dst)
+SET r.cardinality     = j.cardinality,
+    r.constraint_name = j.constraint_name,
+    r.join_type       = coalesce(j.join_type, 'INNER JOIN'),
+    r.on              = j.on,
+    r.source_columns  = j.source_columns,
+    r.target_columns  = j.target_columns,
+    r.source_table    = j.source_table,
+    r.target_table    = j.target_table;
+"""
+
+        with open(output_file, "w", encoding="utf-8") as f:
+            f.write(content)
+
+        logger.info(f"生成 global 模式 CQL 脚本: {output_file}")
+        return output_file
+
+    def write_metadata(
+        self,
+        tables: List[TableNode],
+        columns: List[ColumnNode],
+        has_column_rels: List[HASColumnRelation],
+        join_on_rels: List[JOINOnRelation],
+        step_name: str,
+        json_dir: Path,
+        rel_dir: Path,
+        filter_stats: RelationshipFilterStats,
+        composite_score_threshold: Optional[float] = None,
+    ) -> Path:
+        """生成 import_all.md 元数据文档（最小必需字段）
+
+        Args:
+            tables: 表节点列表
+            columns: 列节点列表
+            has_column_rels: HAS_COLUMN 关系列表
+            join_on_rels: JOIN_ON 关系列表
+            step_name: 执行的步骤名称
+            json_dir: JSON 输入目录
+            rel_dir: 关系输入目录
+            filter_stats: 关系过滤统计（doc 18 §5，必传——否则 md 中
+                JOIN_ON 数与"最终 JOIN_ON 数"可能自相矛盾）
+            composite_score_threshold: 当前生效的置信度阈值（仅展示性信息，
+                可选;None 时 md 显示"未设置"）
+
+        Returns:
+            元数据文档路径
+
+        Note:
+            CQL 输出目录使用 self.output_dir，无需额外传递
+        """
+        database_name = self._resolve_database_name(tables, columns)
+        output_file = self.output_dir / f"import_all.{database_name}.md"
+
+        # 生成时间
+        timestamp = utc_isoformat(datetime.now(timezone.utc))
+
+        # 阈值展示(仅展示性信息,可选参数)
+        threshold_display = (
+            f"{composite_score_threshold:.4g}"
+            if composite_score_threshold is not None
+            else "未设置"
+        )
+
+        # ✅ 统计数据（使用准确的关系列表）
+        has_column_count = len(has_column_rels)
+        join_on_count = len(join_on_rels)
+        edges_total = has_column_count + join_on_count
+
+        # 最终 JOIN_ON 数必须等于 filter_stats.final_count。
+        # 用显式 ValueError(而非 assert——-O 运行会删除 assert,不能承担
+        # 产物正确性校验)
+        if join_on_count != filter_stats.final_count:
+            raise ValueError(
+                f"JOIN_ON 数与过滤统计不一致: {join_on_count} vs "
+                f"{filter_stats.final_count}"
+            )
+        stats = filter_stats
+
+        # ✅ 获取 import_all.{db}.cypher 的行数（完善的容错处理）
+        # 注意：此方法必须在 write_all() 之后调用，确保 Cypher 文件已生成
+        cypher_file = self.output_dir / f"import_all.{database_name}.cypher"
+        cypher_lines = 0
+        if cypher_file.exists():
+            try:
+                with open(cypher_file, "r", encoding="utf-8") as f:
+                    cypher_lines = sum(1 for _ in f)
+                logger.debug(f"成功读取 Cypher 文件行数: {cypher_lines}")
+            except Exception as e:
+                logger.warning(f"无法读取 Cypher 文件行数: {e}")
+                cypher_lines = 0  # 降级处理：设为 0
+        else:
+            logger.warning(
+                f"import_all.{database_name}.cypher 不存在，无法统计行数。"
+                f"路径: {cypher_file}"
+            )
+            cypher_lines = 0  # 降级处理：设为 0
+
+        # ✅ 生成最小必需内容
+        content = f"""# Neo4j CQL 导入脚本元数据
+
+> **自动生成文档**
+> 本文件记录 CQL 脚本的生成信息和统计数据。
+
+---
+
+## 生成信息
+
+- **生成时间**: {timestamp}
+- **生成命令**: `metaweave metadata --step {step_name}`
+- **CQL 置信度阈值**: {threshold_display}(composite_score >= 阈值才导入;物理外键直通不受限)
+- **导入 JOIN_ON 关系数**: {stats.final_count} 条(rel 候选 {stats.candidate_count} 条 → 通过阈值 {stats.threshold_passed_count} 条 → 去重后 {stats.final_count} 条)
+
+---
+
+## 统计数据
+
+### 节点
+
+| 节点类型 | 数量 |
+|---------|------|
+| Table | {len(tables)} |
+| Column | {len(columns)} |
+| **节点总数** | **{len(tables) + len(columns)}** |
+
+### 边
+
+| 边类型 | 数量 |
+|-------|------|
+| HAS_COLUMN | {has_column_count} |
+| JOIN_ON | {join_on_count} |
+| **边总数** | **{edges_total}** |
+
+### JOIN_ON 过滤统计
+
+| 统计项 | 数量 |
+|-------|------|
+| 候选关系数 | {stats.candidate_count} |
+| 通过阈值数 | {stats.threshold_passed_count} |
+| 被阈值过滤数 | {stats.threshold_filtered_count} |
+| 重复 relationship_id 组数 | {stats.duplicate_group_count} |
+| 去重丢弃数 | {stats.duplicate_discarded_count} |
+| 最终 JOIN_ON 数 | {stats.final_count} |
+
+---
+
+## 输入输出目录
+
+| 类型 | 路径 |
+|-----|------|
+| JSON 元数据 | `{json_dir}` |
+| 关系数据 | `{rel_dir}` |
+| CQL 输出 | `{self.output_dir}` |
+
+---
+
+## 输出文件
+
+| 文件名 | 行数 |
+|-------|------|
+| import_all.{database_name}.cypher | {cypher_lines} |
+| import_all.{database_name}.md | - |
+
+---
+
+**文档生成工具**: metaweave
+**文档版本**: 1.0
+"""
+
+        # 写入文件
+        with open(output_file, "w", encoding="utf-8") as f:
+            f.write(content)
+
+        logger.info(f"元数据文档已生成: {output_file}")
+        return output_file

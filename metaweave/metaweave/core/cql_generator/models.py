@@ -1,0 +1,243 @@
+"""Step 4 数据模型定义
+
+定义 Table、Column、Relationship 等 Neo4j 图数据模型。
+"""
+
+from dataclasses import dataclass, field
+from typing import List, Optional, Dict, Any
+
+
+@dataclass
+class ForeignKeyConstraint:
+    """外键约束"""
+    constraint_name: str
+    source_columns: List[str]
+    target_schema: str
+    target_table: str
+    target_columns: List[str]
+
+
+@dataclass
+class TableNode:
+    """Table 节点模型
+
+    对应 Neo4j 中的 Table 节点，包含表的所有属性。
+    """
+    # 必需属性
+    full_name: str  # schema.table（唯一键）
+    schema: str
+    name: str
+    database: Optional[str] = None
+
+    # 可选属性
+    comment: Optional[str] = None
+    # 数据库对象类型:table / view / materialized_view
+    # （doc 20 方案 A:与 JSON 契约键 object_info.object_type 统一）
+    object_type: str = "table"
+
+    # 约束和索引
+    pk: List[str] = field(default_factory=list)  # 物理主键
+    uk: List[List[str]] = field(default_factory=list)  # 物理唯一约束
+    fk: List[List[str]] = field(default_factory=list)  # 物理外键（只保留源列名）
+    logic_pk: List[List[str]] = field(default_factory=list)  # 候选逻辑主键
+    logic_fk: List[List[str]] = field(default_factory=list)  # 逻辑外键
+    logic_uk: List[List[str]] = field(default_factory=list)  # 逻辑唯一
+    indexes: List[List[str]] = field(default_factory=list)  # 索引
+    table_domains: List[str] = field(default_factory=list)  # 业务主题
+    table_category: Optional[str] = None  # 业务类型（fact/dim/bridge/unknown）
+
+    @property
+    def id(self) -> str:
+        """业务唯一标识：默认 schema.table；若提供 database 则为 {db}.{schema}.{table}"""
+        if self.database:
+            return f"{self.database}.{self.full_name}"
+        return self.full_name
+
+    def to_cypher_dict(self) -> Dict[str, Any]:
+        """转换为 Cypher 参数字典"""
+        return {
+            "id": self.id,
+            "database": self.database or "",
+            "full_name": self.full_name,
+            "schema": self.schema,
+            "name": self.name,
+            "comment": self.comment or "",
+            "object_type": self.object_type,
+            "pk": self.pk,
+            "uk": self.uk,
+            "fk": self.fk,
+            "logic_pk": self.logic_pk,
+            "logic_fk": self.logic_fk,
+            "logic_uk": self.logic_uk,
+            "indexes": self.indexes,
+            "table_domains": self.table_domains if self.table_domains else [],
+            "table_category": self.table_category,
+        }
+
+
+@dataclass
+class ColumnNode:
+    """Column 节点模型
+
+    对应 Neo4j 中的 Column 节点，包含列的所有属性。
+    """
+    # 必需属性
+    full_name: str  # schema.table.column（唯一键）
+    schema: str
+    table: str
+    name: str
+    data_type: str
+    database: Optional[str] = None
+
+    # 可选属性
+    comment: Optional[str] = None
+    semantic_role: Optional[str] = None
+
+    # 标志位
+    is_pk: bool = False
+    is_uk: bool = False
+    is_fk: bool = False
+    is_time: bool = False
+    is_measure: bool = False
+
+    # 位置和统计
+    pk_position: int = 0
+    uniqueness: float = 0.0
+    null_rate: float = 0.0
+
+    @property
+    def id(self) -> str:
+        """业务唯一标识：默认 schema.table.column；若提供 database 则为 {db}.{schema}.{table}.{col}"""
+        if self.database:
+            return f"{self.database}.{self.full_name}"
+        return self.full_name
+
+    def to_cypher_dict(self) -> Dict[str, Any]:
+        """转换为 Cypher 参数字典"""
+        return {
+            "id": self.id,
+            "database": self.database or "",
+            "full_name": self.full_name,
+            "schema": self.schema,
+            "table": self.table,
+            "name": self.name,
+            "comment": self.comment or "",
+            "data_type": self.data_type,
+            "semantic_role": self.semantic_role or "",
+            "is_pk": self.is_pk,
+            "is_uk": self.is_uk,
+            "is_fk": self.is_fk,
+            "is_time": self.is_time,
+            "is_measure": self.is_measure,
+            "pk_position": self.pk_position,
+            "uniqueness": self.uniqueness,
+            "null_rate": self.null_rate
+        }
+
+
+@dataclass
+class HASColumnRelation:
+    """HAS_COLUMN 关系模型
+
+    表示 Table -> Column 的包含关系。
+    """
+    table_full_name: str
+    column_full_name: str
+
+    def to_cypher_dict(self) -> Dict[str, Any]:
+        """转换为 Cypher 参数字典"""
+        return {
+            "table_full_name": self.table_full_name,
+            "column_full_name": self.column_full_name
+        }
+
+
+@dataclass
+class JOINOnRelation:
+    """JOIN_ON 关系模型
+
+    表示 Table -> Table 的关联关系。
+    """
+    # 关系身份（doc 18：JOIN_ON 边的身份属性，来自 rel 产物的 relationship_id）
+    relationship_id: str
+
+    # 源表和目标表
+    src_full_name: str
+    dst_full_name: str
+
+    # 关系属性
+    cardinality: str  # N:1, 1:1, M:N
+    join_type: str = "INNER JOIN"
+    on: str = ""  # 连接表达式
+
+    # 列信息
+    source_columns: List[str] = field(default_factory=list)
+    target_columns: List[str] = field(default_factory=list)
+
+    # 可选
+    constraint_name: Optional[str] = None
+
+    def to_cypher_dict(self) -> Dict[str, Any]:
+        """转换为 Cypher 参数字典
+
+        注意：
+        - src_full_name 和 dst_full_name 不包含在返回字典中
+        - 它们会在写入时临时添加，仅用于 MATCH 语句
+        - 边属性中使用 source_table 和 target_table 存储表名
+        """
+        return {
+            "relationship_id": self.relationship_id,
+            "source_table": self.src_full_name,
+            "target_table": self.dst_full_name,
+            "cardinality": self.cardinality,
+            "constraint_name": self.constraint_name,
+            "join_type": self.join_type,
+            "on": self.on,
+            "source_columns": self.source_columns,
+            "target_columns": self.target_columns
+        }
+
+
+@dataclass
+class RelationshipFilterStats:
+    """CQL 关系过滤与去重统计（doc 18 §5）
+
+    全部字段默认 0：生成失败路径、测试替身、其他直接构造结果对象的调用方
+    都获得稳定结构。
+    """
+
+    candidate_count: int = 0              # 候选关系数 = 全部条目
+    threshold_passed_count: int = 0       # 通过阈值数 = FK 直通豁免 + 达标推断
+    threshold_filtered_count: int = 0     # 被阈值过滤数 = 不达标推断
+    duplicate_group_count: int = 0        # 重复 relationship_id 组数
+    duplicate_discarded_count: int = 0    # 重复 ID 去重丢弃数
+    final_count: int = 0                  # 最终 JOIN_ON 数
+
+
+@dataclass
+class CQLGenerationResult:
+    """CQL 生成结果"""
+    success: bool
+    output_files: List[str] = field(default_factory=list)
+    tables_count: int = 0
+    columns_count: int = 0
+    has_column_count: int = 0
+    relationships_count: int = 0
+    errors: List[str] = field(default_factory=list)
+    filter_stats: RelationshipFilterStats = field(
+        default_factory=RelationshipFilterStats
+    )
+
+    def __str__(self) -> str:
+        status = "成功" if self.success else "失败"
+        total_edges = self.has_column_count + self.relationships_count
+        return (
+            f"CQL生成结果: {status}\n"
+            f"  - 表节点: {self.tables_count}\n"
+            f"  - 列节点: {self.columns_count}\n"
+            f"  - HAS_COLUMN 关系: {self.has_column_count}\n"
+            f"  - JOIN_ON 关系: {self.relationships_count}\n"
+            f"  - 边总数: {total_edges}\n"
+            f"  - 输出文件: {len(self.output_files)}\n"
+            f"  - 错误: {len(self.errors)}"
+        )

@@ -1,0 +1,260 @@
+# ==============================================================================
+# SQL 生成子图配置文件
+# ==============================================================================
+#
+# 说明：
+# - 本文件定义 SQL 生成子图的所有参数
+# - 基于 docs/sql_generation_subgraph_design.md v1.2
+# - 所有参数都可以通过环境变量覆盖
+#
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# 整体图调度控制
+# ------------------------------------------------------------------------------
+graph_control:
+  enabled: true                      # 是否启用 SQL 生成子图
+  total_timeout: 60                  # 子图总超时（秒）
+
+#
+# 说明：
+# - 本文件定义 SQL 生成子图的所有参数
+# - 基于 docs/sql_generation_subgraph_design.md v1.2
+# - 所有参数都可以通过环境变量覆盖
+#
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# Schema 检索配置
+# ------------------------------------------------------------------------------
+schema_retrieval:
+  # 表/列 Schema 向量检索配置（三条路径互不共用参数）
+  # 口径：Milvus 使用 table_schema_embeddings collection；pgvector 路径仍使用
+  # system.sem_object_vec。Top-K 指 Milvus limit=K 后再过滤，合格命中可能少于 K；
+  # 三组参数只控制 table_schema_embeddings 的表/列记录，不控制历史 SQL 或维度值检索
+  # table_schema_embeddings：表记录（object_type="table"）单次向量查询最多返回的候选数；Milvus limit 使用此值
+  table_schema_top_k: 10
+  # table_schema_embeddings：上述表候选在返回后须达到的最低相似度，决定哪些表命中参与候选表集合
+  table_schema_similarity_threshold: 0.45
+  # table_schema_embeddings：主列级检索查询列记录（object_type="column"）时，
+  # 单次最多返回的候选数；Milvus limit 使用此值，不控制 column 维度回填
+  column_schema_top_k: 10
+  # table_schema_embeddings：主列级检索返回的列候选须达到的最低相似度
+  column_schema_similarity_threshold: 0.45
+  # table_schema_embeddings：column 维度回填按每个去重后的 role="column" 文本查询列记录，
+  # 每次查询最多返回的候选数；Milvus limit 使用此值，不控制主列级检索
+  column_backfill_top_k: 10
+  # table_schema_embeddings：column 维度回填每次查询返回的列候选须达到的最低相似度
+  column_backfill_similarity_threshold: 0.65
+
+  # 维度值检索配置（pgvector 路径仍查询其既有 PG 表）
+  # dim_value_embeddings：每个非空 role="value" 文本向量检索最多返回的候选数；
+  # Milvus limit 直接使用此值，阈值过滤后可能少于该值
+  dim_value_top_k: 3
+  # dim_value_embeddings：上述候选返回后须达到的最低 COSINE 相似度；
+  # 达标且去重后写入 LLM prompt 的"维度值匹配"段
+  dim_value_similarity_threshold: 0.75
+
+  # 历史 SQL 案例检索：Milvus 查询 sql_example_embeddings；不影响表、列、维度值检索
+  sql_embedding_top_k: 3             # 向量检索最多返回的候选数（Milvus limit / PgVector LIMIT）
+  # 对上述数量参数限定的历史 SQL 候选，按相似度决定是否进入 LLM prompt
+  sql_similarity_threshold: 0.6      # 候选分数达到该值才保留（Milvus 返回后 / PgVector 查询时过滤）
+
+  # Neo4j JOIN 路径配置
+  join_max_hops: 5                   # 最大跳数（1..5）
+  join_strategy: apoc_dijkstra       # 策略：apoc_dijkstra | shortest_path | both
+  join_fallback_enabled: true        # 是否启用回退策略
+
+  # 表分类映射配置（三分类：事实表、维度表、桥接表）
+  # ===========================================================================
+  # 说明：
+  # 1. 用途：根据 system.sem_object_vec.table_category 字段值归类到三类表
+  # 2. 分类逻辑：
+  #    - fact（事实表）：可作为 base 表，通常包含业务交易/事件数据
+  #    - dimension（维度表）：可作为 base 表，通常包含维度描述信息
+  #    - bridge（桥接表）：不能作为 base 表，仅用于多对多关系连接
+  # 3. 映射规则：
+  #    - 大小写不敏感（内部会统一转为小写）
+  #    - 优先级：fact > bridge > dimension（按检查顺序）
+  #    - 未匹配类型默认归为 dimension（兜底策略）
+  # 4. 扩展方式：
+  #    - 若业务引入新的 table_category 值（如"快照表"、"临时表"等）
+  #    - 请将其添加到对应分类列表中
+  #    - 无需修改代码，配置即生效
+  # ===========================================================================
+  table_category_mapping:
+    fact:                                     # 归类为事实表
+      - "fact"                                # 英文标准值
+      - "事实表"                              # 中文标准值
+      - "交易表"                              # 业务别名（记录交易事件）
+      - "明细表"                              # 业务别名（明细级数据）
+      - "流水表"                              # 业务别名（流水记录）
+      - "快照表"                              # 业务别名（时点快照）
+      - "汇总表"                              # 业务别名（汇总事实）
+    dimension:                                # 归类为维度表
+      - "dim"
+      - "dimension"                           # 英文标准值
+      - "维度表"                              # 中文标准值
+      - "实体表"                              # 业务别名（业务实体）
+      - "枚举表"                              # 业务别名（枚举值表）
+      - "查找表"                              # 业务别名（lookup table）
+    bridge:                                   # 归类为桥接表
+      - "bridge"                              # 英文标准值
+      - "桥接表"                              # 中文标准值
+      - "关联表"                              # 业务别名（多对多关联）
+
+  # 维度表优化配置
+  similarity_gap_threshold: 0.05     # 相似度差距阈值（用于判断是否使用维度表优化）
+
+  # 超时配置
+  vector_search_timeout: 5           # 向量检索超时（秒）
+  graph_search_timeout: 5            # 图检索超时（秒）
+  total_timeout: 15                  # Schema 检索总超时（秒）
+
+  # --------------------------------------------------------------------------
+  # Milvus 向量检索参数（仅当 vector_database.active=milvus 时生效）
+  # --------------------------------------------------------------------------
+  # 当前默认：HNSW + COSINE（与 MetaWeave Loader 创建的索引一致）
+  # - 索引由 Loader 创建，当前实现固定 HNSW + COSINE（见 57/58 文档或 Loader 代码）
+  # - 搜索参数必须与索引类型匹配，否则会检索失败
+  # --------------------------------------------------------------------------
+  milvus_search_params:
+    metric_type: COSINE              # 必须与索引的 metric_type 一致
+    params:
+      ef: 100                        # HNSW 参数：越大召回越高，延迟越高；应 >= 上述各 top_k
+
+# ------------------------------------------------------------------------------
+# SQL 生成配置
+# ------------------------------------------------------------------------------
+sql_generation:
+  # LLM 配置（引用全局 llm_profiles 注册表）
+  # llm_profile: qwen3_max
+  llm_profile: qwen_plus
+  temperature: 0                     # 温度（0=确定性输出）
+  max_tokens: 2000                   # 最大 token 数
+
+  # 提示词配置
+  prompt:
+    # 提示词模板路径（相对于项目根目录）
+    template_path: src/prompts/sql_generation/generator_prompt.txt
+
+    # 上下文控制：prompt 段不另设数量截断
+
+    # 提示词增强
+    include_schema_hints: true       # 是否包含 Schema 提示（粒度、时间列等）
+    include_history_examples: true   # 是否包含历史案例
+    include_dim_value_hints: true    # 是否包含维度值提示
+
+  # 维度过滤优化
+  dimension_filter:
+    optimize_min_score: 0.4         # 维度值替换最小分数（默认0.5）
+
+  # SQL 生成策略
+  strategy:
+    prefer_explicit_joins: true      # 优先显式 JOIN
+    require_schema_prefix: true      # 强制表名包含 schema 前缀
+    use_half_open_interval: true     # 时间过滤使用半开区间（>= start AND < end）
+
+  # 依赖结果格式化配置
+  dependencies_formatting:
+    max_display_rows: 5              # 依赖结果最多显示行数
+    include_columns: true            # 是否包含列名
+
+  # --------------------------------------------------------------------------
+  # LLM 调用重试配置（生成节点内部重试）
+  # 说明：
+  # - 每次进入 SQL 生成节点时，若出现连接/超时失败或清洗后空结果，将在节点内进行重试
+  # - 重试为固定间隔，不做复杂退避；避免过度设计，满足瞬时网络抖动与服务端偶发波动的场景
+  # - 与图层的验证失败重试（retry.max_iterations）完全独立
+  # --------------------------------------------------------------------------
+  llm_retry:
+    max_attempts: 3                  # 单次进入生成节点时的 LLM 调用最大尝试次数（默认 3 次）
+    initial_delay_ms: 500            # 固定间隔：每次重试前等待的毫秒数（默认 500ms）
+
+  # 兼容旧字段（已弃用，保留以兼容历史配置；不再被代码读取）
+  # max_llm_retries: 2               # [deprecated]
+  # llm_retry_delay: 1               # [deprecated]（秒）
+
+# ------------------------------------------------------------------------------
+# SQL 验证配置
+# ------------------------------------------------------------------------------
+validation:
+  # 三层验证开关
+  enable_syntax_check: true          # 第1层：语法检查
+  enable_security_check: true        # 第2层：安全检查
+  enable_semantic_check: true        # 第3层：语义检查（EXPLAIN）
+
+  # 语法检查配置
+  syntax:
+    allow_multiple_statements: false # 是否允许多条SQL语句
+
+  # 安全检查配置
+  security:
+    # 允许的 SQL 类型
+    allowed_statement_types:
+      - SELECT
+      - WITH                         # CTE
+      - UNKNOWN                      # WITH...SELECT 的解析结果
+
+    # 禁止的关键字（使用词边界匹配）
+    forbidden_keywords:
+      - DROP
+      - DELETE
+      - TRUNCATE
+      - ALTER
+      - CREATE
+      - INSERT
+      - UPDATE
+      - GRANT
+      - REVOKE
+      - EXEC
+      - EXECUTE
+
+    # 注释检查
+    allow_comments: false            # 是否允许SQL中包含注释
+
+  # 语义检查配置
+  semantic:
+    # EXPLAIN 配置
+    explain_timeout: 5               # EXPLAIN 超时（秒）
+    explain_analyze: false           # 是否使用 EXPLAIN ANALYZE（实际执行）
+
+    # 性能警告阈值
+    warnings:
+      seq_scan_warn: true            # 顺序扫描警告
+      nested_loop_warn: true         # 嵌套循环警告
+      estimated_rows_threshold: 100000  # 预估行数阈值
+
+  # 验证失败处理
+  on_validation_failure:
+    include_explain_plan: true       # 是否在错误信息中包含 EXPLAIN 结果
+
+# ------------------------------------------------------------------------------
+# 重试机制配置
+# ------------------------------------------------------------------------------
+retry:
+  # 重试配置（针对验证失败后的 SQL 重新生成）
+  max_iterations: 3                  # 最大迭代次数（包含首次生成）
+  include_error_in_prompt: true      # 是否将错误信息反馈给 LLM
+
+  # 重试策略
+  strategy:
+    accumulate_errors: true          # 是否累积所有历史错误
+    max_errors_in_prompt: 5          # 提示词中最多包含的错误数量
+
+  # 早停配置
+  early_stop:
+    enabled: true                    # 是否启用早停
+    conditions:                      # 早停条件（满足任一即停止）
+      - same_sql_twice                # 生成了两次相同的 SQL
+      - same_error_twice              # 出现了两次相同的错误
+
+# ------------------------------------------------------------------------------
+# 问题解析配置
+# ------------------------------------------------------------------------------
+question_parsing:
+  llm_profile: qwen_plus
+  temperature: 0
+  max_tokens: 1500
+  enable_internal_parser: true      # 为 false 时跳过 LLM 解析
+  fallback_to_empty: true           # 解析失败时是否返回空结构继续流程

@@ -1,0 +1,90 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Distribution / packaging
+build/
+dist/
+.eggs/
+*.egg-info/
+*.egg
+
+# Virtual environments
+.venv/
+.venv-wsl/
+.venv-win/
+.venv-*/
+venv/
+ENV/
+env/
+
+# Environment variables
+.env
+.env.*
+!.env.example
+
+# Runtime output / logs / cache
+# output/ 整体忽略，但保留 db_domains.yaml 与 dim_tables.yaml（正式产物，需入库跟踪）
+output/*
+!output/domains/
+output/domains/*
+!output/domains/db_domains.yaml
+!output/dim_config/
+output/dim_config/*
+!output/dim_config/dim_tables.yaml
+logs/
+cache/
+.cache/
+*.log
+*.pid
+
+# Tests / coverage / static analysis
+.pytest_cache/
+tests/.tmp/
+.coverage
+.coverage.*
+coverage.xml
+coverage.json
+htmlcov/
+.ruff_cache/
+.mypy_cache/
+.hypothesis/
+.tox/
+.nox/
+.pyre/
+.pytype/
+
+# Generated backups / temporary files
+*.bak
+*.bak_*
+*.backup
+*.tmp
+*.temp
+*.orig
+*.rej
+
+# Local agent / assistant state
+.omo/
+.claude/settings.local.json
+
+# IDE
+.vscode/
+.idea/
+.history/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+._*
+*:Zone.Identifier
+
+# Frontend build and local configuration
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+frontend/.env*
+!frontend/.env.example

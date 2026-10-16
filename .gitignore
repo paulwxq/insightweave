@@ -1,0 +1,72 @@
+# InsightWeave 平台根 .gitignore
+# 规则覆盖所有层级的同名路径；模块级 .gitignore 可继续存在，
+# 更深层的规则优先于本文件（同一文件的规则后写的优先）。
+
+# ===== Python 虚拟环境 =====
+.venv/
+.venv-*/
+venv/
+env/
+ENV/
+
+# ===== 前端依赖与构建产物 =====
+node_modules/
+dist/
+.vite/
+
+# ===== Python 与工具缓存 =====
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.uv-cache/
+.hypothesis/
+
+# ===== 构建与安装生成物 =====
+*.egg-info/
+build/
+.eggs/
+
+# ===== 测试覆盖率产物 =====
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+coverage.json
+
+# ===== 日志 =====
+logs/
+*.log
+*.pid
+
+# ===== 运行产物目录 =====
+# 用 **/output/**（匹配 output 内部内容）而非 output/（排除目录本身），
+# 以免父目录被忽略导致 metaweave/.gitignore 中对人工维护文件的
+# 例外规则（output/domains/db_domains.yaml、output/dim_config/dim_tables.yaml）失效。
+**/output/**
+
+# ===== 含真实凭据的本地配置（安全模板除外）=====
+.env
+.env.*
+!.env.example
+!.env.template
+.aws/
+
+# ===== 本地代理/助手状态 =====
+.remember/
+.omo/
+.superpowers/
+**/.claude/settings.local.json
+
+# ===== 编辑器与操作系统杂项 =====
+.vscode/
+.idea/
+.history/
+.DS_Store
+Thumbs.db
+._*
+*.swp
+*.swo
+*~

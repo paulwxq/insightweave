@@ -1,0 +1,15 @@
+# Embedding 发布记录（冻结副本，docs/v4/5 §4.1）
+# ------------------------------------------------------------------------------
+# 本文件内容来自 RAG 入库／发布侧，本项目只保存冻结副本，不自行生成。
+# 入库模型只能取自该记录；不能根据“查询侧 profile 为 1024 维”或“集合向量字段
+# 为 1024 维”反推入库模型，维度一致只是必要条件。
+# TODO(release): release_batch 与 released_at 请替换为发布侧给出的真实批次标识
+# 与发布时间后冻结；正式评测前必须完成替换。
+# ------------------------------------------------------------------------------
+
+release_batch: "rag-2026-10-14-01"       # 发布批次标识，由发布侧给出
+milvus_database: nl2sql                  # 目标 Milvus 数据库
+collections:
+  table_schema_embeddings: {model: qwen3.7-text-embedding, dimensions: 1024, vector_field: embedding,           released_at: "2026-10-14"}
+  dim_value_embeddings:    {model: qwen3.7-text-embedding, dimensions: 1024, vector_field: col_value_embedding, released_at: "2026-10-14"}
+  sql_example_embeddings:  {model: qwen3.7-text-embedding, dimensions: 1024, vector_field: embedding,           released_at: "2026-10-14"}

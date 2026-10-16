@@ -1,0 +1,39 @@
+# 数据库业务主题配置
+database:
+  name: orders
+  description: 该数据库（orders）是一个融合了电商订单管理与电影院排片放映两大业务主题的综合性系统。在订单业务方面，涵盖了用户信息管理、商品分类维护、商品基础信息记录以及订单交易明细的存储，并通过物化视图对各类别商品的销售数量与金额进行汇总统计，以支持业务分析决策。在电影院业务方面，包含影厅的基础配置信息（如影厅名称、座位数）以及电影排片计划的管理（如放映场次、关联影厅、开始时间及影片名称）。整体而言，该数据库旨在为跨领域的业务运营提供统一的数据支撑与管理能力。
+llm_inference:
+  max_domains_per_table: 3
+domains:
+- name: _未分类_
+  description: 无法归入其他业务主题的表
+  tables: []
+- name: 用户管理
+  description: 负责管理系统中所有注册用户的基础身份信息，包括用户的唯一标识和显示名称，为订单等业务提供用户维度的数据支撑。
+  tables:
+  - orders.public.users
+- name: 商品管理
+  description: 负责维护系统中商品的基础信息及其所属分类体系，包括商品的唯一标识、名称以及类别编号与类别名称的定义。
+  tables:
+  - orders.public.categories
+  - orders.public.products
+- name: 订单交易
+  description: 负责记录和管理用户的下单行为及交易明细，涵盖订单创建日期、关联用户、购买商品、购买数量及精确到小数点后两位的交易总金额。
+  tables:
+  - orders.public.orders
+  - orders.public.users
+  - orders.public.products
+- name: 销售分析
+  description: 基于订单交易数据，通过物化视图按商品类别维度汇总统计销售总数量与销售总金额，为业务运营分析和决策提供数据支持。
+  tables:
+  - orders.public.mv_category_sales
+  - orders.public.categories
+- name: 影院管理
+  description: 负责管理电影院线下物理影厅的基础配置信息，包括影厅的唯一标识、影厅名称（如IMAX厅、VIP厅等）以及各影厅的总座位数量。
+  tables:
+  - orders.public.cinema_halls
+- name: 排片放映
+  description: 负责管理电影院的电影排片计划与放映场次安排，记录每场放映的关联影厅、放映开始时间以及所放映的电影中文标题。
+  tables:
+  - orders.public.screenings
+  - orders.public.cinema_halls

@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 34 34" width="34" height="34">
+  <g transform="translate(8.687 2.176)">
+    <path fill="url(#mw-logo-a)" d="M0 4.70475l0 11.22 5.6865 3.298 1.717-1.01575 0-1.44925-4.046-2.295 0-7.8965 4.99375-2.822 4.913 2.8475 0 3.298 3.332 1.8445 0-7.00825-8.20675-4.726-8.3895 4.70475z"/>
+  </g>
+  <g transform="translate(21.951 6.902)">
+    <path fill="url(#mw-logo-b)" d="M0 5.16375l3.332 1.8445 0-7.00825-3.332 1.86575 0 3.298z"/>
+  </g>
+  <g transform="translate(2.261 14.119)">
+    <path fill="url(#mw-logo-c)" d="M5.9245 0l-5.9245 3.451 0 9.50725 8.13025 4.641 7.31-4.32225 0-7.39925-3.24275 1.87425-0.01275 3.7315-4.02475 2.363-4.84075-2.771 0-5.67375 2.60525-1.5385 0-3.86325z"/>
+  </g>
+  <g transform="translate(12.512 12.516)">
+    <path fill="url(#mw-logo-d)" d="M0 0l0 3.5615 5.72475 3.502 0 7.44175 3.281-1.85725 0-7.35675-9.00575-5.29125z"/>
+  </g>
+  <g transform="translate(17.285 12.487)">
+    <path fill="url(#mw-logo-e)" d="M0.18275 2.4905l3.14925 1.87425 1.207-0.6885 6.545 3.63375 0 5.39325-4.72175 2.82625-3.094-1.79775-3.26825 1.8955 6.37925 3.7315 8.04525-4.78125 0-9.15875-9.86-5.41875-4.38175 2.4905z"/>
+  </g>
+  <defs>
+    <linearGradient id="mw-logo-a" gradientUnits="userSpaceOnUse" x1="1.283" y1="3.308" x2="15.565" y2="10.018">
+      <stop offset="0%" stop-color="#378BE6"/>
+      <stop offset="100%" stop-color="#1C579F"/>
+    </linearGradient>
+    <linearGradient id="mw-logo-b" gradientUnits="userSpaceOnUse" x1="0" y1="3.399" x2="3.335" y2="3.399">
+      <stop offset="0%" stop-color="#307DD6"/>
+      <stop offset="52.604%" stop-color="#205EAA"/>
+    </linearGradient>
+    <linearGradient id="mw-logo-c" gradientUnits="userSpaceOnUse" x1="1.63" y1="2.117" x2="13.285" y2="14.733">
+      <stop offset="0%" stop-color="#2D7DD5"/>
+      <stop offset="100%" stop-color="#20589D"/>
+    </linearGradient>
+    <linearGradient id="mw-logo-d" gradientUnits="userSpaceOnUse" x1="1.889" y1="0.796" x2="8.702" y2="12.387">
+      <stop offset="0%" stop-color="#2872C3"/>
+      <stop offset="100%" stop-color="#174684"/>
+    </linearGradient>
+    <linearGradient id="mw-logo-e" gradientUnits="userSpaceOnUse" x1="2.444" y1="1.682" x2="12.659" y2="15.46">
+      <stop offset="0%" stop-color="#276CBA"/>
+      <stop offset="100%" stop-color="#184785"/>
+    </linearGradient>
+  </defs>
+</svg>

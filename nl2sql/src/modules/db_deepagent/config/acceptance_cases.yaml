@@ -1,0 +1,123 @@
+# db_deepagent 固定验收题集（docs/v4/4；§18.3/§18.4）
+# 参考值为 2026-10-15 直连 orders 库独立冻结（非 Agent 答案）：
+#   冻结 SQL 见 assertions.reference_sql；复核时按相同口径直连重跑比对。
+fixed_now: "2026-10-13T12:00:00+08:00"
+
+business_cases:  # F01–F12：真实模型端到端
+  F01:
+    question: 统计 2026 年 9 月订单数量。
+    expect_status: [completed]
+    answer_contains: ["33"]
+    sql_regex_parts: [">=\\s*'2026-09-01'", "<\\s*'2026-10-01'"]
+    reference_sql: SELECT count(*) FROM orders WHERE order_date >= '2026-09-01' AND order_date < '2026-10-01'
+    reference_value: "33"
+  F02:
+    question: 统计 2026 年 9 月销售额，并说明采用的口径。
+    expect_status: [completed]
+    answer_contains: ["3317"]
+    sql_regex_parts: [">=\\s*'2026-09-01'", "<\\s*'2026-10-01'"]
+    reference_sql: SELECT sum(amount) FROM orders WHERE order_date >= '2026-09-01' AND order_date < '2026-10-01'
+    reference_value: "3317.00"
+  F03:
+    question: 按天列出 2026 年 9 月订单数，并按日期升序排列。
+    expect_status: [completed]
+    sql_regex: "order_date"
+    days_expected: 20
+    reference_sql: SELECT count(DISTINCT order_date) FROM orders WHERE order_date >= '2026-09-01' AND order_date < '2026-10-01'
+  F04:
+    question: 按商品类别统计 2026 年 9 月订单数和占比。
+    expect_status: [completed]
+    answer_contains: ["33", "类别09"]
+    reference_sql: >
+      SELECT c.category_name, count(*) FROM orders o
+      JOIN products p ON o.product_id = p.product_id
+      JOIN categories c ON p.category_id = c.category_id
+      WHERE o.order_date >= '2026-09-01' AND o.order_date < '2026-10-01'
+      GROUP BY c.category_name ORDER BY count(*) DESC
+    reference_value: "类别09=8 类别02=6 … 总计 33（9 个类别）"
+  F05:
+    question: 列出 2026 年 9 月订单金额最高的 5 家客户。
+    expect_status: [completed]
+    sql_regex: "JOIN"
+  F06:
+    question: 对比 2026 年 8 月与 9 月销售额，计算环比。
+    expect_status: [completed]
+    answer_contains: ["3317", "3013"]
+    reference_sql: >
+      SELECT (SELECT sum(amount) FROM orders WHERE order_date >= '2026-09-01' AND order_date < '2026-10-01')
+             - (SELECT sum(amount) FROM orders WHERE order_date >= '2026-08-01' AND order_date < '2026-09-01')
+    reference_value: "304.00"
+  F07:
+    question: 查询客户 60 在 2026 年 9 月的订单数和销售额。
+    expect_status: [completed]
+    sql_regex: "60"
+    reference_sql: SELECT count(*), sum(amount) FROM orders WHERE user_id = 60 AND order_date >= '2026-09-01' AND order_date < '2026-10-01'
+  F08:
+    question: 找出 2026 年 9 月订单金额最高的 3 家客户，再统计这些客户 8 月的订单数。
+    expect_status: [completed]
+    answer_contains: ["465", "224", "60", "15", "81"]  # 直连冻结参考：top3 = 60(465.00)/15(240.00)/81(224.00)
+    # 逐客户八月订单数（60→0/15→1/81→2）由测试读结果文件核对（文本正则在
+    # 数字与汉字间无 \b 边界且附近金额易误命中，见 _assert_f08_counts）
+    sql_regex_parts:                  # 证据 SQL 必须真实覆盖 8、9 两月边界（不手抄结论）
+      - "2026-08-01"
+      - "2026-09-01"
+      - "2026-10-01"
+    sql_regex_any:                    # 第二步范围须来自前序结果/子查询/JOIN，不得凭空
+      - 'IN \(SELECT'
+      - 'IN \(60'
+      - 'IN \(15'
+      - 'IN \(81'
+      - JOIN
+    reference_sql: >
+      WITH top3 AS (SELECT user_id, sum(amount) s FROM orders
+        WHERE order_date >= '2026-09-01' AND order_date < '2026-10-01'
+        GROUP BY user_id ORDER BY s DESC, user_id LIMIT 3)
+      SELECT user_id, s, (SELECT count(*) FROM orders o WHERE o.user_id = top3.user_id
+        AND o.order_date >= '2026-08-01' AND o.order_date < '2026-09-01') FROM top3
+    reference_value: "60=465.00(8月0单) 15=240.00(8月1单) 81=224.00(8月2单)"
+    note: 两步；后续范围须来自前序结果（占位符或子查询），不手抄
+  F09:
+    question: 同时统计 2026 年 9 月订单总数、销售额和客户数。
+    expect_status: [completed]
+    answer_contains: ["33", "3317", "27"]
+    reference_sql: >
+      SELECT count(*), sum(amount), count(DISTINCT user_id) FROM orders
+      WHERE order_date >= '2026-09-01' AND order_date < '2026-10-01'
+  F10:
+    question: 查询客户 999 在 2026 年 9 月的订单。
+    expect_status: [completed, no_data, needs_clarification]
+    forbid_sql_regex: "user_id\\s*(=|IN)\\s*(?!.*999)"
+    note: 不存在值：如实无匹配或澄清，不得替换/扩大条件
+  F11:
+    question: 列出 2026 年 9 月所有订单编号及金额；如不能一次展示完整结果，请说明如何继续读取。
+    expect_status: [completed, partial]
+    sql_regex: 'FROM (public\.)?orders'  # 必须真实查询订单表，不许凭空作答
+    answer_contains_any:              # 分页说明须可操作（任一表述即可）
+      - "read_result"
+      - "继续读取"
+      - "分页"
+    note: 分页说明或 read_result 轨迹；预览不冒充完整数据
+  F12:
+    question_round1: 统计 2026 年 9 月销售额。
+    question_round2: 再看 8 月，用相同口径计算两个月差额。
+    expect_status: [completed]
+    answer_contains: ["3013"]
+    note: 同会话两轮；第二轮继承口径、正确改时间
+
+# R01–R06、P01–P12：回归与协议边界，映射到既有 pytest nodeid
+# （CLI acceptance run 逐轮执行；连续三轮全过为通过线）
+regression_nodes:
+  - src/tests/db_deepagent/unit/test_time_resolver.py::TestSubstringAndAmbiguity::test_bare_current_rejected
+  - src/tests/db_deepagent/unit/test_time_resolver.py::TestRelativeBoundaries::test_today
+  - src/tests/db_deepagent/unit/test_time_resolver.py::TestRelativeBoundaries::test_this_month
+  - src/tests/db_deepagent/unit/test_sql_guard.py::TestDimRules::test_pattern_with_probe_evidence
+  - src/tests/db_deepagent/unit/test_dimension_probe.py::TestShapes::test_exact_shape
+protocol_nodes:
+  - src/tests/db_deepagent/unit/test_sql_pipeline_handoff.py::TestExecute::test_not_validated
+  - src/tests/db_deepagent/unit/test_sql_pipeline_handoff.py::TestValidate::test_valid_records_authorization_and_guard_snapshot
+  - src/tests/db_deepagent/unit/test_placeholders.py
+  - src/tests/db_deepagent/unit/test_result_analysis.py
+  - src/tests/db_deepagent/unit/test_business_db_pool.py
+  - src/tests/db_deepagent/unit/test_backend_permissions.py
+  - src/tests/db_deepagent/unit/test_result_store.py
+  - src/tests/db_deepagent/unit/test_assembly.py

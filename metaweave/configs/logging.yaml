@@ -1,0 +1,321 @@
+# MetaWeave 日志配置（按 step 拆分，不考虑兼容性）
+
+version: 1
+disable_existing_loggers: false
+
+formatters:
+  default:
+    format: '%(asctime)s - %(name)s - [%(step)s] - %(levelname)s - %(message)s'
+    datefmt: '%Y-%m-%d %H:%M:%S'
+
+  detailed:
+    format: '%(asctime)s - %(name)s - [%(step)s] - [%(filename)s:%(lineno)d] - %(levelname)s - %(message)s'
+    datefmt: '%Y-%m-%d %H:%M:%S'
+
+filters:
+  db_filter:
+    (): metaweave.utils.logger.StepFilter
+    allowed_steps: ['db']
+  ddl_filter:
+    (): metaweave.utils.logger.StepFilter
+    allowed_steps: ['ddl']
+  json_filter:
+    (): metaweave.utils.logger.StepFilter
+    allowed_steps: ['json']
+  md_filter:
+    (): metaweave.utils.logger.StepFilter
+    allowed_steps: ['md']
+  domain_filter:
+    (): metaweave.utils.logger.StepFilter
+    allowed_steps: ['domain']
+  rel_filter:
+    (): metaweave.utils.logger.StepFilter
+    allowed_steps: ['rel', 'rel_llm']
+  cql_filter:
+    (): metaweave.utils.logger.StepFilter
+    allowed_steps: ['cql']
+  generate_domains_filter:
+    (): metaweave.utils.logger.StepFilter
+    allowed_steps: ['generate-domains']
+  dim_config_filter:
+    (): metaweave.utils.logger.StepFilter
+    allowed_steps: ['dim_config']
+  sql_rag_generate_filter:
+    (): metaweave.utils.logger.StepFilter
+    allowed_steps: ['sql-rag-generate']
+  sql_rag_validate_filter:
+    (): metaweave.utils.logger.StepFilter
+    allowed_steps: ['sql-rag-validate']
+
+handlers:
+  # console handler 保持原样（不加 StepFilter），确保所有日志实时输出到终端
+  console:
+    class: logging.StreamHandler
+    level: INFO
+    formatter: default
+    stream: ext://sys.stdout
+
+  db_file:
+    class: logging.handlers.RotatingFileHandler
+    level: DEBUG
+    formatter: detailed
+    filename: logs/script/db.log
+    maxBytes: 10485760
+    backupCount: 5
+    encoding: utf8
+    filters: [db_filter]
+
+  ddl_file:
+    class: logging.handlers.RotatingFileHandler
+    level: DEBUG
+    formatter: detailed
+    filename: logs/script/ddl.log
+    maxBytes: 10485760
+    backupCount: 5
+    encoding: utf8
+    filters: [ddl_filter]
+
+  json_file:
+    class: logging.handlers.RotatingFileHandler
+    level: DEBUG
+    formatter: detailed
+    filename: logs/script/json.log
+    maxBytes: 10485760
+    backupCount: 5
+    encoding: utf8
+    filters: [json_filter]
+
+  md_file:
+    class: logging.handlers.RotatingFileHandler
+    level: DEBUG
+    formatter: detailed
+    filename: logs/script/md.log
+    maxBytes: 10485760
+    backupCount: 5
+    encoding: utf8
+    filters: [md_filter]
+
+  domain_file:
+    class: logging.handlers.RotatingFileHandler
+    level: DEBUG
+    formatter: detailed
+    filename: logs/script/domain.log
+    maxBytes: 10485760
+    backupCount: 5
+    encoding: utf8
+    filters: [domain_filter]
+
+  rel_file:
+    class: logging.handlers.RotatingFileHandler
+    level: DEBUG
+    formatter: detailed
+    filename: logs/script/rel.log
+    maxBytes: 10485760
+    backupCount: 5
+    encoding: utf8
+    filters: [rel_filter]
+
+  cql_file:
+    class: logging.handlers.RotatingFileHandler
+    level: DEBUG
+    formatter: detailed
+    filename: logs/script/cql.log
+    maxBytes: 10485760
+    backupCount: 5
+    encoding: utf8
+    filters: [cql_filter]
+
+  generate_domains_file:
+    class: logging.handlers.RotatingFileHandler
+    level: DEBUG
+    formatter: detailed
+    filename: logs/script/generate_domains.log
+    maxBytes: 10485760
+    backupCount: 5
+    encoding: utf8
+    filters: [generate_domains_filter]
+
+  dim_config_file:
+    class: logging.handlers.RotatingFileHandler
+    level: DEBUG
+    formatter: detailed
+    filename: logs/script/dim_config.log
+    maxBytes: 10485760
+    backupCount: 5
+    encoding: utf8
+    filters: [dim_config_filter]
+
+  sql_rag_generate_file:
+    class: logging.handlers.RotatingFileHandler
+    level: DEBUG
+    formatter: detailed
+    filename: logs/script/sql_rag_generate.log
+    maxBytes: 10485760
+    backupCount: 5
+    encoding: utf8
+    filters: [sql_rag_generate_filter]
+
+  sql_rag_validate_file:
+    class: logging.handlers.RotatingFileHandler
+    level: DEBUG
+    formatter: detailed
+    filename: logs/script/sql_rag_validate.log
+    maxBytes: 10485760
+    backupCount: 5
+    encoding: utf8
+    filters: [sql_rag_validate_filter]
+
+  # loader 日志：不使用 StepFilter，由下方 loggers 段按名称显式路由
+  loader_file:
+    class: logging.handlers.RotatingFileHandler
+    level: DEBUG
+    formatter: detailed
+    filename: logs/script/loader.log
+    maxBytes: 10485760
+    backupCount: 5
+    encoding: utf8
+
+loggers:
+  # MetaWeave 全局 logger：允许 DEBUG，所有子 logger 默认继承
+  metaweave:
+    level: DEBUG
+    handlers: []
+    propagate: true
+
+  # loader 隔离：以下 5 个 logger 只写 loader.log + console，不向上级传播
+  # - metaweave.loader / metaweave.core.loaders（通用 loader 工厂）
+  # - metaweave.dim_value.loader / metaweave.table_schema.loader / metaweave.core.sql_rag.loader
+  metaweave.loader:
+    level: DEBUG
+    handlers: [loader_file, console]
+    propagate: false
+
+  metaweave.core.loaders:
+    level: DEBUG
+    handlers: [loader_file, console]
+    propagate: false
+
+  metaweave.dim_value.loader:
+    level: DEBUG
+    handlers: [loader_file, console]
+    propagate: false
+
+  metaweave.table_schema.loader:
+    level: DEBUG
+    handlers: [loader_file, console]
+    propagate: false
+
+  metaweave.core.sql_rag.loader:
+    level: DEBUG
+    handlers: [loader_file, console]
+    propagate: false
+
+root:
+  level: INFO
+  handlers: [console, db_file, ddl_file, json_file, md_file, domain_file, rel_file,
+             cql_file, generate_domains_file, dim_config_file, sql_rag_generate_file,
+             sql_rag_validate_file]
+
+# ---------------------------------------------------------------------------
+# doc 15 统一日志管理：API 运行配置模板与后端模块注册表。
+#
+# 上面的 formatters/filters/handlers/loggers/root 仍是 script 运行配置的
+# 原始形态，由共享装载器（services/logging_manager.py）的 script 分支整段
+# 沿用；x_profiles.api 只被 api 分支读取，x_modules 是模块注册表。
+# 旧版 CLI 把本文件直接交给 dictConfig() 时会忽略这些未知顶层键。
+# ---------------------------------------------------------------------------
+x_profiles:
+  api:
+    formatters:
+      api_console:
+        format: '%(asctime)s %(levelname)s request_id=%(request_id)s app_module=%(app_module)s %(name)s - %(message)s'
+        datefmt: '%Y-%m-%d %H:%M:%S'
+
+      api_access:
+        format: '%(asctime)s %(levelname)s request_id=%(request_id)s app_module=%(app_module)s method=%(method)s route=%(route)s status_code=%(status_code)s outcome=%(outcome)s duration_ms=%(duration_ms)s'
+        datefmt: '%Y-%m-%d %H:%M:%S'
+
+      api_detailed:
+        format: '%(asctime)s %(levelname)s request_id=%(request_id)s app_module=%(app_module)s %(name)s [%(filename)s:%(lineno)d] - %(message)s'
+        datefmt: '%Y-%m-%d %H:%M:%S'
+
+      # uvicorn.error 专用：复用 Uvicorn 的 DefaultFormatter，保留 ERROR:
+      # 前缀与自动追加的 traceback。带 () 的自定义 formatter 走
+      # configure_custom 只传 kwargs，键名是 fmt 而非 format
+      uvicorn_stderr:
+        (): uvicorn.logging.DefaultFormatter
+        fmt: '%(levelprefix)s %(message)s'
+
+    filters:
+      api_context:
+        (): services.logging_manager.ApiContextFilter
+
+    handlers:
+      api_console:
+        class: logging.StreamHandler
+        level: INFO
+        formatter: api_console
+        stream: ext://sys.stdout
+        filters: [api_context]
+
+      api_file:
+        class: logging.handlers.RotatingFileHandler
+        level: INFO
+        formatter: api_access
+        filename: logs/api.log
+        maxBytes: 10485760
+        backupCount: 5
+        encoding: utf8
+        filters: [api_context]
+
+      # uvicorn.error 专用 stderr handler（formatter 见上方 uvicorn_stderr）
+      uvicorn_error_stderr:
+        class: logging.StreamHandler
+        stream: ext://sys.stderr
+        formatter: uvicorn_stderr
+
+    loggers:
+      # 请求摘要专用 logger：只写 api_file，不复制进后端文件
+      platform.http.access:
+        level: INFO
+        handlers: [api_file]
+        propagate: false
+
+      # 不写 level 键：保留 Uvicorn 按 --log-level 设置的有效级别；
+      # 只挂 stderr handler 且不传播，原始异常 traceback 不写项目文件
+      uvicorn.error:
+        handlers: [uvicorn_error_stderr]
+        propagate: false
+
+    root:
+      level: INFO
+      # 装载器会把注册表生成的每个后端文件 handler 追加到这里
+      handlers: [api_console]
+
+    # 每个注册模块的后端文件 handler 按此模板生成（filename 与 filters
+    # 由装载器填入；delay: true 使后端文件首次写入时才创建）
+    backend_handler_template:
+      class: logging.handlers.RotatingFileHandler
+      level: DEBUG
+      formatter: api_detailed
+      maxBytes: 10485760
+      backupCount: 5
+      encoding: utf8
+      delay: true
+
+x_modules:
+  # 兜底模块：接收未归属的项目/共享代码记录（必须注册）
+  platform:
+    backend_file: logs/backend/platform.log
+
+  metaweave:
+    backend_file: logs/backend/metaweave.log
+    api_route_prefixes:
+      - /api/data-sources
+      - /api/data-assets
+    # backend.api 是共享异常处理器 logger，不注册前缀：
+    # 请求内由上下文决定归属，无请求上下文时归 platform
+    logger_prefixes:
+      - metaweave
+      - backend.publishing
+      - backend.profile_loading

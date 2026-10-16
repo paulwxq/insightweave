@@ -1,0 +1,378 @@
+# ==============================================================================
+# NL2SQL v3 系统级配置文件
+# ==============================================================================
+#
+# 说明：
+# - 使用 ${VAR_NAME:default} 语法引用环境变量，支持默认值
+# - 敏感信息（密码、API Key）通过 .env 文件加载
+# - 本文件可提交到 Git，不包含敏感信息
+#
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# 数据库配置（PostgreSQL + pgvector）
+# ------------------------------------------------------------------------------
+database:
+  host: ${DB_HOST:localhost}
+  port: ${DB_PORT:5432}
+  database: ${DB_NAME:nl2sql}
+  user: ${DB_USER:postgres}
+  password: ${DB_PASSWORD}           # 从 .env 加载
+  schema: public                     # 默认 schema
+
+  # 连接池配置
+  pool_min_size: 5                   # 最小连接数
+  pool_max_size: 20                  # 最大连接数
+  pool_timeout: 30                   # 连接超时（秒）
+  command_timeout: 60                # 命令执行超时（秒）
+
+  # 重试配置
+  max_retries: 3                     # 最大重试次数
+  retry_delay: 1                     # 重试延迟（秒）
+
+# ------------------------------------------------------------------------------
+# Neo4j 图数据库配置
+# ------------------------------------------------------------------------------
+neo4j:
+  uri: ${NEO4J_URI:bolt://localhost:7687}
+  user: ${NEO4J_USER:neo4j}
+  password: ${NEO4J_PASSWORD}        # 从 .env 加载
+  database: ${NEO4J_DATABASE:neo4j}
+
+  # 连接池配置
+  max_connection_lifetime: 3600      # 连接最大生命周期（秒）
+  max_connection_pool_size: 50       # 最大连接池大小
+  connection_timeout: 30             # 连接超时（秒）
+
+  # 查询配置
+  max_transaction_retry_time: 30     # 事务最大重试时间（秒）
+
+# ------------------------------------------------------------------------------
+# Embedding 画像注册表（通过 provider 引用 llm_providers 的连接信息）
+# ------------------------------------------------------------------------------
+embedding_profiles:
+  active: qwen3_7_text_embedding     # 当前使用的默认 Embedding profile
+
+  # ⚠️ 查询侧模型必须与 RAG 发布侧写入 Milvus 的模型一致（同维不同模型 =
+  # 不同向量空间，COSINE 得分全线 ~0）。发布侧 2026-10 使用 qwen3.7-text-embedding。
+  qwen3_7_text_embedding:
+    provider: dashscope              # 引用 llm_providers.dashscope
+    model: qwen3.7-text-embedding    # 模型名称（与 RAG 发布侧一致）
+    dimensions: 1024                 # 向量维度（必须与数据库一致）
+    batch_size: 20                   # 批处理大小
+    timeout: 30                      # API 超时（秒）
+    max_retries: 3                   # 最大重试次数
+
+  text_embedding_v3:
+    provider: dashscope              # 引用 llm_providers.dashscope
+    model: text-embedding-v3         # 模型名称
+    dimensions: 1024                 # 向量维度（必须与数据库一致）
+    batch_size: 20                   # 批处理大小
+    timeout: 30                      # API 超时（秒）
+    max_retries: 3                   # 最大重试次数
+
+# ------------------------------------------------------------------------------
+# 向量数据库配置（用于 SQL 生成子图的向量检索）
+# ------------------------------------------------------------------------------
+vector_database:
+  # 当前激活的向量数据库类型
+  active: milvus                   # 可选值: pgvector | milvus
+
+  # 提供商配置
+  providers:
+    # PgVector 配置（复用 database 配置）
+    pgvector:
+      use_global_config: true        # 使用全局 database 配置
+      schema: system                 # 向量数据存储的 schema
+
+    # Milvus 配置
+    milvus:
+      host: ${MILVUS_HOST:localhost}
+      port: ${MILVUS_PORT:19530}
+      database: ${MILVUS_DATABASE:nl2sql}  # Milvus database（等价于 PostgreSQL 的 schema）
+      user: ${MILVUS_USER:}          # 可选，开源版通常无认证
+      password: ${MILVUS_PASSWORD:}  # 可选
+      alias: default                 # 连接别名
+
+      # 连接选项
+      timeout: 30                    # 连接超时（秒）
+      shards_num: 2                  # Collection 分片数
+
+# ------------------------------------------------------------------------------
+# 日志配置（已废弃）
+# ------------------------------------------------------------------------------
+# [DEPRECATED] 以下 logging 段落不再被运行时代码读取。
+# 项目唯一生效的日志配置入口为 src/configs/logging.yaml（dictConfig 格式）。
+# 保留此段仅供历史参考，后续版本将彻底移除。
+# logging:
+#   level: ${LOG_LEVEL:INFO}
+#   format: "%(asctime)s [%(levelname)s] %(name)s:%(lineno)d - %(message)s"
+#   file:
+#     enabled: true
+#     path: ${LOG_FILE:logs/app/nl2sql.log}
+#     max_bytes: 10485760
+#     backup_count: 10
+#   console:
+#     enabled: true
+#     colored: true
+#   third_party_level: WARNING
+
+# ------------------------------------------------------------------------------
+# 监控配置（LangSmith）
+# ------------------------------------------------------------------------------
+monitoring:
+  enabled: false                     # 是否启用 LangSmith 监控
+  api_key: ${LANGSMITH_API_KEY}      # LangSmith API Key
+  project: ${LANGSMITH_PROJECT:nl2sql-v3}
+  endpoint: https://api.smith.langchain.com
+
+  # 追踪配置
+  tracing:
+    enabled: false                   # 是否启用追踪
+    sample_rate: 1.0                 # 采样率（0.0-1.0）
+
+  # 指标配置
+  metrics:
+    enabled: false                   # 是否启用指标收集
+    flush_interval: 60               # 指标推送间隔（秒）
+
+# ------------------------------------------------------------------------------
+# 缓存配置（Redis，可选）
+# ------------------------------------------------------------------------------
+cache:
+  enabled: false                     # 是否启用 Redis 缓存
+  backend: redis                     # 缓存后端：redis
+
+  redis:
+    host: ${REDIS_HOST:localhost}
+    port: ${REDIS_PORT:6379}
+    password: ${REDIS_PASSWORD}
+    db: ${REDIS_DB:0}
+    socket_timeout: 5                # Socket 超时（秒）
+    socket_connect_timeout: 5        # 连接超时（秒）
+
+  # 默认 TTL
+  default_ttl: 3600                  # 1小时
+
+# ------------------------------------------------------------------------------
+# LangGraph 持久化配置（Checkpoint + Store）
+# ------------------------------------------------------------------------------
+langgraph_persistence:
+  enabled: true                      # 总开关（当前已启用）
+
+  # 数据库连接（复用 database.* 或独立配置）
+  database:
+    use_global_config: false          # true: 从 database.* 组装 URI；false: 使用下方独立参数
+
+    # 独立连接参数（use_global_config=false 时生效）
+    host: ${LANGGRAPH_DB_HOST:localhost}
+    port: ${LANGGRAPH_DB_PORT:5432}
+    database: ${LANGGRAPH_DB_NAME:lg_persist}
+    user: ${LANGGRAPH_DB_USER:postgres}
+    password: ${LANGGRAPH_DB_PASSWORD:}
+
+    schema: public                   # 当前使用 public schema（后续可迁移至独立 schema）
+    sslmode: disable                 # 可选：disable/require/verify-ca 等
+    connect_timeout: 5               # 连接超时（秒），防止连接阶段卡死
+    statement_timeout_ms: 5000       # SQL 执行超时（毫秒），防止写入卡死
+
+  # Checkpoint 配置
+  checkpoint:
+    father_enabled: true             # 父图 checkpoint 开关（默认开启）
+    subgraph_enabled: false          # 子图 checkpoint 开关（默认关闭）
+    # 注意：受限于当前库版本，父图作为根节点，实际在 DB 中仍使用空字符串作为 namespace
+    # father_namespace: nl2sql_father  # 父图 checkpoint_ns
+    subgraph_namespace: sql_generation  # 子图 checkpoint_ns 前缀
+
+  # Store 配置（本阶段仅写入历史对话，不规划读取）
+  store:
+    enabled: true                    # store 组件开关（当前已启用）
+    namespace: chat_history          # 历史对话 namespace
+    retention_days: 90               # 预留：后续清理策略
+    write_timeout: 2                 # 写入超时（秒）
+
+# ------------------------------------------------------------------------------
+# API 服务配置
+# ------------------------------------------------------------------------------
+api:
+  max_recent_sessions: 5             # 前端界面侧边栏最多显示的历史会话数量
+
+# ------------------------------------------------------------------------------
+# LLM Provider 连接参数（每个 provider 只写一次）
+#
+# 关于 API Key 配置：
+# - ${VAR_NAME} 格式：环境变量未设置时，该字段值为 None（不影响启动）
+#   只有在代码实际调用 get_llm("profile_name") 时才会校验并报错。
+# - ${VAR_NAME:default} 格式：环境变量未设置时使用默认值。
+# - 因此可以在此处预先写入任意 provider 的配置，未设置对应 API Key 时
+#   系统正常启动，仅在调用该 provider 时才会提示缺少 API Key。
+# ------------------------------------------------------------------------------
+llm_providers:
+  dashscope:
+    api_key: ${DASHSCOPE_API_KEY}
+    # base_url 无需配置（DashScope 原生 SDK 自动管理路由）
+    # 若需切换至 OpenAI 兼容模式，可设置：
+    #   base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+
+  dashscope_openai:
+    api_key: ${DASHSCOPE_API_KEY}
+    base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+
+  # 未来接入时取消注释并配置对应环境变量：
+  # openai:
+  #   api_key: ${OPENAI_API_KEY}
+  #   base_url: https://api.openai.com/v1   # 可省略，使用官方默认地址
+
+  # openrouter:
+  #   api_key: ${OPENROUTER_API_KEY}
+  #   base_url: https://openrouter.ai/api/v1  # 必填
+
+  deepseek:
+    api_key: ${DEEPSEEK_API_KEY}
+    base_url: ${DEEPSEEK_BASE_URI:https://api.deepseek.com}  # 从 .env 读取，默认官方端点
+
+  minimax:
+    api_key: ${MINIMAX_API_KEY}
+    base_url: https://api.minimaxi.com/v1
+
+# ------------------------------------------------------------------------------
+# Chat LLM 画像注册表
+#
+# 必填字段：
+#   provider  - 引用 llm_providers 中的 key（如 dashscope / openai / openrouter / deepseek）
+#   model     - 模型名称（如 qwen-plus / gpt-4o / deepseek-chat / deepseek-reasoner）
+#
+# 可选参数（所有 provider 通用）：
+#   temperature    - 采样温度，控制输出随机性，取值 [0, 2)，默认由模型决定
+#                    注意：DeepSeek 思考模式下（deepseek-reasoner 或开启 thinking 的 deepseek-chat）
+#                    传入 temperature 不报错，但服务端会忽略，实际不生效
+#   top_p          - 核采样概率阈值，取值 (0, 1]，与 temperature 选其一调整
+#                    注意：同上，DeepSeek 思考模式下不生效
+#   max_tokens     - 最大输出 Token 数，默认为模型上限
+#                    注意：DeepSeek 思考模式下含思维链输出，建议设 ≥ 32768（最大 64K）
+#   stream         - 是否流式输出，true/false，映射为 LangChain streaming 参数
+#   response_format - 返回格式，如 {type: json_object} 或 {type: text}
+#
+# DashScope 专用参数（provider: dashscope 时有效，其他 provider 传入会报错）：
+#   enable_thinking  - 是否开启深度思考模式（适用于 Qwen3/Qwen3.5 系列），true/false
+#   enable_search    - 是否开启联网搜索，true/false
+#   search_options   - 联网搜索策略，仅 enable_search: true 时生效，可配置子字段：
+#     enable_source    - 是否在返回结果中展示搜索来源，true/false
+#     enable_citation  - 是否开启角标标注，true/false
+#     forced_search    - 是否强制搜索（不让模型自行判断），true/false
+#     search_strategy  - 搜索策略：turbo（默认）/ max / agent / agent_max
+#
+# DeepSeek 专用参数（provider: deepseek 时有效，其他 provider 传入会报错）：
+#   thinking         - 思考模式配置，格式：{type: enabled} 或 {type: disabled}
+#                      注意：使用 model: deepseek-reasoner 会自动开启思考，无需此参数
+#                      注意：思考模式下 temperature/top_p 传入不报错但不生效
+#
+# OpenAI 兼容 provider 专用参数（provider: openai / openrouter / deepseek）：
+#   timeout  - 请求超时秒数，映射为 LangChain request_timeout 参数
+#              （DashScope 不支持此参数，传入会报错）
+#
+# 参数优先级：节点级 override > profile 中定义的值 > LangChain/SDK 自身默认值
+# ------------------------------------------------------------------------------
+llm_profiles:
+  qwen_turbo:
+    provider: dashscope
+    model: qwen-turbo
+
+  qwen_plus:
+    provider: dashscope
+    model: qwen-plus
+
+  qwen_max:
+    provider: dashscope
+    model: qwen-max
+
+  qwen3_max:
+    provider: dashscope
+    model: qwen3-max
+    # enable_thinking 默认为 false（qwen3-max 系列默认关闭思考模式，无需显式声明）
+    # streaming 默认为 false（LangChain ChatTongyi 默认非流式）
+    # 注意：qwen3-max 已于 2026-10 下线（API 404），保留仅供历史配置参考
+
+  qwen3_8_max:
+    provider: dashscope_openai
+    model: qwen3.8-max
+    # 2026-10-15 新增：qwen3-max 下线后的替代（db_deepagent 初始 profile）。
+    # 实测 qwen3.8-max 仅在 compatible-mode 服务（原生 Generation API 返回
+    # 400 url error），故走 dashscope_openai（ChatOpenAI 兼容模式，doc 5 K5：
+    # 匹配键 openai:qwen3.8-max）
+    enable_thinking: false           # 显式关闭；兼容模式下 thinking 默认行为随模型变化，勿依赖默认值
+
+  qwen3_5_plus:
+    provider: dashscope_openai
+    model: qwen3.5-plus
+    enable_thinking: false           # qwen3.5-plus 默认开启 thinking，此处显式关闭
+
+  # 示例：开启深度思考的 Qwen3 profile
+  # qwen3_thinking:
+  #   provider: dashscope
+  #   model: qwen3-plus
+  #   enable_thinking: true
+  #   temperature: 0.6
+  #   top_p: 0.95
+
+  # 示例：带联网搜索的 profile
+  # qwen_plus_search:
+  #   provider: dashscope
+  #   model: qwen-plus
+  #   enable_search: true
+  #   search_options:
+  #     enable_source: true
+  #     search_strategy: turbo
+
+  # 示例：OpenRouter profile（需在 llm_providers 中取消注释 openrouter）
+  # claude_sonnet:
+  #   provider: openrouter
+  #   model: anthropic/claude-3.5-sonnet
+  #   temperature: 0.7
+  #   max_tokens: 4096
+
+  # 示例：DeepSeek V3 profile（需在 llm_providers 中取消注释 deepseek）
+  deepseek_chat:
+    provider: deepseek
+    model: deepseek-chat      # DeepSeek-V3.2 非思考模式；支持 temperature/top_p
+    temperature: 0
+    max_tokens: 8192
+    timeout: 60
+
+  # 示例：DeepSeek-R1 思考模式（deepseek-reasoner = DeepSeek-V3.2 思考模式固定开启）
+  deepseek_reasoner:
+    provider: deepseek
+    model: deepseek-reasoner  # 无需 thinking 参数，思考已内置
+    max_tokens: 32768         # 含思维链输出，最大 64K
+    # 注意：temperature/top_p 传入不报错但完全不生效，建议不要配置
+
+  # 示例：deepseek-chat 手动开启思考模式（与 deepseek-reasoner 等价，但更灵活）
+  # deepseek_chat_thinking:
+  #   provider: deepseek
+  #   model: deepseek-chat
+  #   thinking:                 # 通过 extra_body 传给 API
+  #     type: enabled
+  #   max_tokens: 32768
+  #   # 注意：开启 thinking 后 temperature/top_p 同样不生效
+
+  # MiniMax 系列（OpenAI 兼容接口）
+  # 注意：temperature 范围 (0.0, 1.0]，不能设为 0，推荐 1.0
+  minimax_m21:
+    provider: minimax
+    model: MiniMax-M2.1
+    temperature: 1.0
+    # max_tokens 不设置，使用模型默认上限（204,800 上下文）
+
+  minimax_m25:
+    provider: minimax
+    model: MiniMax-M2.5
+    temperature: 1.0
+    # max_tokens 不设置，使用模型默认上限（204,800 上下文）
+
+# ------------------------------------------------------------------------------
+# 开发/调试配置
+# ------------------------------------------------------------------------------
+development:
+  debug: ${DEBUG:false}              # 是否启用调试模式
+  reload: false                      # 是否启用热重载
+  profiling: false                   # 是否启用性能分析
