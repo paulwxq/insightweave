@@ -1,6 +1,18 @@
 """Neo4j CQL 加载器
 
 加载 Step 4 生成的 import_all.cypher 文件到 Neo4j 图数据库。
+
+doc 4（多数据源知识隔离）改造：
+- 清理完全由节点归属驱动：删除所有无 source_id 的节点，以及
+  source_id 等于本次发布的节点，均不限制 label；DETACH DELETE 连带删除
+  关联关系，其他源节点及两端都保留的关系不动；
+- 清理、写入、按源核验在**同一个数据事务**内完成：任一步失败整体回滚，
+  图保持原状（§4.5 B 发布事务边界）；约束语句在数据事务之外逐条幂等执行
+  （Neo4j 不允许数据事务内混入 schema 命令）；
+- 加载拒绝旧格式脚本（缺 ``// source_id:`` 头）；构造传入的 source_id 与
+  脚本头不一致时在清理之前拒绝；
+- 数量核验按当前 source_id 统计 Table/Column/JOIN_ON/HAS_COLUMN，作为
+  事务提交前的最后一步。
 """
 
 from pathlib import Path
@@ -11,6 +23,7 @@ import time
 import logging
 
 from metaweave.utils.file_utils import resolve_project_path
+from metaweave.utils.source_id import normalize_source_id
 from metaweave.core.loaders.base import BaseLoader
 from services.db.neo4j_connection import Neo4jConnectionManager
 from neo4j.exceptions import Neo4jError
@@ -19,11 +32,88 @@ logger = logging.getLogger(__name__)
 
 
 class CQLScriptValidationError(ValueError):
-    """CQL 脚本核验拒绝（doc 23.2 §5.5-2）：截断/缺必需章节/缺统计头。
+    """CQL 脚本核验拒绝（doc 23.2 §5.5-2 + doc 4 §4.4）：截断/缺必需章节/
+    缺统计头/缺 source_id 头/来源不一致。
 
     ValueError 子类使发布侧可在通用 ``except Exception`` 之前单列分流——
-    本异常恒在 ``_clean_database`` 之前抛出（图未动），失败不撤销 current。
+    本异常恒在任何图写入之前抛出（图未动），失败不撤销 current。
     """
+
+
+class _RolledBackWorkError(Exception):
+    """数据事务回调内部的失败——提交状态**确认未提交**（已回滚）。
+
+    回调内任何异常经本类包装后上抛：driver 对回调内异常不再重试、
+    直接回滚事务，因此图保持原状。与之相对，回调成功返回
+    后 COMMIT 阶段的失败（如 ``IncompleteCommit``/``SessionExpired``）
+    提交状态不可知，不得包装为本类——发布侧须按"可能已提交"保守处理。
+    """
+
+    def __init__(self, original: BaseException):
+        super().__init__(str(original))
+        self.original = original
+
+
+def normalize_neo4j_section(neo4j_section: Dict[str, Any]) -> Dict[str, Any]:
+    """校验并规范化 ``loaders.cql_loader.neo4j`` 配置段（共享严格边界）。
+
+    uri 走 ``normalize_neo4j_uri``；database 键缺失才用默认库，存在时必须
+    是非空字符串。CQLLoader 与一次性迁移脚本共用同一判定。
+    """
+    if not neo4j_section:
+        raise ValueError(
+            "缺少 neo4j 配置段：请在 metadata_config.yaml 的 "
+            "loaders.cql_loader.neo4j 中配置 Neo4j 连接信息。"
+        )
+    from metaweave.core.clean_targets import normalize_neo4j_uri
+
+    try:
+        safe_uri = normalize_neo4j_uri(neo4j_section["uri"])
+    except (ValueError, KeyError) as e:
+        raise ValueError(f"loaders.cql_loader.neo4j.uri 非法: {e}") from None
+
+    if "database" in neo4j_section:
+        raw_database = neo4j_section["database"]
+        if not isinstance(raw_database, str) or not raw_database.strip():
+            raise ValueError(
+                "loaders.cql_loader.neo4j.database 必须是非空字符串或省略该键"
+                f"（实际为 {type(raw_database).__name__}；省略时使用默认库 neo4j）"
+            )
+        database = raw_database.strip()
+    else:
+        database = "neo4j"
+
+    return {
+        "uri": safe_uri,
+        "user": neo4j_section["user"],
+        "password": neo4j_section["password"],
+        "database": database,
+    }
+
+
+# 节点归属驱动的清理：不限制 label，删除所有无 source_id 的节点和本次
+# 发布 source_id 的节点；DETACH DELETE 一并删除关联关系。两个端点都保留
+# 的关系不会被这条语句触碰。
+_CLEAN_NODES = (
+    "MATCH (n) WHERE n.source_id IS NULL OR n.source_id = $source_id "
+    "DETACH DELETE n"
+)
+
+# 按源统计（提交前核验；HAS_COLUMN 单查避免两次 OPTIONAL MATCH 行积）。
+# 首段之后的段必须 OPTIONAL：零匹配（如该源无列）时保留行，count 记 0，
+# 否则 MATCH 消灭全部行使核验读不到任何记录
+_SOURCE_STATS_MAIN = """
+    MATCH (t:Table) WHERE t.source_id = $source_id
+    WITH count(t) AS table_count
+    OPTIONAL MATCH (c:Column) WHERE c.source_id = $source_id
+    WITH table_count, count(c) AS column_count
+    OPTIONAL MATCH ()-[r:JOIN_ON]->() WHERE r.source_id = $source_id
+    RETURN table_count, column_count, count(r) AS relationship_count
+"""
+_SOURCE_STATS_HAS_COLUMN = (
+    "MATCH ()-[h:HAS_COLUMN]->() WHERE h.source_id = $source_id "
+    "RETURN count(h) AS has_column_count"
+)
 
 
 class CQLLoader(BaseLoader):
@@ -32,23 +122,28 @@ class CQLLoader(BaseLoader):
     加载 Step 4 生成的 import_all.cypher 文件到 Neo4j 图数据库。
 
     特性:
-    - 支持全局配置和自定义配置两种方式
-    - 按章节拆分执行，便于错误定位
-    - 支持单事务和分段事务两种模式
-    - 幂等性保证（使用 MERGE 和 IF NOT EXISTS）
-    - 可选的加载后验证
-    - 支持清空数据库后加载
+    - 按节点归属清理：删除所有无 source_id 节点和本次 source_id 节点
+      （不限制 label），DETACH DELETE 连带删除关联关系
+    - 单一数据事务内清理 → 写入 → 按源核验
+    - 幂等性保证（MERGE + IF NOT EXISTS 约束）
+    - 约束语句事务外逐条执行（幂等）
     """
 
-    def __init__(self, config: Dict[str, Any]):
+    def __init__(self, config: Dict[str, Any], source_id=None):
         """初始化 CQL 加载器
 
         Args:
             config: 配置字典，必须包含 cql_loader 字段
+            source_id: 本次发布的 source_id（后端已验证；受管发布链路注入）。
+                缺省时从脚本头 ``// source_id:`` 解析（CLI 调试路径）。
         """
         super().__init__(config)
         self.neo4j_config = self._get_neo4j_config()
         self.neo4j_manager: Optional[Neo4jConnectionManager] = None
+        # 后端传入的删除范围（doc 4 §4.4-2：删除目标必须是已验证的 source_id）
+        self.source_id: Optional[str] = (
+            None if source_id is None else str(normalize_source_id(source_id))
+        )
 
         # 获取输入文件路径
         cql_config = self.config.get("cql_loader", {})
@@ -90,49 +185,11 @@ class CQLLoader(BaseLoader):
         return True
 
     def _get_neo4j_config(self) -> Dict[str, Any]:
-        """从传入的 config dict 获取 Neo4j 配置
-
-        Returns:
-            Dict[str, Any]: Neo4j 配置字典
-        """
-        neo4j_section = self.config.get("cql_loader", {}).get("neo4j", {})
-
-        if not neo4j_section:
-            raise ValueError(
-                "CQLLoader 缺少 neo4j 配置段。\n"
-                "请在 metadata_config.yaml 的 loaders.cql_loader.neo4j 中配置 Neo4j 连接信息。"
-            )
-
-        # 强制走共享严格边界（用户审核第五轮第 1 条）：同一配置在
-        # clean/non-clean、pipeline/独立 CLI、直接 Python 调用下判定一致，
-        # 不再"仅 --clean 时拒绝"。校验失败即配置错误（消息不回显原文）。
-        from metaweave.core.clean_targets import normalize_neo4j_uri
-
-        try:
-            safe_uri = normalize_neo4j_uri(neo4j_section["uri"])
-        except (ValueError, KeyError) as e:
-            raise ValueError(f"loaders.cql_loader.neo4j.uri 非法: {e}") from None
-
-        # database 统一规则（用户审核第六轮第 3 条）：**只有键缺失**才使用
-        # 默认库；键存在时必须是非空字符串——null/123/[]/false/空白此前被
-        # 静默改成默认库，非 clean 加载可能向默认库写入数据
-        if "database" in neo4j_section:
-            raw_database = neo4j_section["database"]
-            if not isinstance(raw_database, str) or not raw_database.strip():
-                raise ValueError(
-                    "loaders.cql_loader.neo4j.database 必须是非空字符串或省略该键"
-                    f"（实际为 {type(raw_database).__name__}；省略时使用默认库 neo4j）"
-                )
-            database = raw_database.strip()
-        else:
-            database = "neo4j"
-
-        return {
-            "uri": safe_uri,
-            "user": neo4j_section["user"],
-            "password": neo4j_section["password"],
-            "database": database,
-        }
+        """从传入的 config dict 获取 Neo4j 配置（共享严格边界，规则见
+        ``normalize_neo4j_section``）"""
+        return normalize_neo4j_section(
+            self.config.get("cql_loader", {}).get("neo4j", {})
+        )
 
     def validate(self) -> bool:
         """验证配置和数据源
@@ -188,66 +245,293 @@ class CQLLoader(BaseLoader):
 
         return True
 
-    def load(self, clean: bool = False) -> Dict[str, Any]:
-        """执行 CQL 加载
+    # ------------------------------------------------------------ 加载
 
-        Args:
-            clean: 是否在加载前清空数据库
+    def load(self) -> Dict[str, Any]:
+        """执行按源替换加载（doc 4 §4.4/§4.5）。
 
-        Returns:
-            Dict[str, Any]: 加载结果字典
+        单一数据事务：按节点归属清理（所有无 source_id 节点及本次 source_id
+        节点，不限制 label）→ 写入新内容 → 按 source_id 核验数量；任一步
+        失败整体回滚，图保持原状。约束语句在数据事务之前逐条幂等执行。
+        transaction_mode/validate_after_load 配置不再影响本路径
+        （按源核验是事务提交前的必要步骤，不可关闭）。
         """
         start_time = time.time()
 
-        # 1. 解析与脚本核验（doc 23.2 §5.5：解析前置——截断/缺必需章节/
-        #    缺统计头在 clean 之前拒绝，图未动）
+        # 1. 解析与脚本核验（任何图写入之前拒绝；图未动）
         logger.info("正在解析 CQL 文件...")
         sections = self._parse_cql_file(self.input_file)
         logger.info(f"解析完成，共 {len(sections)} 个章节")
         self._assert_required_sections(sections)
 
-        # 2. 清空数据库（如果需要）
-        if clean:
-            logger.info("⚠️  执行清空数据库操作...")
-            self._clean_database()
+        expected_stats = self._extract_expected_stats(self.input_file)
+        script_source_id = self._extract_header_source_id(self.input_file)
+        source_id = self._resolve_source_identity(script_source_id)
 
-        # 3. 执行加载
-        options = self.config.get("cql_loader", {}).get("options", {})
-        transaction_mode = options.get("transaction_mode", "by_section")
-        logger.info(f"开始加载（事务模式: {transaction_mode}）...")
+        if self.neo4j_manager is None:
+            raise RuntimeError("Neo4j 连接未初始化：请先调用 validate()")
 
-        if transaction_mode == "single":
-            result = self._load_single_transaction(sections)
-        else:
-            result = self._load_by_section(sections)
+        # 2. 约束语句（幂等 IF NOT EXISTS）——事务外逐条执行；Neo4j 不允许
+        #    数据事务内混入 schema 命令。约束失败时数据事务尚未开始，本源
+        #    子图未动（已执行的约束语句幂等无害）
+        try:
+            self._apply_constraint_statements(sections)
+        except Exception as e:
+            logger.error("CQL 约束语句执行失败: %s", e)
+            return self._failure_result(
+                start_time,
+                source_id,
+                f"CQL 加载失败（约束语句执行错误，图数据未动）: {e}",
+                [
+                    {
+                        "section": "constraints",
+                        "error_type": type(e).__name__,
+                        "error_message": str(e),
+                    }
+                ],
+                rolled_back=True,
+            )
 
-        # 4. 数量核验（可选；doc 23.2 §5.5：不符置 success=False 并写差异明细）
-        validate_after_load = options.get("validate_after_load", True)
-        if validate_after_load and result.get("success"):
-            logger.info("验证加载结果...")
-            expected_stats = self._extract_expected_stats(self.input_file)
-            if expected_stats:
-                mismatches = self._validate_result(expected_stats)
-                if mismatches:
-                    result["success"] = False
-                    result["stats_mismatch"] = mismatches
-                    result["message"] = "图内数量与脚本统计不符：" + "；".join(
-                        f"{m['item']} 期望 {m['expected']}/实际 {m['actual']}"
-                        for m in mismatches
-                    )
+        # 3. 单一数据事务：删除 → 写入 → 按源核验（doc 4 §4.5）
+        logger.info(f"开始按源替换加载（source_id={source_id}）...")
+        data_sections = [s for s in sections if not self._is_constraint_section(s)]
+        counts: Dict[str, int] = {}
+        try:
+            counts = self._execute_replacement_transaction(
+                source_id, data_sections, expected_stats
+            )
+        except _RolledBackWorkError as exc:
+            # 事务回调内部失败：driver 已回滚，图确认保留
+            e = exc.original
+            section = "verify" if isinstance(e, ValueError) else "data_transaction"
+            return self._failure_result(
+                start_time,
+                source_id,
+                f"Neo4j 加载失败（数据事务已回滚，旧图保留）: {e}",
+                [
+                    {
+                        "section": section,
+                        "error_type": type(e).__name__,
+                        "error_message": str(e),
+                        "error_code": (
+                            getattr(e, "code", "N/A")
+                            if isinstance(e, Neo4jError)
+                            else None
+                        ),
+                    }
+                ],
+                rolled_back=True,
+            )
+        except Exception as e:
+            # 回调成功返回后的提交阶段失败（IncompleteCommit/SessionExpired/
+            # 网络中断等）：图事务提交状态不可知——不得标记已回滚，发布侧
+            # 须按"可能已提交"保守撤销 current
+            logger.error("CQL 数据事务提交状态不可知: %s: %s", type(e).__name__, e)
+            return self._failure_result(
+                start_time,
+                source_id,
+                f"CQL 加载中断（图事务提交状态不可知，请核对图内数据后重跑发布）: {e}",
+                [
+                    {
+                        "section": "commit",
+                        "error_type": type(e).__name__,
+                        "error_message": str(e),
+                    }
+                ],
+                rolled_back=False,
+            )
 
-        # 5. 统计执行时间
-        execution_time = time.time() - start_time
-        result["execution_time"] = round(execution_time, 2)
+        result = {
+            "success": True,
+            "message": "加载成功",
+            "source_id": source_id,
+            "counts": counts,
+            "sections": [
+                {"name": section["section_name"], "success": True}
+                for section in sections
+            ],
+            "errors": [],
+        }
 
+        result["execution_time"] = round(time.time() - start_time, 2)
+        logger.info(
+            "按源替换加载完成 source_id=%s counts=%s（预期 table=%s column=%s "
+            "join_on=%s has_column=column）",
+            source_id,
+            counts,
+            expected_stats.get("table_count"),
+            expected_stats.get("column_count"),
+            expected_stats.get("relationship_count"),
+        )
         return result
 
+    def _failure_result(
+        self,
+        start_time: float,
+        source_id: str,
+        message: str,
+        errors: List[Dict[str, Any]],
+        *,
+        rolled_back: bool,
+    ) -> Dict[str, Any]:
+        result: Dict[str, Any] = {
+            "success": False,
+            "message": message,
+            "source_id": source_id,
+            "sections": [],
+            "errors": errors,
+            "execution_time": round(time.time() - start_time, 2),
+        }
+        if rolled_back:
+            # 仅在**确认未提交**时标记：图保持原状，发布侧据此
+            # 不撤销 current。提交状态不可知的失败不得置位
+            result["_rolled_back"] = True
+        return result
+
+    def _resolve_source_identity(self, script_source_id: Optional[str]) -> str:
+        """确定本次删除范围 source_id：构造参数（后端已验证）优先。
+
+        两者都有时必须一致——不一致在删除之前拒绝（防加载错源脚本）。
+        """
+        if self.source_id is not None:
+            if script_source_id is not None and script_source_id != self.source_id:
+                raise CQLScriptValidationError(
+                    f"CQL 脚本归属（source_id={script_source_id}）与本次发布"
+                    f"（source_id={self.source_id}）不一致，已拒绝加载"
+                )
+            return self.source_id
+        if script_source_id is None:
+            raise CQLScriptValidationError(
+                "CQL 加载需要 source_id：脚本缺少 '// source_id:' 头，且未在"
+                "构造时传入（旧格式脚本不支持按源替换，请用新链路重新生成）"
+            )
+        try:
+            return str(normalize_source_id(script_source_id))
+        except ValueError:
+            raise CQLScriptValidationError(
+                f"CQL 脚本头 source_id 不是合法 UUID: {script_source_id!r}"
+            ) from None
+
+    @staticmethod
+    def _is_constraint_section(section: Dict[str, Any]) -> bool:
+        return (
+            "约束" in section["section_name"]
+            or "CONSTRAINT" in section["cypher"].upper()[:100]
+        )
+
+    def _apply_constraint_statements(self, sections: List[Dict[str, Any]]) -> None:
+        """逐条执行约束章节语句（幂等；每条独立事务提交）。
+
+        失败即抛出：此时数据事务尚未开始，图数据未动。
+        """
+        for section in sections:
+            if not self._is_constraint_section(section):
+                continue
+            cypher_text = self._fix_json_quotes(section["cypher"])
+            for stmt in self._split_statements(cypher_text):
+                logger.info("  应用约束: %s", stmt.strip()[:80])
+                self.neo4j_manager.execute_write_transaction(stmt)
+
+    def _execute_replacement_transaction(
+        self,
+        source_id: str,
+        data_sections: List[Dict[str, Any]],
+        expected_stats: Dict[str, int],
+    ) -> Dict[str, int]:
+        """单一数据事务执行清理/删除/写入/核验（doc 4 §4.5 B 发布事务边界）。
+
+        回调内多次 ``tx.run()``，消费全部结果。回调内任何异常经
+        ``_RolledBackWorkError`` 包装上抛（driver 对回调内异常不重试、
+        直接回滚——确认未提交）；回调成功返回后 COMMIT 阶段的异常原样
+        上抛（提交状态不可知）。禁用 driver 的瞬时错误自动重试是有意
+        为之：回调自身幂等，单次失败即回滚的语义更保守、更易判定。
+        """
+        prepared_sections = [
+            (section["section_name"], self._prepare_section_cypher(section))
+            for section in data_sections
+        ]
+
+        def work(tx):
+            try:
+                return self._replacement_work(
+                    tx, source_id, prepared_sections, expected_stats
+                )
+            except Exception as exc:  # noqa: BLE001（统一包装：确认未提交）
+                raise _RolledBackWorkError(exc) from exc
+
+        with self.neo4j_manager.get_session() as session:
+            counts = session.execute_write(work)
+        return {key: int(value) for key, value in counts.items()}
+
+    def _replacement_work(
+        self,
+        tx,
+        source_id: str,
+        prepared_sections: List[tuple],
+        expected_stats: Dict[str, int],
+    ) -> Dict[str, int]:
+        """事务回调主体：按节点归属清理 → 写入 → 按源核验。"""
+        # 清理由节点归属驱动：删除所有无 source_id 节点和本源节点（不限制
+        # label）；DETACH DELETE 一并删除关联关系。其他源节点及两端都保留
+        # 的关系不动。清理与写入、核验同事务，失败整体回滚。
+        tx.run(_CLEAN_NODES, source_id=source_id).consume()
+
+        # 写入各数据章节
+        for name, cypher in prepared_sections:
+            logger.info("  写入章节: %s", name)
+            tx.run(cypher).consume()
+
+        # 按源核验（仍在事务内：不符即抛错回滚，旧图保留）
+        record = tx.run(_SOURCE_STATS_MAIN, source_id=source_id).single()
+        stats = dict(record) if record else {}
+        hc_record = tx.run(_SOURCE_STATS_HAS_COLUMN, source_id=source_id).single()
+        stats["has_column_count"] = hc_record["has_column_count"] if hc_record else 0
+        mismatches = CQLLoader._compare_source_stats(expected_stats, stats)
+        if mismatches:
+            detail = "；".join(
+                f"{m['item']} 期望 {m['expected']}/实际 {m['actual']}"
+                for m in mismatches
+            )
+            raise ValueError(f"图内数量与脚本统计不符（已回滚，旧图保留）: {detail}")
+        return stats
+
+    @staticmethod
+    def _compare_source_stats(
+        expected_stats: Dict[str, int], actual: Dict[str, Any]
+    ) -> List[Dict[str, Any]]:
+        """比较按源实际计数与统计头期望；HAS_COLUMN 期望 = 列数。"""
+        expectations = {
+            "table_count": expected_stats.get("table_count", 0),
+            "column_count": expected_stats.get("column_count", 0),
+            "relationship_count": expected_stats.get("relationship_count", 0),
+            "has_column_count": expected_stats.get("column_count", 0),
+        }
+        mismatches = []
+        for item, expected in expectations.items():
+            actual_value = int(actual.get(item, 0) or 0)
+            if actual_value != expected:
+                mismatches.append(
+                    {
+                        "item": item,
+                        "expected": expected,
+                        "actual": actual_value,
+                    }
+                )
+            else:
+                logger.info("✅ %s 按源计数正确: %s", item, actual_value)
+        return mismatches
+
+    def _prepare_section_cypher(self, section: Dict[str, Any]) -> str:
+        """数据章节文本预处理（沿用既有引号/嵌套数组修复）。"""
+        cypher_text = self._fix_json_quotes(section["cypher"])
+        return self._fix_nested_arrays(cypher_text)
+
     def _assert_required_sections(self, sections: List[Dict[str, Any]]) -> None:
-        """必需章节与统计头核验（doc 23.2 §5.5-2，clean 前抛出）。
+        """必需章节与统计头核验（doc 23.2 §5.5-2，写入前抛出）。
 
         表节点与列节点章节必须存在（按 writer 实际章节标题关键字匹配；
         HAS_COLUMN/JOIN_ON 章节允许空载荷——零关系合法，D10）；统计头
-        必须可提取（fail closed：受管链路的 import_all 恒有统计头）。
+        与 source_id 头必须可提取（fail closed：受管链路的 import_all 恒有）。
         """
         titles = [s["section_name"] for s in sections]
         # 四章节全查（doc 23.2 §5.5-2 实施修订）：Column 章节后截断的脚本
@@ -280,19 +564,6 @@ class CQLLoader(BaseLoader):
         if self.neo4j_manager is not None:
             self.neo4j_manager.close()
             self.neo4j_manager = None
-
-    def _clean_database(self) -> None:
-        """清空 Neo4j 数据库
-
-        删除所有节点和关系。谨慎使用！
-        """
-        try:
-            query = "MATCH (n) DETACH DELETE n"
-            self.neo4j_manager.execute_write_transaction(query)
-            logger.info("✅ 数据库已清空")
-        except Exception as e:
-            logger.error(f"清空数据库失败: {e}")
-            raise
 
     def _parse_cql_file(self, file_path: Path) -> List[Dict[str, Any]]:
         """解析 CQL 文件，按章节拆分
@@ -340,102 +611,6 @@ class CQLLoader(BaseLoader):
                 )
 
         return sections
-
-    def _load_by_section(self, sections: List[Dict]) -> Dict[str, Any]:
-        """按章节分段执行（推荐）
-
-        每个章节作为一个独立的事务执行，便于错误定位。
-        对于包含多条语句的章节（如约束创建），会按分号分隔并逐条执行。
-
-        Args:
-            sections: 章节列表
-
-        Returns:
-            Dict[str, Any]: 加载结果
-        """
-        stats = {
-            "success": True,
-            "message": "加载成功",
-            "sections": [],
-            "errors": [],
-        }
-
-        for section in sections:
-            try:
-                logger.info(
-                    f"  [{section['order']}/{len(sections)}] {section['section_name']}..."
-                )
-
-                cypher_text = section["cypher"]
-                logger.debug(f"    章节内容前100字符: {cypher_text[:100]}")
-
-                # 修复 JSON 中的双引号问题（Cypher 语法要求）
-                cypher_text = self._fix_json_quotes(cypher_text)
-
-                # 修复嵌套数组问题（Neo4j 不支持嵌套集合）
-                cypher_text = self._fix_nested_arrays(cypher_text)
-
-                # 只对约束创建章节进行语句分隔（因为可能包含多条 CREATE CONSTRAINT）
-                # 其他章节都是单条完整的 UNWIND ... 语句
-                if (
-                    "约束" in section["section_name"]
-                    or "CONSTRAINT" in cypher_text.upper()[:100]
-                ):
-                    logger.debug("    检测到约束章节，按分号分隔语句")
-                    # 将章节中的语句按分号分隔（支持多条语句）
-                    statements = self._split_statements(cypher_text)
-                    # 逐条执行语句
-                    for i, stmt in enumerate(statements, 1):
-                        if stmt.strip():
-                            logger.debug(
-                                f"    执行语句 {i}/{len(statements)}: {stmt[:50]}..."
-                            )
-                            self.neo4j_manager.execute_write_transaction(stmt)
-                else:
-                    logger.debug("    整体执行章节")
-                    # 其他章节整体执行
-                    self.neo4j_manager.execute_write_transaction(cypher_text)
-
-                stats["sections"].append(
-                    {
-                        "name": section["section_name"],
-                        "success": True,
-                    }
-                )
-                logger.info(f"    ✅ {section['section_name']} 完成")
-
-            except Neo4jError as e:
-                error_msg = f"{section['section_name']} 失败: {e.message}"
-                logger.error(f"    ❌ {error_msg}")
-
-                stats["success"] = False
-                stats["message"] = error_msg
-                stats["errors"].append(
-                    {
-                        "section": section["section_name"],
-                        "error_type": "Neo4jError",
-                        "error_message": e.message,
-                        "error_code": getattr(e, "code", "N/A"),
-                    }
-                )
-                break  # 中断后续章节
-
-            except Exception as e:
-                error_msg = f"{section['section_name']} 失败: {str(e)}"
-                logger.error(f"    ❌ {error_msg}")
-
-                stats["success"] = False
-                stats["message"] = error_msg
-                stats["errors"].append(
-                    {
-                        "section": section["section_name"],
-                        "error_type": "UnknownError",
-                        "error_message": str(e),
-                    }
-                )
-                break
-
-        return stats
 
     def _split_statements(self, cypher_text: str) -> List[str]:
         """将多条 Cypher 语句按分号分隔
@@ -498,10 +673,6 @@ class CQLLoader(BaseLoader):
             原始: logic_pk: [["company_id"], ["code", "type"]]
             转换: logic_pk: '[["company_id"], ["code", "type"]]'
 
-        **优点：**
-        - 准确保留嵌套结构（能看出有几组复合键）
-        - 语义清晰（相比平铺格式 ["col1,col2", "col3"]）
-
         **后续使用：**
         查询时需要用 json.loads() 解析：
             >>> import json
@@ -557,73 +728,16 @@ class CQLLoader(BaseLoader):
                     # 使用单引号包裹 JSON 字符串（避免双引号转义问题）
                     # Cypher 支持单引号字符串
                     return f"{field}: '{json_str}'"
-                except:
+                except Exception:
                     # 如果解析失败，保持原样
-                    logger.warning(f"无法解析嵌套数组字段 {field}: {array_str[:50]}...")
+                    logger.warning(
+                        "无法解析嵌套数组字段 %s: %s...", field, array_str[:50]
+                    )
                     return match.group(0)
 
             cypher_text = re.sub(pattern, replace_nested_array, cypher_text)
 
         return cypher_text
-
-    def _load_single_transaction(self, sections: List[Dict]) -> Dict[str, Any]:
-        """单事务执行（备选）
-
-        将所有章节合并为一个大的事务执行。
-
-        Args:
-            sections: 章节列表
-
-        Returns:
-            Dict[str, Any]: 加载结果
-        """
-        stats = {
-            "success": True,
-            "message": "加载成功",
-            "sections": [],
-            "errors": [],
-        }
-
-        try:
-            # 合并所有章节的 Cypher 语句
-            all_cypher = "\n\n".join(s["cypher"] for s in sections)
-
-            logger.info("  执行单事务加载...")
-            self.neo4j_manager.execute_write_transaction(all_cypher)
-
-            stats["sections"] = [{"name": "所有章节", "success": True}]
-            logger.info("    ✅ 单事务加载完成")
-
-        except Neo4jError as e:
-            error_msg = f"单事务加载失败: {e.message}"
-            logger.error(f"    ❌ {error_msg}")
-
-            stats["success"] = False
-            stats["message"] = error_msg
-            stats["errors"].append(
-                {
-                    "section": "single_transaction",
-                    "error_type": "Neo4jError",
-                    "error_message": e.message,
-                    "error_code": getattr(e, "code", "N/A"),
-                }
-            )
-
-        except Exception as e:
-            error_msg = f"单事务加载失败: {str(e)}"
-            logger.error(f"    ❌ {error_msg}")
-
-            stats["success"] = False
-            stats["message"] = error_msg
-            stats["errors"].append(
-                {
-                    "section": "single_transaction",
-                    "error_type": "UnknownError",
-                    "error_message": str(e),
-                }
-            )
-
-        return stats
 
     def _extract_expected_stats(self, file_path: Path) -> Dict[str, int]:
         """从 CQL 文件头部提取期望的统计信息
@@ -654,92 +768,9 @@ class CQLLoader(BaseLoader):
             logger.warning("无法从 CQL 文件提取统计信息，跳过验证")
             return {}
 
-    def _validate_result(self, expected_stats: Dict[str, int]) -> List[Dict[str, Any]]:
-        """验证加载结果，返回差异明细（doc 23.2 §5.5-3）。
-
-        对比实际加载的节点/关系数量与期望值——不匹配不再只记 warning、
-        不抛异常（「加载完成但结果不符」是结果语义；差异由 ``load()``
-        并入 ``success=False`` 与 ``stats_mismatch`` 供发布摘要消费）。
-
-        Args:
-            expected_stats: 期望的统计信息
-
-        Returns:
-            差异明细列表 [{"item", "expected", "actual"}]，仅列不符项
-        """
-        actual_stats = self._get_graph_stats()
-
-        mismatches: List[Dict[str, Any]] = []
-        labels = {
-            "table_count": "表数量",
-            "column_count": "列数量",
-            "relationship_count": "关系数量",
-            "has_column_count": "HAS_COLUMN 边数",
-        }
-        # has_column_count 的期望 = 列数（统计头无此字段；每个列节点恒有
-        # 一条所属表的边——章节存在但没建出边的情况由此暴露）
-        expectations = {
-            "table_count": expected_stats["table_count"],
-            "column_count": expected_stats["column_count"],
-            "relationship_count": expected_stats["relationship_count"],
-            "has_column_count": expected_stats["column_count"],
-        }
-        for item in (
-            "table_count",
-            "column_count",
-            "relationship_count",
-            "has_column_count",
-        ):
-            expected = expectations[item]
-            actual = actual_stats[item]
-            if actual != expected:
-                logger.warning(f"{labels[item]}不匹配: 期望 {expected}, 实际 {actual}")
-                mismatches.append(
-                    {"item": item, "expected": expected, "actual": actual}
-                )
-            else:
-                logger.info(f"✅ {labels[item]}正确: {actual}")
-        return mismatches
-
-    def _get_graph_stats(self) -> Dict[str, int]:
-        """查询 Neo4j 中的统计信息
-
-        使用 WITH 分段统计，避免笛卡尔积导致的错误计数。
-
-        Returns:
-            Dict[str, int]: 统计信息，包含 table_count, column_count, relationship_count
-        """
-        query = """
-            MATCH (t:Table)
-            WITH count(t) AS table_count
-            MATCH (c:Column)
-            WITH table_count, count(c) AS column_count
-            OPTIONAL MATCH ()-[r:JOIN_ON]->()
-            RETURN table_count, column_count, count(r) AS relationship_count
-        """
-
-        result = self.neo4j_manager.execute_query(query)
-        if result:
-            record = result[0]
-            stats = {
-                "table_count": record["table_count"],
-                "column_count": record["column_count"],
-                "relationship_count": record["relationship_count"],
-            }
-        else:
-            stats = {
-                "table_count": 0,
-                "column_count": 0,
-                "relationship_count": 0,
-            }
-
-        # HAS_COLUMN 边数单独查询（doc 23.2 §5.5-3 实施修订）：与主查询合并
-        # 会因两次 OPTIONAL MATCH 的行积破坏计数；count 聚合对零匹配也返回
-        # 一行 0，期望值 = 列数（每个列节点恒有一条所属表的边）
-        has_column_result = self.neo4j_manager.execute_query(
-            "MATCH ()-[h:HAS_COLUMN]->() RETURN count(h) AS has_column_count"
-        )
-        stats["has_column_count"] = (
-            has_column_result[0]["has_column_count"] if has_column_result else 0
-        )
-        return stats
+    @staticmethod
+    def _extract_header_source_id(file_path: Path) -> Optional[str]:
+        """提取头部 ``// source_id: <uuid>``（新格式脚本必有；旧格式返回 None）。"""
+        content = file_path.read_text(encoding="utf-8")
+        match = re.search(r"//\s*source_id:\s*([0-9a-fA-F-]{36})", content)
+        return match.group(1) if match else None

@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Dict, Any, Tuple
 
+from metaweave.core.cql_generator.keyspace import validate_graph_keyspace
 from metaweave.core.cql_generator.models import (
     TableNode,
     ColumnNode,
@@ -24,6 +25,7 @@ logger = logging.getLogger("metaweave.cql_generator.reader")
 @dataclass
 class RawRelationshipEntry:
     """reader 内部实现(doc 18 §5):原始关系 + 来源文件,供冲突报错使用,不外露"""
+
     relationship: Dict[str, Any]
     source_file: Path
 
@@ -35,11 +37,11 @@ class JSONReader:
     """
 
     def __init__(
-            self,
-            json_dir: Path,
-            rel_dir: Path,
-            domain_resolver=None,
-            composite_score_threshold: float = 0.9,
+        self,
+        json_dir: Path,
+        rel_dir: Path,
+        domain_resolver=None,
+        composite_score_threshold: float = 0.9,
     ):
         """初始化读取器
 
@@ -81,6 +83,14 @@ class JSONReader:
         # 读取 Step 3 表间关系
         join_on_rels, filter_stats = self._read_relationships()
 
+        # 键空间整源校验（doc 4 §4.2）：任一对象不支持即拒绝本次发布，
+        # 不静默跳过个别对象，也不改写名称
+        validate_graph_keyspace(
+            self.database_name,
+            [("表", t.schema, t.name) for t in tables]
+            + [("列", c.schema, c.name) for c in columns],
+        )
+
         # 注意：不再动态回填 logic_fk
         # logic_fk 保持 Step 2 画像中的初始值（通常为空列表）
         # 关系方向已在 Step 3 输出时翻转为标准 ER 语义
@@ -94,11 +104,9 @@ class JSONReader:
 
         return tables, columns, has_column_rels, join_on_rels, filter_stats
 
-    def _read_table_profiles(self) -> Tuple[
-        List[TableNode],
-        List[ColumnNode],
-        List[HASColumnRelation]
-    ]:
+    def _read_table_profiles(
+        self,
+    ) -> Tuple[List[TableNode], List[ColumnNode], List[HASColumnRelation]]:
         """读取 Step 2 表/列画像
 
         Returns:
@@ -133,7 +141,12 @@ class JSONReader:
                 table_info = data.get("object_info", {})
                 table_name = table_info.get("object_name", "")
 
-                if not table_name or table_name in ["table_name", "object_name", "placeholder", "example"]:
+                if not table_name or table_name in [
+                    "table_name",
+                    "object_name",
+                    "placeholder",
+                    "example",
+                ]:
                     logger.warning(
                         f"跳过占位符表: {json_file.name} (object_name={table_name})"
                     )
@@ -152,7 +165,7 @@ class JSONReader:
                     has_column_rels.append(
                         HASColumnRelation(
                             table_full_name=table.full_name,
-                            column_full_name=col.full_name
+                            column_full_name=col.full_name,
                         )
                     )
 
@@ -256,9 +269,7 @@ class JSONReader:
         return []
 
     def _extract_columns(
-        self,
-        data: Dict[str, Any],
-        table_full_name: str
+        self, data: Dict[str, Any], table_full_name: str
     ) -> List[ColumnNode]:
         """从 JSON 中提取列信息"""
         table_info = data.get("object_info", {})
@@ -315,9 +326,6 @@ class JSONReader:
             semantic_analysis = col_data.get("semantic_analysis", {})
             semantic_role = semantic_analysis.get("semantic_role")
 
-            # 结构标志
-            structure_flags = col_data.get("structure_flags", {})
-
             # 判断是否是主键/唯一键/外键
             is_pk = col_name in pk_columns
             is_uk = col_name in uk_columns
@@ -354,14 +362,14 @@ class JSONReader:
                     is_measure=is_measure,
                     pk_position=pk_position,
                     uniqueness=uniqueness,
-                    null_rate=null_rate
+                    null_rate=null_rate,
                 )
             )
 
         return columns
 
     def _read_relationships(
-            self,
+        self,
     ) -> Tuple[List[JOINOnRelation], RelationshipFilterStats]:
         """读取 Step 3 表间关系(doc 18 八步流程)
 
@@ -414,7 +422,10 @@ class JSONReader:
             rel = entry.relationship
             rel_type = rel.get("type")
             if rel_type not in ("single_column", "composite"):
-                _fail(entry, f"type 必须严格为 single_column / composite,得到 {rel_type!r}")
+                _fail(
+                    entry,
+                    f"type 必须严格为 single_column / composite,得到 {rel_type!r}",
+                )
 
             for key in ("from_table", "to_table"):
                 info = rel.get(key)
@@ -423,7 +434,7 @@ class JSONReader:
                 schema = info.get("schema")
                 table = info.get("table")
                 if not (isinstance(schema, str) and schema.strip()) or not (
-                        isinstance(table, str) and table.strip()
+                    isinstance(table, str) and table.strip()
                 ):
                     _fail(entry, f"{key}.schema / table 无效")
 
@@ -445,10 +456,16 @@ class JSONReader:
                     _fail(entry, "to_columns 必须是非空列表")
                 for col in list(from_columns) + list(to_columns):
                     if not (isinstance(col, str) and col.strip()):
-                        _fail(entry, f"字段列表元素必须是非空字符串(去空白后非空): {col!r}")
+                        _fail(
+                            entry,
+                            f"字段列表元素必须是非空字符串(去空白后非空): {col!r}",
+                        )
 
             if len(from_columns) != len(to_columns):
-                _fail(entry, f"两侧字段数量不一致: {len(from_columns)} vs {len(to_columns)}")
+                _fail(
+                    entry,
+                    f"两侧字段数量不一致: {len(from_columns)} vs {len(to_columns)}",
+                )
 
             cardinality = rel.get("cardinality")
             if cardinality not in ("N:1", "1:1", "M:N"):
@@ -559,10 +576,10 @@ class JSONReader:
 
         # 统计恒等式(doc 18 §5,以"先冲突检查、再过滤、再去重"为前提)
         assert stats.candidate_count == (
-                stats.threshold_passed_count + stats.threshold_filtered_count
+            stats.threshold_passed_count + stats.threshold_filtered_count
         ), f"统计恒等式不成立: {stats}"
         assert stats.final_count == (
-                stats.threshold_passed_count - stats.duplicate_discarded_count
+            stats.threshold_passed_count - stats.duplicate_discarded_count
         ), f"统计恒等式不成立: {stats}"
 
         return join_on_rels, stats
@@ -579,7 +596,9 @@ class JSONReader:
         # cardinality 已由 _read_relationships 结构校验保证显式存在且合法
         cardinality = rel["cardinality"]
 
-        logger.debug(f"处理关系: {from_table.get('table')} -> {to_table.get('table')}, cardinality={cardinality}")
+        logger.debug(
+            f"处理关系: {from_table.get('table')} -> {to_table.get('table')}, cardinality={cardinality}"
+        )
 
         src_schema = from_table.get("schema", "")
         src_table = from_table.get("table", "")
@@ -596,15 +615,17 @@ class JSONReader:
 
         src_full_name = f"{src_schema}.{src_table}"
         dst_full_name = f"{dst_schema}.{dst_table}"
-        
+
         # 构造 ON 表达式
         on_parts = []
         for src_col, tgt_col in zip(source_columns, target_columns):
             on_parts.append(f"SRC.{src_col} = DST.{tgt_col}")
         on_expr = " AND ".join(on_parts)
-        
-        logger.info(f"CQL 关系: ({src_full_name})-[:JOIN_ON]->({dst_full_name}), cardinality={cardinality}")
-        
+
+        logger.info(
+            f"CQL 关系: ({src_full_name})-[:JOIN_ON]->({dst_full_name}), cardinality={cardinality}"
+        )
+
         return JOINOnRelation(
             relationship_id=rel["relationship_id"],
             src_full_name=src_full_name,
@@ -614,5 +635,5 @@ class JSONReader:
             on=on_expr,
             source_columns=source_columns,
             target_columns=target_columns,
-            constraint_name=rel.get("constraint_name")
+            constraint_name=rel.get("constraint_name"),
         )

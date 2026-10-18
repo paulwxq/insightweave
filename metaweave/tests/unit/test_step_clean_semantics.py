@@ -45,7 +45,7 @@ class _DummyRelPipeline:
 
 
 class _DummyCQLGenerator:
-    def __init__(self, config_path, domain_resolver=None, config=None):
+    def __init__(self, config_path, domain_resolver=None, config=None, provenance=None):
         # metadata_cli cql 分支以 generator.config 调 _clean_step_output_dir，
         # 必须与真实 CQLGenerator 一致从配置文件加载（空 dict 会让 clean 目标
         # 回退到默认 output/cql，误清真实产物目录）
@@ -87,10 +87,11 @@ def _test_step_clean_keeps_subdirs(tmp_path: Path, monkeypatch, step: str):
 
     runner = CliRunner()
     try:
-        result = runner.invoke(
-            metadata_cli.metadata_command,
-            ["--config", str(cfg), "--step", step, "--clean"],
-        )
+        argv = ["--config", str(cfg), "--step", step, "--clean"]
+        if step == "cql":
+            # doc 4 §4.2：cql 生成必带来源（实体键身份）
+            argv += ["--source-id", "0f0e8d64-9d3a-4d0f-8d5f-2a3b4c5d6e7f"]
+        result = runner.invoke(metadata_cli.metadata_command, argv)
         assert result.exit_code == 0, result.output
 
         # 顶层所有文件被删（不限扩展名）

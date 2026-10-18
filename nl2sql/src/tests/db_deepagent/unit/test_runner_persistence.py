@@ -15,7 +15,12 @@ import pytest
 from src.modules.db_deepagent.agent import DbAgentHandle
 from src.modules.db_deepagent.persistence.archive import QaArchive
 from src.modules.db_deepagent.runner import DbAgentRunner, is_persistence_error
-from src.tests.db_deepagent.conftest import FakeAgent, FakeStore, _remap_run_id
+from src.tests.db_deepagent.conftest import (
+    TEST_SOURCE_ID,
+    FakeAgent,
+    FakeStore,
+    _remap_run_id,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -375,7 +380,12 @@ class TestStep5Gates:
         store.put(
             ("db_deepagent", "sessions"),
             "s1",
-            {"session_id": "s1", "current_thread_id": "dbda:s1:1", "thread_seq": 2},
+            {
+                "session_id": "s1",
+                "current_thread_id": "dbda:s1:1",
+                "thread_seq": 2,
+                "source_id": TEST_SOURCE_ID,
+            },
         )
         # 线程 1（当前，消息超阈值触发轮换）、线程 2（已存在）、线程 3（空）
         agent = FakeAgent({})
@@ -463,7 +473,12 @@ class TestCarriedEvidencePersistence:
         store.put(
             ("db_deepagent", "sessions"),
             "s1",
-            {"session_id": "s1", "current_thread_id": "dbda:s1:1", "thread_seq": 1},
+            {
+                "session_id": "s1",
+                "current_thread_id": "dbda:s1:1",
+                "thread_seq": 1,
+                "source_id": TEST_SOURCE_ID,
+            },
         )
         old_state = {
             "messages": [object(), object()],
@@ -530,6 +545,7 @@ class TestCarriedEvidencePersistence:
                 "session_id": "s1",
                 "current_thread_id": "dbda:s1:1",
                 "thread_seq": 1,
+                "source_id": TEST_SOURCE_ID,
                 "carried_evidence": seeded,
             },
         )
@@ -547,7 +563,12 @@ class TestCarriedEvidencePersistence:
         store.put(
             ("db_deepagent", "sessions"),
             "s1",
-            {"session_id": "s1", "current_thread_id": "dbda:s1:1", "thread_seq": 1},
+            {
+                "session_id": "s1",
+                "current_thread_id": "dbda:s1:1",
+                "thread_seq": 1,
+                "source_id": TEST_SOURCE_ID,
+            },
         )
         agent = FakeAgent({})
         agent.states_by_thread = {
@@ -576,7 +597,12 @@ class TestCarriedEvidencePersistence:
         store.put(
             ("db_deepagent", "sessions"),
             "s1",
-            {"session_id": "s1", "current_thread_id": "dbda:s1:1", "thread_seq": 1},
+            {
+                "session_id": "s1",
+                "current_thread_id": "dbda:s1:1",
+                "thread_seq": 1,
+                "source_id": TEST_SOURCE_ID,
+            },
         )
         agent = FakeAgent({})
         agent.states_by_thread = {

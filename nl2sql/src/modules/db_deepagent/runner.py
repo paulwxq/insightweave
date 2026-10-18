@@ -131,6 +131,7 @@ class DbAgentRunner:
         thread_id: str | None = None,
         request_id: str | None = None,
         force_rotate: bool = False,
+        source_id: str | None = None,
     ) -> DbAgentResult:
         # 会话级互斥（doc 7 §2.3）：P0 读取前取锁，P3 完成后外层 finally 释放；
         # memory 持久化模式无 PG，跳过互斥。取锁失败：不写任何元数据（防覆盖
@@ -172,7 +173,13 @@ class DbAgentRunner:
                 )
         try:
             return self._run_locked(
-                question, session_id, thread_id, request_id, lock, force_rotate
+                question,
+                session_id,
+                thread_id,
+                request_id,
+                lock,
+                force_rotate,
+                source_id,
             )
         finally:
             if lock is not None:
@@ -186,6 +193,7 @@ class DbAgentRunner:
         request_id: str | None,
         lock,
         force_rotate: bool = False,
+        source_id: str | None = None,
     ) -> DbAgentResult:
         started = time.monotonic()
         request_id = request_id or "req_" + uuid.uuid4().hex[:12]
@@ -203,6 +211,7 @@ class DbAgentRunner:
         invoke_started = False
         rotated = False
         max_seq = 1
+        source_binding: str | None = None
 
         # ---------------------------------------------------------------- P0
         try:
@@ -211,6 +220,9 @@ class DbAgentRunner:
                     "session_id 含非法字符（允许 [A-Za-z0-9_-]，禁冒号）"
                 )
             session_rec = self._archive.get_session(session_id)
+            source_binding = _resolve_source_binding(
+                session_rec, source_id, self._services.source_id
+            )
             current_thread, thread_seq, carried, old_values, max_seq = (
                 self._resolve_thread(session_id, thread_id, session_rec)
             )
@@ -378,6 +390,7 @@ class DbAgentRunner:
             carried=carried,
             question=question,
             read_final_answer=evaluate,
+            source_binding=source_binding,
         )
 
     # ------------------------------------------------------------ P0 辅助
@@ -474,6 +487,7 @@ class DbAgentRunner:
         carried: tuple[Any, ...] | None = None,
         question: str = "",
         read_final_answer: bool = True,
+        source_binding: str | None = None,
     ) -> DbAgentResult:
         evidence = evidence or (
             self._assemble_evidence(values, run_id) if values else []
@@ -518,6 +532,7 @@ class DbAgentRunner:
                     carried=carried,
                     question=question,
                     values=values,
+                    source_binding=source_binding,
                 )
             except Exception as exc:
                 if is_persistence_error(exc):
@@ -669,6 +684,7 @@ class DbAgentRunner:
         carried: tuple[Any, ...] | None = None,
         question: str = "",
         values: dict[str, Any] | None = None,
+        source_binding: str | None = None,
     ) -> bool:
         """§13.3 写入判定：条件 a（成功真实执行）或 b（被接受答案＋有效 E/A 沿用引用）。"""
         # 条件 a 从本运行执行账本判断（§13.3：query 或 pushdown、非沿用）；
@@ -718,7 +734,7 @@ class DbAgentRunner:
                 },
             )
         # sessions／threads 轨迹落库（doc 7 §2.1；与归档同批）
-        self._write_thread_tracks(session_id, thread_id, carried)
+        self._write_thread_tracks(session_id, thread_id, carried, source_binding)
         return True
 
     def _write_thread_tracks(
@@ -726,11 +742,14 @@ class DbAgentRunner:
         session_id: str,
         thread_id: str | None,
         carried: tuple[Any, ...] | None = None,
+        source_binding: str | None = None,
     ) -> None:
-        """P3：sessions upsert（当前线程/最大序号/携带证据）＋threads 轨迹。
+        """P3：sessions upsert（当前线程/最大序号/携带证据/源绑定）＋threads 轨迹。
 
         carried 为当前线程的携带证据清单（轮换时由 §13.4 收集；普通运行
         沿用会话记录中的既有清单）；None 表示调用方未知，保留已存值不覆盖。
+        source_binding 为本会话绑定的 source_id（doc 4 §5.2）：首轮写入，
+        后续 upsert 整体覆盖时沿用同一绑定。
         """
         if thread_id is None:
             return
@@ -738,6 +757,9 @@ class DbAgentRunner:
         existing = self._archive.get_session(session_id) or {}
         if carried is None:
             carried = tuple(existing.get("carried_evidence") or [])
+        if source_binding is None:
+            # 调用方未知（旧路径）：保留已存绑定不覆盖
+            source_binding = existing.get("source_id")
         self._archive.upsert_session(
             session_id,
             self._archive.session_record(
@@ -751,6 +773,7 @@ class DbAgentRunner:
                 last_active_at=datetime.now().astimezone(),
                 active=False,
                 carried_evidence=list(carried),
+                source_id=source_binding,
             ),
         )
         record = self._archive.get_thread(session_id, thread_id) or {
@@ -965,7 +988,58 @@ def _thread_id_of(session_id: str, seq: int) -> str:
 
 
 class _RejectedSession(Exception):
-    """入口校验拒绝（会话/线程标识不合规或跨会话）"""
+    """入口校验拒绝（会话/线程标识不合规、跨会话或来源绑定不一致）"""
+
+
+def _resolve_source_binding(
+    session_rec: dict | None,
+    request_source: str | None,
+    services_source: str | None,
+) -> str:
+    """三方核对会话来源绑定（doc 4 §3.2/§5.2），返回生效绑定。
+
+    - 服务绑定（build_services 构造）必须存在且为合法 UUID；
+    - 请求显式携带 source_id 时仅作一致性检查，不能覆盖会话绑定；
+    - 会话记录已有绑定且与服务绑定不一致 → 明确拒绝（防 A 源会话发
+      B 源问题导致串源）；
+    - **会话记录已存在却缺少来源绑定**（改造前创建的旧会话）→ 拒绝
+      续聊：此时 _resolve_thread 会恢复旧 checkpoint，旧源对话上下文
+      不能进入新源会话；提示新建会话（无自动迁移）；
+    - 首轮（无会话记录）以服务绑定为会话绑定并在 P3 持久化。
+    """
+    if not isinstance(services_source, str) or not services_source:
+        raise _RejectedSession("服务未绑定 source_id，拒绝执行（无源过滤检索被禁止）")
+    try:
+        normalized_services = str(uuid.UUID(services_source))
+    except ValueError:
+        raise _RejectedSession("服务绑定的 source_id 不是合法 UUID") from None
+
+    if request_source is not None:
+        try:
+            normalized_request = str(uuid.UUID(str(request_source).strip()))
+        except (ValueError, AttributeError):
+            raise _RejectedSession(
+                f"请求携带的 source_id 不是合法 UUID: {request_source!r}"
+            ) from None
+        if normalized_request != normalized_services:
+            raise _RejectedSession(
+                f"请求 source_id（{normalized_request}）与服务绑定"
+                f"（{normalized_services}）不一致，拒绝执行"
+            )
+
+    if session_rec is None:
+        return normalized_services  # 首轮：绑定服务来源
+    existing = session_rec.get("source_id")
+    if not existing:
+        raise _RejectedSession(
+            "会话缺少来源绑定（多源改造前创建），不能直接切换数据源续聊；" "请新建会话"
+        )
+    if str(existing) != normalized_services:
+        raise _RejectedSession(
+            f"会话已绑定其他 source_id（{existing}），当前服务绑定为"
+            f"{normalized_services}；请换用原绑定来源或新建会话"
+        )
+    return normalized_services
 
 
 def _valid_session(session_id: str) -> bool:

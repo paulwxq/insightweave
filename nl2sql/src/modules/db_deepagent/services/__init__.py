@@ -35,7 +35,11 @@ logger = get_module_logger("nl2sql.db_deepagent.services")
 
 @dataclass
 class DbAgentServices:
-    """服务容器（§6 字段全集；步骤 3+ 的字段在交付前为 None）"""
+    """服务容器（§6 字段全集；步骤 3+ 的字段在交付前为 None）
+
+    source_id 为本实例绑定的平台数据源（规范化 UUID 字符串，doc 4 §3.2/§4.7）：
+    构造后不可变更，Milvus 检索与 Neo4j 图查询均按其过滤/定位。
+    """
 
     config: DbAgentConfig
     business_db: BusinessDbService
@@ -44,6 +48,7 @@ class DbAgentServices:
     catalog: TableCatalog
     join_graph: JoinGraphService
     embedding_release: dict[str, Any]
+    source_id: str
     validator: Optional[DbSqlValidator] = None
     guard: Optional[SqlEvidenceGuard] = None
     pipeline: Optional[SqlPipeline] = None
@@ -61,6 +66,23 @@ class DbAgentServices:
             self.milvus.close()
         if self.business_db is not None:
             self.business_db.close()
+
+
+def _normalized_source_id(source_id) -> str:
+    """校验并规范化服务绑定的 source_id（doc 4 §3.2：缺失/非法拒绝构造）。"""
+    import uuid as _uuid
+
+    if isinstance(source_id, _uuid.UUID):
+        return str(source_id)
+    if not isinstance(source_id, str) or not source_id.strip():
+        raise ValueError(
+            "build_services 需要 source_id（平台登记 UUID）：来源缺失时拒绝构造，"
+            "不得回退为无源过滤的检索"
+        )
+    try:
+        return str(_uuid.UUID(source_id.strip()))
+    except ValueError:
+        raise ValueError("source_id 不是合法 UUID，拒绝构造服务") from None
 
 
 def _embedding_profile_and_key(cfg: DbAgentConfig) -> tuple[dict[str, Any], str]:
@@ -93,59 +115,91 @@ def _neo4j_manager(cfg: DbAgentConfig):
     )
 
 
-def build_services(cfg: DbAgentConfig) -> DbAgentServices:
-    """按依赖顺序构造已交付的服务并执行 Embedding 一致性检查（§6.3）。"""
+def build_services(cfg: DbAgentConfig, *, source_id=None) -> DbAgentServices:
+    """按依赖顺序构造已交付的服务并执行 Embedding 一致性检查（§6.3）。
+
+    source_id（doc 4 §3.2/§4.7）为必填的服务端绑定：会话启动层读取并校验
+    持久化的会话绑定后传入，Milvus 检索与 Neo4j 图查询构造为来源不可变
+    服务；按源运行配置（database/expected_database/table_key_prefix）必须
+    在本调用之前构造完成（``apply_source_runtime_config``）。
+    """
+    normalized_source = _normalized_source_id(source_id)
+    # 构造失败的资源回收（doc 4 §4.7：每轮独立构造的 Web 模式下，部分构造
+    # 的连接不得泄漏）：按构造顺序累积，任一步失败按逆序关闭已创建资源
     business_db = BusinessDbService(cfg.business_db)
-    business_db.open()
+    milvus: DbMilvusRetrieval | None = None
+    join_graph: JoinGraphService | None = None
+    try:
+        business_db.open()
 
-    profile, api_key = _embedding_profile_and_key(cfg)
-    embedding = DbEmbeddingClient(
-        profile,
-        api_key=api_key,
-        request_timeout_s=cfg.embedding.request_timeout_seconds,
-    )
-    milvus = DbMilvusRetrieval(cfg, embedding)
-    release = check_embedding_consistency(cfg, profile, embedding, milvus)
+        profile, api_key = _embedding_profile_and_key(cfg)
+        embedding = DbEmbeddingClient(
+            profile,
+            api_key=api_key,
+            request_timeout_s=cfg.embedding.request_timeout_seconds,
+        )
+        milvus = DbMilvusRetrieval(cfg, embedding, source_id=normalized_source)
+        release = check_embedding_consistency(cfg, profile, embedding, milvus)
 
-    catalog = TableCatalog(cfg, milvus, business_db)
-    join_graph = JoinGraphService(
-        _neo4j_manager(cfg), join_max_hops=cfg.neo4j.join_max_hops
-    )
+        catalog = TableCatalog(cfg, milvus, business_db)
+        join_graph = JoinGraphService(
+            _neo4j_manager(cfg),
+            source_id=normalized_source,
+            join_max_hops=cfg.neo4j.join_max_hops,
+        )
 
-    from src.modules.db_deepagent.services.result_analysis import ResultAnalysisService
+        from src.modules.db_deepagent.services.result_analysis import (
+            ResultAnalysisService,
+        )
 
-    validator = DbSqlValidator(
-        cfg.validation,
-        business_db,
-        explain_timeout_s=cfg.business_db.explain_timeout_seconds,
-    )
-    guard = SqlEvidenceGuard(cfg.validation.guard, business_db, DimensionProbeBuilder())
-    results = ResultStore(Path(cfg.workspace.root))
-    budget = RunBudgetLedger()
-    pipeline = SqlPipeline(
-        config=cfg,
-        validator=validator,
-        guard=guard,
-        db=business_db,
-        results=results,
-        budget=budget,
-    )
+        validator = DbSqlValidator(
+            cfg.validation,
+            business_db,
+            explain_timeout_s=cfg.business_db.explain_timeout_seconds,
+        )
+        guard = SqlEvidenceGuard(
+            cfg.validation.guard, business_db, DimensionProbeBuilder()
+        )
+        results = ResultStore(Path(cfg.workspace.root))
+        budget = RunBudgetLedger()
+        pipeline = SqlPipeline(
+            config=cfg,
+            validator=validator,
+            guard=guard,
+            db=business_db,
+            results=results,
+            budget=budget,
+        )
 
-    logger.info("DbAgentServices 已构造（步骤 5 全集）")
-    return DbAgentServices(
-        config=cfg,
-        business_db=business_db,
-        embedding=embedding,
-        milvus=milvus,
-        catalog=catalog,
-        join_graph=join_graph,
-        embedding_release=release,
-        validator=validator,
-        guard=guard,
-        pipeline=pipeline,
-        time_resolver=TimeResolver(),
-        probe=DimensionProbeBuilder(),
-        results=results,
-        analysis=ResultAnalysisService(cfg, results),
-        budget=budget,
-    )
+        logger.info(
+            "DbAgentServices 已构造（步骤 5 全集，source_id=%s）", normalized_source
+        )
+        return DbAgentServices(
+            config=cfg,
+            business_db=business_db,
+            embedding=embedding,
+            milvus=milvus,
+            catalog=catalog,
+            join_graph=join_graph,
+            embedding_release=release,
+            source_id=normalized_source,
+            validator=validator,
+            guard=guard,
+            pipeline=pipeline,
+            time_resolver=TimeResolver(),
+            probe=DimensionProbeBuilder(),
+            results=results,
+            analysis=ResultAnalysisService(cfg, results),
+            budget=budget,
+        )
+    except BaseException:
+        # 逆序释放已构造资源（join_graph → milvus → business_db），释放异常
+        # 不覆盖原始错误
+        for resource in (join_graph, milvus, business_db):
+            if resource is None:
+                continue
+            try:
+                resource.close()
+            except Exception:  # noqa: BLE001
+                logger.warning("构造失败回收时关闭 %s 出错", type(resource).__name__)
+        raise

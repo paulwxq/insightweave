@@ -125,19 +125,21 @@ class FakeGenerator:
 
 class FakeLoader:
     ctor_config: dict = {}
+    ctor_source_id = None
     validate_result: bool = True
     load_result: dict = {}
     load_raises: Exception | None = None
     calls: list = []
 
-    def __init__(self, config):
+    def __init__(self, config, source_id=None):
         FakeLoader.ctor_config = config
+        FakeLoader.ctor_source_id = source_id
 
     def validate(self):
         return FakeLoader.validate_result
 
-    def load(self, clean=False):
-        FakeLoader.calls.append(("load", clean))
+    def load(self):
+        FakeLoader.calls.append("load")
         if FakeLoader.load_raises is not None:
             raise FakeLoader.load_raises
         return dict(FakeLoader.load_result)
@@ -743,12 +745,12 @@ class TestPublishRelExecution:
         ]
         assert recorder.cleared == ["rel"]
         assert FakeLoader.calls[-1] == "close"  # A26
-        assert ("load", True) in FakeLoader.calls  # A17：全清重载（clean=True）
+        assert "load" in FakeLoader.calls  # doc 4 §4.4：按源替换（无全清）
         loader_section = FakeLoader.ctor_config["cql_loader"]
         assert loader_section["input_file"].endswith("import_all.orders.cypher")
-        # A28：主配置 false 也强制 True
-        assert loader_section["options"]["validate_after_load"] is True
-        # provenance 传递（A13 链路）
+        # doc 4 §4.4-2：删除范围为后端已验证的 source_id
+        assert FakeLoader.ctor_source_id == str(SOURCE_ID)
+        # provenance 传递（A13 链路；doc 4 §4.2 后必填）
         assert FakeGenerator.ctor_kwargs["provenance"] is not None
 
     def test_a19_zero_relationship_warning(self, monkeypatch, tmp_path):
@@ -768,16 +770,25 @@ class TestPublishRelExecution:
         assert "close" in FakeLoader.calls  # A26：validate 拒绝路径也收尾
 
     def test_a16_load_returns_failure_with_mismatch(self, monkeypatch, tmp_path):
+        """doc 4 §4.5：数据事务已回滚 → 旧子图即当前图，不撤销 current。"""
         FakeGenerator.gen_result = _gen_result()
         FakeLoader.load_result = {
             "success": False,
-            "stats_mismatch": [{"item": "table_count", "expected": 4, "actual": 3}],
+            "_rolled_back": True,
+            "errors": [
+                {
+                    "section": "verify",
+                    "error_type": "StatsMismatch",
+                    "error_message": "图内数量与脚本统计不符（已回滚，旧图保留）: "
+                    "table_count 期望 4/实际 3",
+                }
+            ],
         }
         recorder, result = self._run(monkeypatch, tmp_path)
         assert result["status"] == "failed"
-        assert "图内数量与脚本统计不符" in recorder.inserted[0]["summary"]
+        assert "已回滚，旧图保留" in recorder.inserted[0]["summary"]
         assert "table_count 期望 4/实际 3" in recorder.inserted[0]["summary"]
-        assert recorder.cleared == ["rel"]
+        assert recorder.cleared == []  # 旧 current 仍指向有效图数据
         assert recorder.inserted[0]["current"] is False
         assert "close" in FakeLoader.calls  # A26：load 返回失败路径也收尾
 
@@ -785,16 +796,20 @@ class TestPublishRelExecution:
         FakeGenerator.gen_result = _gen_result()
         FakeLoader.load_result = {
             "success": False,
-            "errors": [{"section_name": "S", "error_message": "boom"}],
+            "_rolled_back": True,
+            "errors": [{"section": "S", "error_message": "boom"}],
         }
         recorder, result = self._run(monkeypatch, tmp_path)
-        assert recorder.inserted[0]["summary"] == "Rel 发布失败：boom"
+        assert (
+            recorder.inserted[0]["summary"] == "Rel 发布失败（已回滚，旧图保留）：boom"
+        )
 
     def test_a16_load_raises_generic_revokes_current(self, monkeypatch, tmp_path):
+        """doc 4 §4.5：图事务提交状态不可知 → 保守撤销 current。"""
         FakeGenerator.gen_result = _gen_result()
         FakeLoader.load_raises = RuntimeError("net")
         recorder, result = self._run(monkeypatch, tmp_path)
-        assert "加载中断" in recorder.inserted[0]["summary"]
+        assert "提交状态不可知" in recorder.inserted[0]["summary"]
         assert recorder.cleared == ["rel"]
         assert "close" in FakeLoader.calls  # A26：load 异常路径也收尾
 
@@ -804,9 +819,7 @@ class TestPublishRelExecution:
         FakeGenerator.gen_result = _gen_result()
         FakeLoader.load_raises = CQLScriptValidationError("bad script")
         recorder, result = self._run(monkeypatch, tmp_path)
-        assert recorder.inserted[0]["summary"] == (
-            "Rel 发布失败：CQL 脚本缺少必需章节或统计头"
-        )
+        assert recorder.inserted[0]["summary"] == "Rel 发布失败：bad script"
         assert recorder.cleared == []
         assert recorder.stored_failures == []
         assert "close" in FakeLoader.calls  # A26：脚本核验拒绝路径也收尾

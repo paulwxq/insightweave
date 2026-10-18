@@ -128,11 +128,15 @@ class QaArchive:
         last_active_at: datetime,
         active: bool,
         carried_evidence: list[Any] | None = None,
+        source_id: str | None = None,
     ) -> dict[str, Any]:
+        """sessions 记录构造（doc 4 §5.2：会话创建即绑定 source_id 并在
+        upsert 整体覆盖时保留）。"""
         return {
             "session_id": session_id,
             "current_thread_id": thread_id,
             "thread_seq": thread_seq,
+            "source_id": source_id,
             "created_at": created_at.astimezone().isoformat(timespec="seconds"),
             "last_active_at": last_active_at.astimezone().isoformat(timespec="seconds"),
             "active": active,

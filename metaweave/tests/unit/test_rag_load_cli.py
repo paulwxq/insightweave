@@ -89,10 +89,10 @@ class TestCommandContract:
             )
 
         assert result.exit_code == 0
-        loader.load.assert_called_once_with(clean=False)
+        loader.load.assert_called_once_with()
 
-    @pytest.mark.parametrize("load_type", ["cql"])
-    def test_clean_keeps_original_meaning_for_other_types(self, tmp_path, load_type):
+    def test_clean_no_longer_wipes_for_cql(self, tmp_path):
+        """doc 4 §4.4：--clean 对 cql 无整库清空语义，load 仍按源替换。"""
         runner = CliRunner()
         config = _write_config(tmp_path)
         loader = _ok_loader()
@@ -100,15 +100,16 @@ class TestCommandContract:
         with mock.patch.object(
             loader_cli.LoaderFactory,
             "create",
-            side_effect=_factory({load_type: loader}),
+            side_effect=_factory({"cql": loader}),
         ):
             result = runner.invoke(
                 loader_cli.rag_load_command,
-                ["--type", load_type, "-c", config, "--clean"],
+                ["--type", "cql", "-c", config, "--clean"],
             )
 
         assert result.exit_code == 0
-        loader.load.assert_called_once_with(clean=True)
+        loader.load.assert_called_once_with()
+        assert "无额外清理" in result.output
 
     def test_invalid_type_rejected_by_choice(self, tmp_path):
         runner = CliRunner()

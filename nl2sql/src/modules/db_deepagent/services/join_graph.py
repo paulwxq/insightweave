@@ -1,14 +1,19 @@
-"""JoinGraphService：Neo4j JOIN 路径服务（docs/v4/5 §6.6）
+"""JoinGraphService：Neo4j JOIN 路径服务（docs/v4/5 §6.6 + doc 4 §4.7）
 
 复制 src/services/db/neo4j_client.py 的 find_join_path、_find_path_apoc_dijkstra、
 _find_path_shortest、_extract_path_info、check_table_exists，改为：
 - 注入显式配置的 Neo4jConnectionManager 实例（不使用 get_neo4j_manager() 单例）
+- 构造时绑定不可变 source_id（doc 4 §4.7）：check_table_exists 与两种寻路
+  均按 ``Table {entity_id: $entity_id}`` 定位（entity_id = source_id:逻辑id，
+  由调用方经 normalize_table_id 归一）；其他源的同名表不参与匹配
 - 每条 Cypher 以 neo4j.Query(text, timeout=...) 执行，超时按 error 处理
-- 返回 JoinPathOutcome（三态区分：找到 / 无路径 / 失败）及所用策略
+- 返回 JoinPathOutcome（三态区分：找到 / 无路径 / 失败）及所用策略；
+  边中的表标识保持原逻辑 id（不把带 UUID 的 entity_id 当 SQL 表名）
 """
 
 from __future__ import annotations
 
+import uuid as _uuid
 from dataclasses import dataclass, field
 from typing import Any, Literal, Optional
 
@@ -18,6 +23,19 @@ from src.services.db.neo4j_connection import Neo4jConnectionManager
 from src.utils.logger import get_module_logger
 
 logger = get_module_logger("nl2sql.db_deepagent.join_graph")
+
+
+def _normalized_source_id(source_id: str | None) -> str:
+    """校验并规范化 source_id（UUID）；缺失/非法拒绝图查询（doc 4 §4.7）。"""
+    if not isinstance(source_id, str) or not source_id.strip():
+        raise ValueError(
+            "图查询必须绑定会话 source_id（规范化 UUID）；缺失即拒绝，"
+            "不回退为仅按 id 匹配"
+        )
+    try:
+        return str(_uuid.UUID(source_id.strip()))
+    except (ValueError, AttributeError):
+        raise ValueError("source_id 不是合法 UUID，拒绝执行图查询") from None
 
 
 @dataclass
@@ -35,11 +53,22 @@ class JoinPathOutcome:
 
 
 class JoinGraphService:
-    """Neo4j JOIN 路径检索（显式配置，超时受控）"""
+    """Neo4j JOIN 路径检索（显式配置，超时受控，绑定不可变 source_id）"""
 
-    def __init__(self, manager: Neo4jConnectionManager, *, join_max_hops: int = 5):
+    def __init__(
+        self,
+        manager: Neo4jConnectionManager,
+        *,
+        source_id: str | None = None,
+        join_max_hops: int = 5,
+    ):
         self._manager = manager
+        self.source_id = _normalized_source_id(source_id)
         self._max_hops = join_max_hops
+
+    def _entity_id(self, logical_id: str) -> str:
+        """逻辑表 id（normalize_table_id 的 TableKey.key）→ 图实体键。"""
+        return f"{self.source_id}:{logical_id}"
 
     def close(self) -> None:
         self._manager.close()
@@ -60,18 +89,20 @@ class JoinGraphService:
         shortestPath 抛错为 error；两种查询都正常但无结果为 no_path。
         """
         hops = max_hops or self._max_hops
-        for table in (base_table, target_table):
+        base_entity = self._entity_id(base_table)
+        target_entity = self._entity_id(target_table)
+        for table, entity in ((base_table, base_entity), (target_table, target_entity)):
             if not self.check_table_exists(table):
                 return JoinPathOutcome(
                     base=base_table,
                     target=target_table,
                     status="table_not_in_graph",
-                    error=f"表 {table!r} 不在 JOIN 图中",
+                    error=f"表 {table!r} 不在当前源（{self.source_id}）的 JOIN 图中",
                 )
 
         if strategy == "apoc_dijkstra":
             outcome = self._find_path_apoc_dijkstra(
-                base_table, target_table, query_timeout_s
+                base_entity, target_entity, base_table, target_table, query_timeout_s
             )
             if outcome.status == "found":
                 return outcome
@@ -83,12 +114,19 @@ class JoinGraphService:
                     target_table,
                 )
                 fallback = self._find_path_shortest(
-                    base_table, target_table, hops, query_timeout_s
+                    base_entity,
+                    target_entity,
+                    base_table,
+                    target_table,
+                    hops,
+                    query_timeout_s,
                 )
                 fallback.fallback_used = True
                 return fallback
             return outcome
-        return self._find_path_shortest(base_table, target_table, hops, query_timeout_s)
+        return self._find_path_shortest(
+            base_entity, target_entity, base_table, target_table, hops, query_timeout_s
+        )
 
     # ---------------------------------------------------------------- 内部
 
@@ -98,10 +136,15 @@ class JoinGraphService:
             return session.run(Query(text, timeout=query_timeout_s), **params).single()
 
     def _find_path_apoc_dijkstra(
-        self, base: str, target: str, query_timeout_s: float
+        self,
+        base_entity: str,
+        target_entity: str,
+        base_logical: str,
+        target_logical: str,
+        query_timeout_s: float,
     ) -> JoinPathOutcome:
         query = """
-            MATCH (src:Table {id: $base}), (dst:Table {id: $target})
+            MATCH (src:Table {entity_id: $base}), (dst:Table {entity_id: $target})
             CALL apoc.algo.dijkstra(src, dst, 'JOIN_ON', 'cost', 1.0)
             YIELD path, weight
             RETURN path, weight
@@ -109,53 +152,67 @@ class JoinGraphService:
             LIMIT 1
         """
         try:
-            record = self._run(query, query_timeout_s, base=base, target=target)
+            record = self._run(
+                query, query_timeout_s, base=base_entity, target=target_entity
+            )
             if record and record.get("path"):
                 return self._extract_path_info(
-                    base,
-                    target,
+                    base_logical,
+                    target_logical,
                     record["path"],
                     float(record["weight"]),
                     strategy="apoc_dijkstra",
                     status="found",
                 )
-            return JoinPathOutcome(base=base, target=target, status="no_path")
+            return JoinPathOutcome(
+                base=base_logical, target=target_logical, status="no_path"
+            )
         except Neo4jError as exc:
             logger.warning("APOC Dijkstra 执行失败: %s", exc)
             return JoinPathOutcome(
-                base=base,
-                target=target,
+                base=base_logical,
+                target=target_logical,
                 status="error",
                 strategy="apoc_dijkstra",
                 error=str(exc),
             )
 
     def _find_path_shortest(
-        self, base: str, target: str, max_hops: int, query_timeout_s: float
+        self,
+        base_entity: str,
+        target_entity: str,
+        base_logical: str,
+        target_logical: str,
+        max_hops: int,
+        query_timeout_s: float,
     ) -> JoinPathOutcome:
         query = f"""
             MATCH path = shortestPath(
-                (src:Table {{id: $base}})-[:JOIN_ON*..{max_hops}]-(dst:Table {{id: $target}})
+                (src:Table {{entity_id: $base}})-[:JOIN_ON*..{max_hops}]-(dst:Table {{entity_id: $target}})
             )
             RETURN path
             LIMIT 1
         """
         try:
-            record = self._run(query, query_timeout_s, base=base, target=target)
+            record = self._run(
+                query, query_timeout_s, base=base_entity, target=target_entity
+            )
             if record and record.get("path"):
                 return self._extract_path_info(
-                    base,
-                    target,
+                    base_logical,
+                    target_logical,
                     record["path"],
                     strategy="shortest_path",
                     status="found",
                 )
-            return JoinPathOutcome(base=base, target=target, status="no_path")
+            return JoinPathOutcome(
+                base=base_logical, target=target_logical, status="no_path"
+            )
         except Neo4jError as exc:
             logger.error("shortestPath 执行失败: %s", exc)
             return JoinPathOutcome(
-                base=base,
-                target=target,
+                base=base_logical,
+                target=target_logical,
                 status="error",
                 strategy="shortest_path",
                 error=str(exc),
@@ -203,7 +260,13 @@ class JoinGraphService:
         )
 
     def check_table_exists(self, table_id: str) -> bool:
-        """检查表节点是否存在（Table 节点 id 为三段表键）。"""
-        query = "MATCH (t:Table {id: $table_id}) RETURN count(t) > 0 AS exists"
-        record = self._run(query, 15.0, table_id=table_id)
+        """检查表在**当前源**图中是否存在（按 Table.entity_id，doc 4 §4.7）。
+
+        其他源存在同名表（相同逻辑 id）不算存在；table_id 为
+        normalize_table_id 归一后的三段逻辑键。
+        """
+        query = (
+            "MATCH (t:Table {entity_id: $entity_id}) " "RETURN count(t) > 0 AS exists"
+        )
+        record = self._run(query, 15.0, entity_id=self._entity_id(table_id))
         return bool(record["exists"]) if record else False

@@ -80,7 +80,9 @@ def _run_single_load(
         # 不清理任何目标，任务失败（exit 1）
         # table_schema 不清空集合（doc 20.1 §10.7）：--clean 与否都只按当前 source_id 替换，
         # 因此既不解析 clean 目标，也不提示清空整张集合。
-        if clean and load_type != "table_schema":
+        # cql 同理（doc 4 §4.4）：普通发布按源替换，全库清空仅属一次性维护
+        # 操作，--clean 对 cql 无额外清理。
+        if clean and load_type not in ("table_schema", "cql"):
             from metaweave.core.clean_targets import resolve_clean_target
 
             try:
@@ -149,6 +151,11 @@ def _run_single_load(
                 "ℹ️  table_schema 不会清空集合：将先写入本批记录，再仅删除当前 source_id "
                 "下不属于本批次的旧记录（--clean 对该类型无额外清理）"
             )
+        elif clean and load_type == "cql":
+            click.echo(
+                "ℹ️  cql 不再清空整库（doc 4）：按脚本头 source_id 整源替换，"
+                "单一数据事务内删除→写入→按源核验（--clean 对该类型无额外清理）"
+            )
         elif clean and emit_clean_warning:
             click.echo("")
             click.echo("⚠️  警告: 您即将清空目标数据库的所有数据！")
@@ -184,7 +191,9 @@ def _run_single_load(
             if not loader.validate():
                 click.echo("❌ 验证失败", err=True)
                 return _fail_result("验证失败", time.perf_counter() - start)
-            result = loader.load(clean=clean)
+            # 按源替换加载（doc 4）：CLI 调试路径未传 source_id 时由脚本头
+            # ``// source_id:`` 决定删除范围；旧格式脚本会被拒绝
+            result = loader.load()
         else:
             result = loader.execute()
 
@@ -294,8 +303,8 @@ def _run_single_load(
 @click.option(
     "--clean",
     is_flag=True,
-    help="加载前先清空目标库（cql 清空 Neo4j 整库）；"
-    "table_schema 不清空共用集合，无论是否传入都只按当前 source_id 替换记录",
+    help="（已失效保留兼容）cql/table_schema 均按 source_id 替换，"
+    "不再清空整库或整集合",
 )
 @click.option(
     "--source_id",

@@ -17,6 +17,7 @@ from typing import Any, Optional
 
 from sqlglot import exp, parse_one
 from sqlglot.errors import ParseError
+from sqlglot.optimizer.normalize_identifiers import normalize_identifiers
 from sqlglot.optimizer.scope import Scope, traverse_scope
 
 from src.modules.db_deepagent.config import GuardCheckConfig
@@ -38,7 +39,11 @@ logger = get_module_logger("nl2sql.db_deepagent.sql_guard")
 # 守卫规则版本：规则集合或判定语义变更时递增。
 # validation_fingerprint = sha256(canonical_json(validation 段) + GUARD_RULES_VERSION)，
 # 授权记录按指纹作用域（§5.4），版本不变时旧授权仍可复用。
-GUARD_RULES_VERSION = "1"
+# v2：表身份解析与前置校验对齐——未加引号标识符按 PG 规则折叠、
+# 裸名按有效搜索路径（pg_catalog 优先）确定 schema（doc 4 §4.7）。
+# v3：分析 AST 统一 normalize_identifiers(postgres)——未引号列名/别名/
+# CTE 名与表身份一并折叠（双引号保留）；原始 SQL 继续用于授权与执行。
+GUARD_RULES_VERSION = "3"
 
 # §9.1 字面量分类
 _TIME_LITERAL_RE = re.compile(r"^\d{4}-\d{2}-\d{2}(?:[ T]\d{2}:\d{2}(?::\d{2})?)?$")
@@ -141,6 +146,21 @@ class _TracedConstant:
 @dataclass(frozen=True)
 class _TracedData:
     """数据派生值（聚合、算术、基表列、受控 generate_series），不要求证据"""
+
+
+# ---------------------------------------------------------------- 标识符归一
+
+
+def _fold_identifier(identifier: Optional[exp.Identifier]) -> str:
+    """未加引号的标识符按 PostgreSQL 规则折叠小写；加引号保留原样。
+
+    与前置校验（sql_validation._identifier_text）同一规则：守卫与校验
+    必须对同一份 SQL 得出同一表身份，否则校验放行的查询在守卫处
+    column_owner_unresolved（doc 4 §4.7）。
+    """
+    if identifier is None:
+        return ""
+    return identifier.name if identifier.quoted else identifier.name.lower()
 
 
 # ---------------------------------------------------------------- 字面量与列
@@ -410,6 +430,7 @@ class _Resolver:
     def __init__(self, db: BusinessDbService):
         self._db = db
         self._columns_cache: dict[tuple[str, str], set[str]] = {}
+        self._table_schema_cache: dict[str, Optional[str]] = {}
         self._owner_cache: dict[int, Optional[_Owner]] = {}
         self._type_cache: dict[tuple[str, str, str], Optional[str]] = {}
         self._series_ok: dict[int, bool] = {}
@@ -442,6 +463,51 @@ class _Resolver:
                 logger.warning("column_type(%s) 失败: %s", key, exc)
                 self._type_cache[key] = None
         return self._type_cache[key]
+
+    # ---- 表身份（与前置校验一致的解析规则） ----
+
+    def _table_identity(self, table: exp.Table) -> tuple[Optional[str], str]:
+        """(schema, table) 按 PG 规则归一：未加引号的标识符折叠小写
+        （PUBLIC.orders → public.orders），加引号保留原样；裸名按有效
+        搜索路径确定 schema。schema 无法确认时返回 None——无法确认
+        归属按列归属未解析处理（fail closed，与前置校验口径一致）。
+        """
+        schema = _fold_identifier(table.args.get("db")) or None
+        name = (
+            _fold_identifier(table.this)
+            if isinstance(table.this, exp.Identifier)
+            else table.name
+        )
+        if schema is None and name:
+            schema = self._bare_name_schema(name)
+        return schema, name
+
+    def _bare_name_schema(self, name: str) -> Optional[str]:
+        """裸名实际解析到的 schema：有效搜索路径为 pg_catalog 在登记
+        清单之前（两边同名优先系统目录，与前置校验第 9 轮判定一致），
+        其次按登记顺序取第一个命中；目录查询失败按无归属处理。
+        """
+        if name in self._table_schema_cache:
+            return self._table_schema_cache[name]
+        allowed = getattr(self._db, "allowed_schemas", None)
+        if not allowed:
+            # 未按登记装配（旧部署/未作用域假件）：沿用连接默认 public
+            schema: Optional[str] = "public"
+        else:
+            try:
+                located = self._db.locate_table_schemas(
+                    [name], [*allowed, "pg_catalog"]
+                ).get(name, [])
+            except Exception as exc:  # noqa: BLE001（目录查询失败按无归属处理）
+                logger.warning("locate_table_schemas(%s) 失败: %s", name, exc)
+                located = []
+            schema = (
+                "pg_catalog"
+                if "pg_catalog" in located
+                else next((s for s in allowed if s in located), None)
+            )
+        self._table_schema_cache[name] = schema
+        return schema
 
     # ---- 归属解析（§9.2） ----
 
@@ -493,10 +559,10 @@ class _Resolver:
         if isinstance(src, exp.Table):
             if isinstance(src.this, exp.Func):
                 return None  # 表函数列无基表归属；条件中引用走来源追溯
-            schema = src.db or "public"
-            if name not in self.table_columns(schema, src.name):
+            schema, table = self._table_identity(src)
+            if schema is None or name not in self.table_columns(schema, table):
                 return None
-            return _Owner(schema=schema, table=src.name, column=name)
+            return _Owner(schema=schema, table=table, column=name)
         if isinstance(src, Scope):
             return self._resolve_projection(src, name)
         return None
@@ -525,8 +591,8 @@ class _Resolver:
                 if alias is not None:
                     return {c.name for c in alias.args.get("columns") or []}
                 return set()
-            schema = src.db or "public"
-            return self.table_columns(schema, src.name)
+            schema, table = self._table_identity(src)
+            return self.table_columns(schema, table) if schema is not None else set()
         if isinstance(src, Scope):
             names: set[str] = set()
             for branch in _union_branches(src.expression):
@@ -733,6 +799,10 @@ class SqlEvidenceGuard:
             tree = parse_one(sql, read="postgres")
         except ParseError as exc:
             return GuardResult(False, ["guard_unparseable"], [f"SQL 无法解析: {exc}"])
+        # 分析 AST 统一按 PG 规则折叠未引号标识符（列名/别名/CTE 名/
+        # 表身份），双引号保留原样——与前置校验同一归一口径；归一只
+        # 发生在这棵局部 AST 上，原始 SQL 字符串继续用于授权与执行
+        tree = normalize_identifiers(tree, dialect="postgres")
         # §9.5：只有当前数据源的维度证据进入 D
         dim_pool = [
             d for d in dim_evidence if d.get("datasource_id") == ctx.datasource_id
@@ -1386,6 +1456,8 @@ class SqlEvidenceGuard:
         placeholder_position_invalid）。
         """
         tree = parse_one(sql, read="postgres")
+        # 与 check() 同一归一口径：未引号标识符折叠后再做归属解析
+        tree = normalize_identifiers(tree, dialect="postgres")
         resolver = _Resolver(self._db)
         scopes = traverse_scope(tree)
         for scope in scopes:

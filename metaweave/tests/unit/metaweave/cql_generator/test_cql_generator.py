@@ -11,7 +11,10 @@ import yaml
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 from metaweave.core.cql_generator.generator import CQLGenerator
-from metaweave.core.cql_generator.models import RelationshipFilterStats, CQLGenerationResult
+from metaweave.core.cql_generator.models import (
+    RelationshipFilterStats,
+    CQLGenerationResult,
+)
 
 
 @pytest.fixture
@@ -24,13 +27,13 @@ def temp_config_file(tmp_path):
             "database": "test_db",
             "user": "test_user",
             "password": "test_pass",
-            "schemas": ["public"]
+            "schemas": ["public"],
         },
         "output": {
             "json_directory": "output/json",
             "rel_directory": "output/rel",
-            "cql_directory": "output/cql"
-        }
+            "cql_directory": "output/cql",
+        },
     }
     config_path = tmp_path / "test_config.yaml"
     with open(config_path, "w", encoding="utf-8") as f:
@@ -48,14 +51,14 @@ def temp_config_file_with_deprecated(tmp_path):
             "database": "test_db",
             "user": "test_user",
             "password": "test_pass",
-            "schemas": ["public"]
+            "schemas": ["public"],
         },
         "output": {
             "json_directory": "output/json",
             "json_llm_directory": "output/json_llm",  # 废弃配置
             "rel_directory": "output/rel",
-            "cql_directory": "output/cql"
-        }
+            "cql_directory": "output/cql",
+        },
     }
     config_path = tmp_path / "test_config_deprecated.yaml"
     with open(config_path, "w", encoding="utf-8") as f:
@@ -100,7 +103,9 @@ class TestCQLGenerator:
 
     @patch("metaweave.core.cql_generator.generator.JSONReader")
     @patch("metaweave.core.cql_generator.generator.CypherWriter")
-    def test_generate_with_step_name(self, mock_writer_class, mock_reader_class, temp_config_file):
+    def test_generate_with_step_name(
+        self, mock_writer_class, mock_reader_class, temp_config_file
+    ):
         """测试：generate() 方法正确传递 step_name 参数"""
         # 模拟 JSONReader
         mock_reader = MagicMock()
@@ -160,7 +165,10 @@ class TestCQLGenerator:
     ):
         """测试：generate() 返回正确的统计数据"""
         from metaweave.core.cql_generator.models import (
-            TableNode, ColumnNode, HASColumnRelation, JOINOnRelation
+            TableNode,
+            ColumnNode,
+            HASColumnRelation,
+            JOINOnRelation,
         )
 
         # 模拟数据
@@ -174,14 +182,14 @@ class TestCQLGenerator:
                 schema="public",
                 table="table1",
                 name="col1",
-                data_type="integer"
+                data_type="integer",
             ),
             ColumnNode(
                 full_name="public.table1.col2",
                 schema="public",
                 table="table1",
                 name="col2",
-                data_type="varchar"
+                data_type="varchar",
             ),
         ]
         has_column_rels = [
@@ -193,13 +201,19 @@ class TestCQLGenerator:
                 relationship_id="rel_test001",
                 src_full_name="public.table1",
                 dst_full_name="public.table2",
-                cardinality="N:1"
+                cardinality="N:1",
             )
         ]
 
         # 模拟 JSONReader
         mock_reader = MagicMock()
-        mock_reader.read_all.return_value = (tables, columns, has_column_rels, join_on_rels, RelationshipFilterStats())
+        mock_reader.read_all.return_value = (
+            tables,
+            columns,
+            has_column_rels,
+            join_on_rels,
+            RelationshipFilterStats(),
+        )
         mock_reader_class.return_value = mock_reader
 
         # 模拟 CypherWriter

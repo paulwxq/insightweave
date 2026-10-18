@@ -13,6 +13,10 @@ from typing import Any
 
 from src.modules.db_deepagent.config import DbAgentConfig
 from src.modules.db_deepagent.errors import InvalidTableIdError
+from src.modules.db_deepagent.keyspace import (
+    db_prefix_problem,
+    plain_identifier_problem,
+)
 from src.modules.db_deepagent.services.business_db import BusinessDbService
 from src.modules.db_deepagent.services.milvus_retrieval import DbMilvusRetrieval
 from src.tools.schema_retrieval.table_names import to_display_name
@@ -49,6 +53,11 @@ class TableCatalog:
         self._cfg = cfg
         self._milvus = milvus
         self._business_db = business_db
+        self._allowed_schemas = (
+            tuple(cfg.business_db.allowed_schemas)
+            if cfg.business_db.allowed_schemas
+            else None
+        )
         mapping = cfg.retrieval.table_category_mapping
         self._category_mapping_lower = {
             group: {v.lower() for v in values} for group, values in mapping.items()
@@ -59,25 +68,62 @@ class TableCatalog:
     def normalize_table_id(self, table_id: str) -> TableKey:
         """两段 schema.table 补前缀成三段；三段则首段必须等于 table_key_prefix。
 
+        键空间（doc 4 §4.2）：db 前缀（table_key_prefix）走统一判定式（允许
+        内部空格/连字符/数字开头，拒点号与控制字符）；schema/table 保持普通
+        标识符正则。display 始终剥掉 db 前缀，知识前缀不进入 SQL 表引用。
+        allowed_schemas（登记 selected_schemas，doc 4 §4.7）非空时，schema
+        不在清单内即拒绝——SQL 表引用入口（plan_joins/inspect_tables 等）
+        均经本方法归一。
+
         Raises:
-            InvalidTableIdError: 段数不是 2/3、首段不符或标识符非法
+            InvalidTableIdError: 段数不是 2/3、首段不符、标识符非法或
+                schema 不在登记范围
         """
+        prefix = self._cfg.business_db.table_key_prefix
+        prefix_problem = db_prefix_problem(prefix)
+        if prefix_problem:
+            raise InvalidTableIdError(
+                f"运行配置 table_key_prefix 非法: {prefix_problem}"
+            )
         parts = table_id.strip().split(".")
         if len(parts) == 2:
             schema, table = parts
-            key = f"{self._cfg.business_db.table_key_prefix}.{schema}.{table}"
+            key = f"{prefix}.{schema}.{table}"
         elif len(parts) == 3:
-            if parts[0] != self._cfg.business_db.table_key_prefix:
+            if parts[0] != prefix:
                 raise InvalidTableIdError(
-                    f"表标识 {table_id!r} 首段应为 {self._cfg.business_db.table_key_prefix!r}"
+                    f"表标识 {table_id!r} 首段应为当前源 db_name {prefix!r}"
                 )
+            schema, table = parts[1], parts[2]
             key = ".".join(parts)
         else:
             raise InvalidTableIdError(
                 f"表标识 {table_id!r} 应为两段 schema.table 或三段 db.schema.table"
             )
-        if not all(re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", p) for p in key.split(".")):
-            raise InvalidTableIdError(f"表标识 {table_id!r} 含非法字符")
+        for kind, part in (("schema", schema), ("表", table)):
+            problem = plain_identifier_problem(part, kind=kind)
+            if problem:
+                raise InvalidTableIdError(f"表标识 {table_id!r} 非法: {problem}")
+        if self._allowed_schemas is not None:
+            # 知识键优先按真实名称**精确匹配**并保留大小写（doc 4 §4.2：
+            # 登记名原样；模型常回传检索到的知识键原文，如 Sales）；
+            # 未精确命中时才按 PG 未加引号规则折叠小写兜底（兼容
+            # PUBLIC.orders 这类输入），命中后以登记名构造键，避免大小写
+            # 漂移。两者皆不中才拒绝——同时登记 Sales 与 sales 时各自
+            # 归一、互不吞并
+            matched = None
+            if schema in self._allowed_schemas:
+                matched = schema
+            else:
+                folded = schema.lower()
+                matched = next((a for a in self._allowed_schemas if a == folded), None)
+            if matched is None:
+                raise InvalidTableIdError(
+                    f"表标识 {table_id!r} 的 schema 不在本源登记的 selected_schemas"
+                    f"（{', '.join(self._allowed_schemas)}）内"
+                )
+            schema = matched
+            key = f"{prefix}.{schema}.{table}"
         return TableKey(key=key, display=to_display_name(key))
 
     # ---------------------------------------------------------------- 类别

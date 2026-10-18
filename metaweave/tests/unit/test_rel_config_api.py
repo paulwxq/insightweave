@@ -807,6 +807,8 @@ def test_a11_manual_entries_survive_real_generator_chain(monkeypatch, tmp_path):
                 "cql_directory": str(root / "cql"),
             },
         },
+        # doc 4 §4.2：实体键身份必填（受管链路恒注入；此处为真实链路等价注入）
+        provenance=(SOURCE_ID, "99999999-9999-4999-8999-999999999999"),
     )
     gen = generator.generate()
     assert gen.success is True

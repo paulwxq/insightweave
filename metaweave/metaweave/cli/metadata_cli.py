@@ -20,14 +20,23 @@ logger = logging.getLogger("metaweave.cli")
 # 模式：generate-domains / generate-dim-config / generate-sql-rag / step（--step 单步流程）
 _MODE_SCOPED_PARAMS: Dict[str, set] = {
     "generate-domains": {
-        "domains_config", "description", "clean",
-        "md_context_dir", "md_context_mode", "md_limit",
+        "domains_config",
+        "description",
+        "clean",
+        "md_context_dir",
+        "md_context_mode",
+        "md_limit",
     },
     "generate-dim-config": {"dim_config_path", "clean"},
     "generate-sql-rag": {"domains_config", "md_context_dir", "clean"},
     "step": {
-        "schemas", "tables", "max_workers", "clean",
-        "domain", "cross_domain", "domains_config",
+        "schemas",
+        "tables",
+        "max_workers",
+        "clean",
+        "domain",
+        "cross_domain",
+        "domains_config",
     },
 }
 
@@ -65,12 +74,9 @@ def _warn_out_of_scope_params(active_mode: str) -> None:
         source_name = getattr(source, "name", str(source)).lower()
         if "commandline" not in source_name:
             continue
-        msg = (
-            f"⚠️  参数 {_PARAM_DISPLAY[param_name]} 在当前模式（{active_mode}）下不生效，已忽略"
-        )
+        msg = f"⚠️  参数 {_PARAM_DISPLAY[param_name]} 在当前模式（{active_mode}）下不生效，已忽略"
         click.echo(msg, err=True)
         logger.warning(msg)
-
 
 
 def _run_generate_sql_rag(
@@ -85,7 +91,7 @@ def _run_generate_sql_rag(
     Returns:
         None 表示成功；字符串为失败原因（doc 26 §6.2：共享执行层不抛
         click.Abort，失败路径以结构化原因返回，供 pipeline 汇总与 CLI 报错）。
-    
+
 
     由原 `sql-rag generate / validate / run-all` 三命令合并而来：
     - 生成段 == 原 generate（LLM 预检、domains 路径解析、--clean 语义原样继承）；
@@ -154,9 +160,7 @@ def _run_generate_sql_rag(
         try:
             resolved_dir = ensure_path_in_project_root(sql_output_dir)
         except ValueError as e:
-            raise click.UsageError(
-                f"❌ --clean 输出目录不在项目根目录内: {e}"
-            )
+            raise click.UsageError(f"❌ --clean 输出目录不在项目根目录内: {e}")
         resolved_dir.mkdir(parents=True, exist_ok=True)
         removed = 0
         for child in resolved_dir.iterdir():
@@ -221,7 +225,9 @@ def _run_generate_sql_rag(
             click.echo(f"  修复后有效: {final_valid}, 有效率: {final_rate:.1f}%")
         ras = stats["repair_apply_stats"]
         if ras["modified"] > 0 or ras["deleted"] > 0:
-            click.echo(f"  修复回写: 替换 {ras['modified']} 条, 删除 {ras['deleted']} 条")
+            click.echo(
+                f"  修复回写: 替换 {ras['modified']} 条, 删除 {ras['deleted']} 条"
+            )
         click.echo(f"  耗时: {stats['total_time']:.2f}s")
 
         # 质量阻断（对齐 pipeline 步骤 9）
@@ -232,7 +238,9 @@ def _run_generate_sql_rag(
                 logger.warning(
                     "SQL 校验完成（已启用修复）：原始 %d 条，有效 %d 条，"
                     "修复失败 %d 条（已从文件删除）",
-                    stats["total"], final_valid, final_invalid,
+                    stats["total"],
+                    final_valid,
+                    final_invalid,
                 )
             else:
                 # SQLExampleLoader 不校验有效性，无效 SQL 会原样装载进向量库，必须阻断
@@ -257,33 +265,28 @@ def _run_generate_sql_rag(
     type=click.Path(exists=True),
     default="configs/metadata_config.yaml",
     show_default=True,
-    help="配置文件路径"
+    help="配置文件路径",
 )
-@click.option(
-    "--schemas",
-    "-s",
-    type=str,
-    help="要处理的 schema 列表（逗号分隔）"
-)
+@click.option("--schemas", "-s", type=str, help="要处理的 schema 列表（逗号分隔）")
 @click.option(
     "--tables",
     "-t",
     type=str,
-    help="要处理的数据库对象名称列表（逗号分隔；兼容参数名仍为 tables）"
+    help="要处理的数据库对象名称列表（逗号分隔；兼容参数名仍为 tables）",
 )
 @click.option(
     "--max-workers",
     "-w",
     type=click.IntRange(min=1),
     default=4,
-    help="最大并发数（默认: 4）"
+    help="最大并发数（默认: 4）",
 )
 @click.option(
     "--clean",
     is_flag=True,
     default=False,
     help="在写入前清理输出：删除目标目录顶层所有文件（不限扩展名、不递归、保留子目录）；"
-    "适用于全部 --step 步骤与 --generate-domains / --generate-dim-config / --generate-sql-rag"
+    "适用于全部 --step 步骤与 --generate-domains / --generate-dim-config / --generate-sql-rag",
 )
 @click.option(
     "--step",
@@ -291,12 +294,13 @@ def _run_generate_sql_rag(
     multiple=True,
     help="执行步骤（仅允许传入一次）：db/ddl/json/cql/md/rel"
     "（rel_llm 已并入 rel，由 relationships.llm_candidates.enabled 配置开关控制，见 doc 15）"
-    "（md 依赖 JSON 产物，执行顺序 ddl → json → md，见 doc 17）"
+    "（md 依赖 JSON 产物，执行顺序 ddl → json → md，见 doc 17）",
 )
 @click.option(
     "--source-id",
     multiple=True,
-    help="仅 --step db 必填、--step ddl 可选（受管模式）：平台库中已登记的数据源 UUID（仅允许传入一次）",
+    help="--step db 必填、--step ddl 可选（受管模式）、--step cql 必填"
+    "（doc 4 实体键身份）：平台库中已登记的数据源 UUID（仅允许传入一次）",
 )
 @click.option(
     "--job-id",
@@ -318,39 +322,39 @@ def _run_generate_sql_rag(
     "--domains-config",
     type=click.Path(exists=False),
     default=None,
-    help="业务主题配置文件路径（默认 output/domains/db_domains.yaml，由 output.domains_directory 决定）"
+    help="业务主题配置文件路径（默认 output/domains/db_domains.yaml，由 output.domains_directory 决定）",
 )
 @click.option(
     "--generate-domains",
     is_flag=True,
     default=False,
-    help="基于 md 摘要（和可选的 --description）自动生成 domains 配置并写入 YAML"
+    help="基于 md 摘要（和可选的 --description）自动生成 domains 配置并写入 YAML",
 )
 @click.option(
     "--generate-dim-config",
     is_flag=True,
     default=False,
-    help="扫描 json 目录生成 dim_tables.yaml 维度表配置（识别 table_category='dim'，embedding_col 需人工填写）"
+    help="扫描 json 目录生成 dim_tables.yaml 维度表配置（识别 table_category='dim'，embedding_col 需人工填写）",
 )
 @click.option(
     "--dim-config",
     "dim_config_path",
     type=click.Path(exists=False),
     default=None,
-    help="dim_tables.yaml 路径（默认 output/dim_config/dim_tables.yaml，由 loaders.dim_loader.config_file 决定）"
+    help="dim_tables.yaml 路径（默认 output/dim_config/dim_tables.yaml，由 loaders.dim_loader.config_file 决定）",
 )
 @click.option(
     "--generate-sql-rag",
     is_flag=True,
     default=False,
     help="基于 md 文档与业务域配置生成 Question-SQL 样例；"
-    "生成后按 sql_rag.validation.enabled（默认 true）执行 SQL EXPLAIN 校验与可选 LLM 修复"
+    "生成后按 sql_rag.validation.enabled（默认 true）执行 SQL EXPLAIN 校验与可选 LLM 修复",
 )
 @click.option(
     "--description",
     type=str,
     default=None,
-    help="可选：生成 domains 时提供数据库补充说明（用于 LLM 提示词，不直接写入 YAML）"
+    help="可选：生成 domains 时提供数据库补充说明（用于 LLM 提示词，不直接写入 YAML）",
 )
 @click.option(
     "--cross-domain/--no-cross-domain",
@@ -361,20 +365,20 @@ def _run_generate_sql_rag(
     "--md-context-dir",
     type=click.Path(exists=False),
     default="output/md",
-    help="md 摘要目录（默认：output/md）"
+    help="md 摘要目录（默认：output/md）",
 )
 @click.option(
     "--md-context-mode",
     type=click.Choice(["name", "name_comment", "full"], case_sensitive=False),
     default="name_comment",
     show_default=True,
-    help="md 摘要模式：name 仅表名；name_comment 表名+首行；full 全文"
+    help="md 摘要模式：name 仅表名；name_comment 表名+首行；full 全文",
 )
 @click.option(
     "--md-limit",
     type=int,
     default=None,
-    help="md 文件数量上限（默认：配置文件 domain_generation.md_context_limit，否则 100）"
+    help="md 文件数量上限（默认：配置文件 domain_generation.md_context_limit，否则 100）",
 )
 def metadata_command(
     config: str,
@@ -405,13 +409,13 @@ def metadata_command(
     md 步骤只读 output/json/*.json（doc 17），执行顺序 ddl → json → md。
     注意：旧 JSON（ddl 阶段 LLM 补齐过注释）的 comment_source 不构成
     "原始注释"口径，需重跑 ddl+json 后才有治理含义。
-    
+
     示例:
-    
+
         metaweave metadata --config configs/metadata_config.yaml
-        
+
         metaweave metadata -c config.yaml --schemas public,myschema
-        
+
         metaweave metadata -c config.yaml --tables users,orders --max-workers 8
     """
     # 重复传入防护 + 归一化（doc 27 §3.1）：multiple 元组 → 单值；
@@ -424,8 +428,10 @@ def metadata_command(
     step = step[0] if step else None
     if len(source_id) > 1:
         raise click.UsageError("--source-id 仅允许传入一次")
-    if step not in ("db", "ddl") and source_id:
-        raise click.UsageError("--source-id 仅适用于 --step db 或受管 --step ddl")
+    if step not in ("db", "ddl", "cql") and source_id:
+        raise click.UsageError(
+            "--source-id 仅适用于 --step db、受管 --step ddl 或 --step cql"
+        )
     if len(job_id) > 1:
         raise click.UsageError("--job-id 仅允许传入一次")
     if step not in ("db", "ddl") and job_id:
@@ -449,9 +455,17 @@ def metadata_command(
                 raise click.UsageError("--job-id 不是合法 UUID") from None
         ctx = click.get_current_context()
         excluded = {
-            "schemas", "tables", "max_workers", "domain", "cross_domain",
-            "domains_config", "dim_config_path", "description",
-            "md_context_dir", "md_context_mode", "md_limit",
+            "schemas",
+            "tables",
+            "max_workers",
+            "domain",
+            "cross_domain",
+            "domains_config",
+            "dim_config_path",
+            "description",
+            "md_context_dir",
+            "md_context_mode",
+            "md_limit",
         }
         for name in excluded:
             origin = ctx.get_parameter_source(name)
@@ -470,9 +484,7 @@ def metadata_command(
             raise
         config_path = resolve_project_path(config)
         try:
-            result = run_db_step(
-                config_path, source_uuid, clean, job_id=job_uuid_arg
-            )
+            result = run_db_step(config_path, source_uuid, clean, job_id=job_uuid_arg)
         except DbStepConfigError as exc:
             raise click.UsageError(str(exc)) from None
         result_job = result.get("job_id")
@@ -518,8 +530,7 @@ def metadata_command(
             workers_origin = ctx.get_parameter_source("max_workers")
             workers_arg = (
                 max_workers
-                if workers_origin is not None
-                and workers_origin.name == "COMMANDLINE"
+                if workers_origin is not None and workers_origin.name == "COMMANDLINE"
                 else None
             )
             try:
@@ -554,7 +565,12 @@ def metadata_command(
     # 无编排契约（doc 25 §2.2）：未指定 step 且未启用任何 --generate-* 独立模式 → 拒绝
     # （置于 try 之前：参数级校验按 click 标准以退出码 2 报出，不被末尾
     #   except Exception 吞成 Abort/退出码 1）
-    if not step and not generate_domains and not generate_dim_config and not generate_sql_rag:
+    if (
+        not step
+        and not generate_domains
+        and not generate_dim_config
+        and not generate_sql_rag
+    ):
         raise click.UsageError(
             "必须指定 step 或 generate 模式：--step db|ddl|json|md|rel|cql，"
             "或 --generate-domains / --generate-dim-config / --generate-sql-rag"
@@ -606,15 +622,25 @@ def metadata_command(
             output_dir = _resolve_dir(str(output_config.get("output_dir", "output")))
 
             if step_name == "ddl":
-                target_dir = _resolve_dir(str(output_config.get("ddl_directory", output_dir / "ddl")))
+                target_dir = _resolve_dir(
+                    str(output_config.get("ddl_directory", output_dir / "ddl"))
+                )
             elif step_name == "json":
-                target_dir = _resolve_dir(str(output_config.get("json_directory", output_dir / "json")))
+                target_dir = _resolve_dir(
+                    str(output_config.get("json_directory", output_dir / "json"))
+                )
             elif step_name == "md":
-                target_dir = _resolve_dir(str(output_config.get("markdown_directory", output_dir / "md")))
+                target_dir = _resolve_dir(
+                    str(output_config.get("markdown_directory", output_dir / "md"))
+                )
             elif step_name == "rel":
-                target_dir = _resolve_dir(str(output_config.get("rel_directory", output_dir / "rel")))
+                target_dir = _resolve_dir(
+                    str(output_config.get("rel_directory", output_dir / "rel"))
+                )
             elif step_name == "cql":
-                target_dir = _resolve_dir(str(output_config.get("cql_directory", output_dir / "cql")))
+                target_dir = _resolve_dir(
+                    str(output_config.get("cql_directory", output_dir / "cql"))
+                )
             else:
                 raise click.UsageError(f"❌ --clean 不支持的 step: {step_name}")
 
@@ -626,27 +652,39 @@ def metadata_command(
 
         # 阶段 1: CLI 级互斥校验（只看 CLI 参数，不涉及 yaml）
         if generate_domains and (domain is not None or cross_domain is not None):
-            raise click.UsageError("--generate-domains 与 --domain/--cross-domain 互斥，请分两步执行")
+            raise click.UsageError(
+                "--generate-domains 与 --domain/--cross-domain 互斥，请分两步执行"
+            )
         if generate_dim_config and (domain is not None or cross_domain is not None):
-            raise click.UsageError("--generate-dim-config 与 --domain/--cross-domain 互斥，请分两步执行")
+            raise click.UsageError(
+                "--generate-dim-config 与 --domain/--cross-domain 互斥，请分两步执行"
+            )
         if generate_domains and generate_dim_config:
-            raise click.UsageError("--generate-domains 与 --generate-dim-config 互斥，请分两步执行")
+            raise click.UsageError(
+                "--generate-domains 与 --generate-dim-config 互斥，请分两步执行"
+            )
         if generate_sql_rag and (domain is not None or cross_domain is not None):
-            raise click.UsageError("--generate-sql-rag 与 --domain/--cross-domain 互斥，请分两步执行")
+            raise click.UsageError(
+                "--generate-sql-rag 与 --domain/--cross-domain 互斥，请分两步执行"
+            )
         if generate_sql_rag and generate_domains:
-            raise click.UsageError("--generate-sql-rag 与 --generate-domains 互斥，请分两步执行")
+            raise click.UsageError(
+                "--generate-sql-rag 与 --generate-domains 互斥，请分两步执行"
+            )
         if generate_sql_rag and generate_dim_config:
-            raise click.UsageError("--generate-sql-rag 与 --generate-dim-config 互斥，请分两步执行")
+            raise click.UsageError(
+                "--generate-sql-rag 与 --generate-dim-config 互斥，请分两步执行"
+            )
 
         # 阶段 1.2: 参数作用域告警——当前模式下不生效的显式参数仅提示，不拦截执行
         _active_mode = (
             "generate-domains"
             if generate_domains
-            else "generate-dim-config"
-            if generate_dim_config
-            else "generate-sql-rag"
-            if generate_sql_rag
-            else "step"
+            else (
+                "generate-dim-config"
+                if generate_dim_config
+                else "generate-sql-rag" if generate_sql_rag else "step"
+            )
         )
         _warn_out_of_scope_params(_active_mode)
 
@@ -794,13 +832,24 @@ def metadata_command(
                     return False
                 return "commandline" in getattr(_src, "name", str(_src)).lower()
 
+            _cql_source_arg = None
+            if source_id:
+                from metaweave.utils.source_id import normalize_source_id
+
+                try:
+                    _cql_source_arg = str(normalize_source_id(source_id[0]))
+                except ValueError:
+                    raise click.UsageError("--source-id 不是合法 UUID") from None
             _cql_result = execute_cql(
                 MetadataExecutionRequest(
                     config_path=config_path,
                     operation="cql",
                     clean=clean,
+                    cql_source_id=_cql_source_arg,
                     domains_config_override=(
-                        Path(domains_config) if _explicit_cql("domains_config") else None
+                        Path(domains_config)
+                        if _explicit_cql("domains_config")
+                        else None
                     ),
                 )
             )
@@ -833,7 +882,9 @@ def metadata_command(
                     operation="rel",
                     clean=clean,
                     domains_config_override=(
-                        Path(domains_config) if _explicit_rel("domains_config") else None
+                        Path(domains_config)
+                        if _explicit_rel("domains_config")
+                        else None
                     ),
                     domain_override=domain if _explicit_rel("domain") else None,
                     cross_domain_override=(

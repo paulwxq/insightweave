@@ -1157,21 +1157,22 @@ def _publish_dim_value(
 
 
 def _rel_failure_summary(result: dict) -> str:
-    """§6.3 失败摘要按序：stats_mismatch → 首个 section 错误 → 加载中断。"""
-    mismatches = result.get("stats_mismatch")
-    if mismatches:
-        detail = "；".join(
-            f"{m['item']} 期望 {m['expected']}/实际 {m['actual']}" for m in mismatches
-        )
-        return f"Rel 发布失败：图内数量与脚本统计不符（{detail}）"
-    if result.get("_load_interrupted"):
-        return "Rel 发布失败：Neo4j 加载中断，图可能处于半加载状态，请重跑发布"
-    errors = result.get("errors")
-    if isinstance(errors, list) and errors:
-        first = errors[0]
-        message = first.get("error_message") if isinstance(first, dict) else str(first)
-        return f"Rel 发布失败：{message}"
-    return "Rel 发布失败：Neo4j 加载未成功，请重跑发布"
+    """rel 失败摘要（doc 4 §4.5 事务化后的口径）。
+
+    数据事务已回滚（``_rolled_back``）的失败——统计不符、事务内错误、
+    迁移前置未满足——旧子图保留，失败文案须明确"旧图保留"；提交状态
+    不可知的失败提示重跑。
+    """
+    if result.get("_rolled_back"):
+        errors = result.get("errors")
+        if isinstance(errors, list) and errors:
+            first = errors[0]
+            message = (
+                first.get("error_message") if isinstance(first, dict) else str(first)
+            )
+            return f"Rel 发布失败（已回滚，旧图保留）：{message}"
+        return "Rel 发布失败（已回滚，旧图保留），请检查 Neo4j 与迁移状态后重试"
+    return "Rel 发布失败：Neo4j 图事务提交状态不可知，请重跑发布"
 
 
 def _publish_rel(
@@ -1182,16 +1183,20 @@ def _publish_rel(
     expected_run_marker: datetime,
     snapshot,
 ) -> dict:
-    """rel 发布执行（doc 23.2 §6.3）：锁内复查（登记/三 marker/指纹）→ 清空
-    cql 目录 → 生成 cql（含 provenance）→ 核验 → validate → load(clean=True)
-    → 发布行（成功 current / 失败非 current）。
+    """rel 发布执行（doc 23.2 §6.3 + doc 4 §4.4/§4.5 按源替换）：锁内复查
+    （登记/三 marker/指纹）→ 清空 cql 目录 → 生成 cql（provenance 必填）→
+    核验 → validate → load()（按源单一数据事务替换）→ 发布行。
 
     - 锁内禁用 ``_store_failure``（其实现另开会话对同一源行 FOR UPDATE，
       持锁调用即自等待）：确定性失败一律当前 session 直插失败行 + commit；
-    - ``CQLScriptValidationError`` 恒在 clean 前抛出（图未动）→ 直插失败行、
-      不撤销 current，且该 except 必须列在通用 ``except Exception`` 之前；
-    - ``clear_current`` 仅在「未抛 CQLScriptValidationError 且 load() 主体已被
-      调用」的路径执行——进入过 load() 旧 current 即不可信（全清语义）。
+    - ``CQLScriptValidationError`` 恒在任何图写入前抛出（图未动）→ 直插
+      失败行、不撤销 current，且该 except 必须列在通用 ``except Exception``
+      之前；
+    - 数据事务已回滚的失败（``_rolled_back``，doc 4 §4.5）：当前源旧子图
+      完整保留，旧 current 仍指向有效图数据，不撤销；
+    - 图已提交（成功）或提交状态不可知（load 抛异常）：旧 current 不得
+      保留，撤销后记失败/成功行；
+    - 按源预期/实际计数与核验结论记入后端日志（关联 source_id/publish_id）。
     """
     loader = None
     gen_counts = None
@@ -1288,15 +1293,14 @@ def _publish_rel(
                 return _result(REL_STEP, STATUS_FAILED, summary)
 
             # loader_config 取主配置快照的 loaders.cql_loader（Neo4j 凭据不受
-            # 工作区覆盖）；数量核验强制开启（§5.5/A24，主配置 false 不生效）
+            # 工作区覆盖）；source_id 为后端已验证的删除范围（doc 4 §4.4）
             loader_config = deepcopy(
                 (snapshot.main_config.get("loaders") or {}).get("cql_loader") or {}
             )
             loader_config["input_file"] = str(
                 cql_dir / f"import_all.{source.db_name}.cypher"
             )
-            loader_config.setdefault("options", {})["validate_after_load"] = True
-            loader = CQLLoader({"cql_loader": loader_config})
+            loader = CQLLoader({"cql_loader": loader_config}, source_id=str(source_id))
             if not loader.validate():
                 summary = "Rel 发布失败：Neo4j 服务不可用"
                 insert_publish_row(
@@ -1313,10 +1317,10 @@ def _publish_rel(
                 return _result(REL_STEP, STATUS_FAILED, summary)
 
             try:
-                result = loader.load(clean=True)
-            except CQLScriptValidationError:
-                # clean 前抛出（图未动）：直插失败行、不撤销 current
-                summary = "Rel 发布失败：CQL 脚本缺少必需章节或统计头"
+                result = loader.load()
+            except CQLScriptValidationError as exc:
+                # 图写入之前拒绝（图未动）：直插失败行、不撤销 current
+                summary = f"Rel 发布失败：{exc}"
                 insert_publish_row(
                     session,
                     publish_id,
@@ -1330,17 +1334,54 @@ def _publish_rel(
                 session.commit()
                 return _result(REL_STEP, STATUS_FAILED, summary)
             except Exception:
-                # stats 能返回即 clean 已提交；抛异常则是否已提交不可知，保守
-                # 按已开始替换处理（table_schema :812-817 同款）
-                result = {"success": False, "_load_interrupted": True}
-
-            # 进入过 load()：图已（可能）被替换——此后任何失败（clear_current/
-            # 插行/commit 段）都不得保留指向已消失数据的旧 current，宽兜底按
-            # 此状态撤销（doc 23.2 §6.3 提交失败撤销）
-            replacement_started = True
+                # 图事务提交状态不可知（如提交瞬间断连）：保守按已替换处理；
+                # 仍在锁内直插失败行并撤销 current（禁用 _store_failure 防自等待）
+                logger.error(
+                    "rel 发布加载中断（提交状态不可知） source_id=%s job_id=%s "
+                    "publish_id=%s",
+                    source_id,
+                    job_id,
+                    publish_id,
+                    exc_info=True,
+                )
+                replacement_started = True
+                clear_current(session, source_id, REL_STEP)
+                summary = _rel_failure_summary({})
+                insert_publish_row(
+                    session,
+                    publish_id,
+                    source_id,
+                    job_id,
+                    REL_STEP,
+                    STATUS_FAILED,
+                    error_summary=summary,
+                    is_current=False,
+                )
+                session.commit()
+                return _result(REL_STEP, STATUS_FAILED, summary)
 
             success = bool(result.get("success"))
-            clear_current(session, source_id, REL_STEP)  # 进入过 load() 即撤销
+            rolled_back = bool(result.get("_rolled_back"))
+            # 按源计数与核验结论入日志（doc 4 §1.2；报告留档，不加响应字段）
+            logger.info(
+                "rel 发布图事务结束 source_id=%s publish_id=%s success=%s "
+                "rolled_back=%s expected=(tables=%s columns=%s join_on=%s) "
+                "actual_counts=%s",
+                source_id,
+                publish_id,
+                success,
+                rolled_back,
+                gen_counts[0] if gen_counts else None,
+                gen_counts[1] if gen_counts else None,
+                gen_counts[2] if gen_counts else None,
+                result.get("counts"),
+            )
+            if success or not rolled_back:
+                # 成功（图已提交新子图）或提交状态不可知：旧 current 不得保留
+                replacement_started = True
+                clear_current(session, source_id, REL_STEP)
+            # rolled_back 失败：数据事务整体回滚，旧子图即当前图——旧 current
+            # 仍指向有效数据，保留不撤销（doc 4 §4.5）
             summary = None if success else _rel_failure_summary(result)
             insert_publish_row(
                 session,

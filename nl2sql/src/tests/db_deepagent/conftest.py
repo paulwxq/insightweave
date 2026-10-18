@@ -28,6 +28,11 @@ from src.modules.db_deepagent.services.sql_validation import DbSqlValidator
 from src.modules.db_deepagent.services.table_catalog import TableCatalog
 from src.modules.db_deepagent.services.time_resolver import TimeResolver
 
+# 测试统一使用的来源绑定（doc 4：服务/会话绑定 source_id 的假数据源 A；
+# 双源用例另用 TEST_SOURCE_ID_B 区分同名对象）
+TEST_SOURCE_ID = "11111111-1111-4111-8111-111111111111"
+TEST_SOURCE_ID_B = "22222222-2222-4222-8222-222222222222"
+
 
 @pytest.fixture(scope="session")
 def db_agent_config() -> DbAgentConfig:
@@ -168,6 +173,7 @@ def fake_services(
         catalog=TableCatalog(db_agent_config, fake_milvus, fake_business_db),
         join_graph=FakeJoinGraph(),
         embedding_release={},
+        source_id=TEST_SOURCE_ID,
     )
 
 
@@ -348,6 +354,7 @@ def guard_services(pipeline_stack, db_agent_config: DbAgentConfig) -> DbAgentSer
         catalog=None,  # type: ignore[arg-type]
         join_graph=None,  # type: ignore[arg-type]
         embedding_release={},
+        source_id=TEST_SOURCE_ID,
         guard=SqlEvidenceGuard(
             db_agent_config.validation.guard, _db, DimensionProbeBuilder()
         ),
@@ -511,6 +518,7 @@ def assembly_services(db_agent_config: DbAgentConfig, tmp_path) -> DbAgentServic
         catalog=TableCatalog(cfg, FakeMilvus(), db),
         join_graph=FakeJoinGraph(),  # type: ignore[arg-type]
         embedding_release={},
+        source_id=TEST_SOURCE_ID,
         validator=validator,
         guard=guard,
         pipeline=pipeline,

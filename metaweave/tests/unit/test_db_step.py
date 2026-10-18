@@ -686,7 +686,7 @@ def test_clean_only_removes_top_level_files(tmp_path, monkeypatch):
         (
             # --step ddl 带 --source-id 已是合法受管入口（doc 16 §4），换 json 验证拒绝
             ["--step", "json", "--source-id", str(SOURCE_ID)],
-            "--source-id 仅适用于 --step db 或受管 --step ddl",
+            "--source-id 仅适用于 --step db、受管 --step ddl 或 --step cql",
         ),
         (
             [

@@ -51,6 +51,11 @@ class BusinessDbConfig(_StrictModel):
     database: str
     user: str
     password: str
+    # libpq sslmode；登记源注入时取登记值（doc 4 §4.7），yaml 缺省 prefer
+    sslmode: str = "prefer"
+    # 登记 selected_schemas（doc 4 §4.7）：非空时限制目录访问与表键归一
+    # 的 schema 范围，并注入连接 search_path；None（yaml 缺省）不限制
+    allowed_schemas: list[str] | None = None
     expected_database: str
     table_key_prefix: str
     timezone: str
@@ -251,11 +256,51 @@ def _field_paths(exc: ValidationError) -> str:
 
 
 def _check_business_target(cfg: DbAgentConfig) -> None:
-    if not (cfg.business_db.database == cfg.business_db.expected_database == "orders"):
+    """business_db 三键一致性 + db 前缀键空间（doc 4 §4.7）。
+
+    database/expected_database/table_key_prefix 必须一致（按源注入时同取
+    登记库名，不得沿用固定前缀）；键空间按统一判定式校验（连字符、数字
+    开头、内部空格合法；点号/控制字符/首尾空白拒绝）。
+    """
+    b = cfg.business_db
+    if not (b.database == b.expected_database == b.table_key_prefix):
         raise DbAgentConfigError(
-            "business_db: database/expected_database 必须一致且为 orders，实际 "
-            f"database={cfg.business_db.database!r}, expected={cfg.business_db.expected_database!r}"
+            "business_db: database/expected_database/table_key_prefix 必须一致"
+            "（按选定源登记 db_name 注入），实际 "
+            f"database={b.database!r}, expected={b.expected_database!r}, "
+            f"table_key_prefix={b.table_key_prefix!r}"
         )
+    from src.modules.db_deepagent.keyspace import db_prefix_problem
+
+    problem = db_prefix_problem(b.table_key_prefix)
+    if problem:
+        raise DbAgentConfigError(f"business_db.table_key_prefix 非法: {problem}")
+
+
+def apply_source_runtime_config(
+    cfg: DbAgentConfig, db_name: str, *, check_embedding_profile: bool = True
+) -> DbAgentConfig:
+    """按选定源登记 db_name 构造运行配置（doc 4 §4.7）。
+
+    ``business_db.database/expected_database/table_key_prefix`` 三键统一改为
+    该源的登记库名（键空间按统一判定式校验，不通过即拒绝），并重跑 §4.2
+    检查表。必须在 ``build_services`` 之前调用；与真实连接的一致性由
+    BusinessDbService 启动时的 ``current_database()`` 核对兜底。
+    """
+    from src.modules.db_deepagent.keyspace import db_prefix_problem
+
+    problem = db_prefix_problem(db_name)
+    if problem:
+        raise DbAgentConfigError(
+            f"选定源登记 db_name 不能作为表键前缀: {problem}（该源对象不在本期"
+            "NL2SQL 知识接入范围内）"
+        )
+    updated = cfg.model_copy(deep=True)
+    updated.business_db.database = db_name
+    updated.business_db.expected_database = db_name
+    updated.business_db.table_key_prefix = db_name
+    run_config_checks(updated, check_embedding_profile=check_embedding_profile)
+    return updated
 
 
 def _check_platform_target(cfg: DbAgentConfig) -> None:

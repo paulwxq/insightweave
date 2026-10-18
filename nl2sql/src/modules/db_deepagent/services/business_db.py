@@ -23,6 +23,7 @@ from src.modules.db_deepagent.errors import (
     TOOL_ERROR_DB_DATA,
     TOOL_ERROR_DB_SEMANTIC,
     TOOL_ERROR_DATASOURCE_UNAVAILABLE,
+    TOOL_ERROR_INVALID_ARGUMENT,
     TOOL_ERROR_READONLY_VIOLATION,
     TOOL_ERROR_TIMEOUT,
     DbAgentError,
@@ -56,17 +57,33 @@ class ColumnSchema:
     ordinal_position: int
 
 
+def _quote_pg_identifier(name: str) -> str:
+    """按 PG 标识符规则加双引号（内部双引号翻倍），保留实际大小写。"""
+    return '"' + name.replace('"', '""') + '"'
+
+
 def _make_business_conninfo(cfg: BusinessDbConfig) -> str:
-    """构建业务库 conninfo；只含连接目标与只读/时区 options（§6.1）。"""
+    """构建业务库 conninfo；只含连接目标与只读/时区 options（§6.1）。
+
+    allowed_schemas 非空时追加 search_path（doc 4 §4.7：登记范围落到连接
+    默认解析；配合 normalize/校验入口的显式检查，search_path 只是其中一
+    层，不单独承担范围约束）。schema 名按 PG 标识符规则加引号——未加引号
+    会被折叠为小写，与大小写敏感的登记名（如 "Sales"）不一致。
+    """
     from psycopg.conninfo import make_conninfo
 
+    options = f"-c default_transaction_read_only=on -c TimeZone={cfg.timezone}"
+    if cfg.allowed_schemas:
+        quoted = ",".join(_quote_pg_identifier(s) for s in cfg.allowed_schemas)
+        options += f" -c search_path={quoted}"
     return make_conninfo(
         host=cfg.host,
         port=cfg.port,
         dbname=cfg.database,
         user=cfg.user,
         password=cfg.password,
-        options=f"-c default_transaction_read_only=on -c TimeZone={cfg.timezone}",
+        sslmode=cfg.sslmode,
+        options=options,
     )
 
 
@@ -120,6 +137,11 @@ def _map_db_error(exc: Exception) -> DbExecutionError:
 
 class BusinessDbService:
     """orders 业务库只读访问服务（§6.1）"""
+
+    @property
+    def allowed_schemas(self) -> list[str] | None:
+        """登记 selected_schemas（doc 4 §4.7）；None 表示不限制。"""
+        return self._cfg.allowed_schemas
 
     def __init__(self, config: BusinessDbConfig):
         self._cfg = config
@@ -240,8 +262,48 @@ class BusinessDbService:
 
     # ---------------------------------------------------------------- 结构查询
 
+    def locate_table_schemas(
+        self, table_names: list[str], schemas: list[str]
+    ) -> dict[str, list[str]]:
+        """按精确表名核对其实际所属 schema（doc 4 §4.7 裸名解析核对）。
+
+        查 information_schema.tables（只读、参数化），返回
+        ``表名 -> [命中 schema, ...]``；名字大小写按 PG 规则由调用方归一
+        （未加引号折叠小写，加引号保留原样后精确匹配目录）。
+        """
+        from collections import defaultdict
+
+        if not table_names:
+            return {}
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT table_name, table_schema FROM information_schema.tables
+                WHERE table_name = ANY(%s) AND table_schema = ANY(%s)
+                """,
+                (table_names, schemas),
+            ).fetchall()
+        located: dict[str, list[str]] = defaultdict(list)
+        for name, schema in rows:
+            located[name].append(schema)
+        return dict(located)
+
     def get_columns(self, schema: str, table: str) -> list[ColumnSchema]:
-        """information_schema.columns：列名、类型、是否可空、序号（固定 SQL，不经校验器）。"""
+        """information_schema.columns：列名、类型、是否可空、序号（固定 SQL，不经校验器）。
+
+        allowed_schemas（登记 selected_schemas）非空时，范围外 schema 直接
+        拒绝——不返回其他 schema 的实时结构（doc 4 §4.7）。
+        """
+        allowed = self._cfg.allowed_schemas
+        if allowed and schema not in allowed:
+            raise DbExecutionError(
+                error_type=TOOL_ERROR_INVALID_ARGUMENT,
+                message=(
+                    f"schema {schema!r} 不在本源登记的 selected_schemas "
+                    f"（{', '.join(allowed)}）内，已拒绝读取实时结构"
+                ),
+                retryable=False,
+            )
         with self._pool.connection() as conn:
             with conn.transaction():
                 with conn.cursor(

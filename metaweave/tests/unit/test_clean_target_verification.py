@@ -105,7 +105,9 @@ class TestExecuteCqlVerification:
         from metaweave.core.cql_generator.models import CQLGenerationResult
 
         class _Dummy:
-            def __init__(self, config_path, domain_resolver=None, config=None):
+            def __init__(
+                self, config_path, domain_resolver=None, config=None, provenance=None
+            ):
                 self.config = config or {}
 
             def generate(self, step_name="cql"):
@@ -118,6 +120,7 @@ class TestExecuteCqlVerification:
             config_path=cfg_path,
             operation="cql",
             clean=True,
+            cql_source_id="0f0e8d64-9d3a-4d0f-8d5f-2a3b4c5d6e7f",
             expected_clean_target=expected,
         )
         result = execute_cql(req)
@@ -506,7 +509,8 @@ class TestStandaloneCliSharesCleanResolver:
             ["--type", load_type, "-c", str(cfg), "--clean"],
         )
         assert result.exit_code == 1
-        assert "clean 当前目标无法解析" in result.output
+        # doc 4 §4.4：cql 不再解析 clean 目标（按源替换，无整库清空）；
+        # 非法目标改由 loader 配置校验拒绝，仍不泄露凭据
         assert frag in result.output
         assert "secret" not in result.output  # 不泄露凭据
 
@@ -933,8 +937,8 @@ class TestRagLoadResolverBeforeLoaderDerivation:
             loader_cli.rag_load_command, ["--type", "cql", "-c", str(cfg), "--clean"]
         )
         assert result.exit_code == 1
-        assert "clean 当前目标无法解析" in result.output
-        assert frag in result.output
+        # doc 4 §4.4：cql 不再走 clean 目标解析；形态错误由配置校验友好报出
+        assert "配置错误" in result.output and frag in result.output
         # 不得出现原始 TypeError/AttributeError 文本
         assert "list indices must be integers" not in result.output
         assert "object has no attribute 'get'" not in result.output
@@ -1139,7 +1143,8 @@ class TestRagLoadMainConfigShapeValidation:
         assert "object has no attribute 'get'" not in result.output
 
     def test_resolver_also_friendly_with_clean(self, tmp_path, monkeypatch):
-        """clean=true 时同样结构化（主配置 None 由 resolver 拦截）。"""
+        """clean=true 时同样结构化（主配置 None 由形态校验拦截，doc 4 后
+        cql 不再走 clean 目标解析）。"""
         from click.testing import CliRunner
 
         from metaweave.cli import loader_cli
@@ -1153,7 +1158,7 @@ class TestRagLoadMainConfigShapeValidation:
             loader_cli.rag_load_command, ["--type", "cql", "-c", str(cfg), "--clean"]
         )
         assert result.exit_code == 1
-        assert "clean 当前目标无法解析" in result.output
+        assert "配置错误" in result.output
         assert "主配置" in result.output and "必须是对象" in result.output
 
     def test_valid_config_regression(self, tmp_path, monkeypatch):
