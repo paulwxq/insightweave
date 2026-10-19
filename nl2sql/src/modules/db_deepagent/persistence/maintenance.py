@@ -49,6 +49,12 @@ class CleanupReport:
     archives: list[tuple[str, str]] = field(
         default_factory=list
     )  # (qa|run_errors, key)
+    # Web 命名空间（doc 2 §4.4 P1 扩展）
+    web_turns_deleted: list[str] = field(default_factory=list)  # 含 dry-run 标注
+    web_reconciled: list[str] = field(default_factory=list)  # session_id
+    web_reports: list[dict[str, Any]] = field(default_factory=list)
+    creation_pending: list[str] = field(default_factory=list)  # 创建 pending 登记
+    suspected_create_residuals: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
@@ -221,6 +227,27 @@ class MaintenanceService:
             result_metas = self._scan_result_metas()
             archive_sessions = self._archive.list_archive_sessions()
             checkpoint_sessions = self._checkpoint_sessions(conn)
+            # Web 命名空间发现（doc 2 §4.4 P1）：web_sessions 键 + web_turns
+            # 中出现的会话 ID 一并纳入；读取失败记录报告、不中断其余清理
+            webstore = self._build_webstore()
+            web_session_keys: set[str] = set()
+            web_turn_sessions: set[str] = set()
+            if webstore is not None:
+                try:
+                    web_session_keys = set(webstore.list_web_session_keys())
+                except Exception as exc:  # noqa: BLE001
+                    report.web_reports.append(
+                        {
+                            "reason": "web_sessions 枚举失败",
+                            "detail": type(exc).__name__,
+                        }
+                    )
+                try:
+                    web_turn_sessions = webstore.list_turn_session_ids()
+                except Exception as exc:  # noqa: BLE001
+                    report.web_reports.append(
+                        {"reason": "web_turns 枚举失败", "detail": type(exc).__name__}
+                    )
             # 全部发现的会话统一取锁清理（无“不取锁直清”分支）；checkpoint
             # 兜底覆盖“首请求无结果 + P3 写入失败只留 checkpoint”的会话
             all_sessions = sorted(
@@ -228,6 +255,8 @@ class MaintenanceService:
                 | set(result_metas)
                 | archive_sessions
                 | checkpoint_sessions
+                | web_session_keys
+                | web_turn_sessions
             )
             for session_id in all_sessions:
                 lock = SessionAdvisoryLock(conninfo, session_id)
@@ -261,9 +290,296 @@ class MaintenanceService:
                             session_id=session_id, before=archive_before, apply=apply
                         )
                     )
+                    # 4) Web 命名空间（doc 2 §4.4）：web_turns 保留清理、元数据
+                    #    校正与疑似创建残留报告，同一会话锁内执行
+                    if webstore is not None:
+                        self._web_cleanup(
+                            webstore,
+                            session_id,
+                            conn=conn,
+                            result_refs=result_metas.get(session_id, []),
+                            archive_before=archive_before,
+                            apply=apply,
+                            report=report,
+                        )
                 finally:
                     lock.release()
         return report
+
+    # ------------------------------------------------------------ Web 命名空间
+
+    def _build_webstore(self):
+        """从归档 Store 构造 WebStore 门面（无 Web 需求时也可安全构造）。"""
+        try:
+            from src.api.v2.webstore import WebStore
+
+            return WebStore(self._archive._store)  # noqa: SLF001（同一持久化层）
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("WebStore 构造失败，跳过 Web 命名空间维护: %s", exc)
+            return None
+
+    def _web_cleanup(
+        self,
+        webstore,
+        session_id: str,
+        *,
+        conn,
+        result_refs,
+        archive_before: datetime,
+        apply: bool,
+        report: CleanupReport,
+    ) -> None:
+        """web_turns 保留清理 + web_sessions 元数据校正 + 残留报告（doc 2 §4.4）。
+
+        坏记录/超限/读取失败均按校正失败处理：不删除文本、不校正缓存，
+        可写时设 retry_after=失败时刻+300 秒；疑似创建残留先于历史删除检查。
+        dry-run 严格只读：只出报告，不删除、不校正、不写退避；apply 时
+        删除失败的轮次仍按在库计入校正（不按“已删除”更新缓存）。
+        """
+        from src.api.v2.webstore import (
+            InvalidTurnRecord,
+            ScanLimitExceeded,
+            StoreUnavailable,
+            core_ownership_ok,
+            parse_tz_datetime,
+        )
+
+        try:
+            record = webstore.get_registration(session_id)
+        except StoreUnavailable:
+            record = None
+            report.web_reports.append(
+                {"session_id": session_id, "reason": "web 登记读取失败（核验未完成）"}
+            )
+        # 退避（合法未来 ≤1h）：报告并跳过本轮清理/校正
+        if record is not None:
+            retry_after = parse_tz_datetime(
+                record.get("metadata_reconcile_retry_after")
+            )
+            if retry_after is not None and (
+                0 < (retry_after - datetime.now().astimezone()).total_seconds() <= 3600
+            ):
+                report.web_reports.append(
+                    {"session_id": session_id, "reason": "校正退避中（retry_after）"}
+                )
+                return
+            pending = record.get("pending_run_id")
+            if isinstance(pending, str) and pending.startswith("create_"):
+                report.creation_pending.append(session_id)
+        # 疑似创建残留（report-only；先于历史删除检查，doc 2 §4.4）
+        if record is None:
+            suspected = self._suspected_create_residual(
+                session_id, conn=conn, result_refs=result_refs, webstore=webstore
+            )
+            if suspected is not None:
+                report.suspected_create_residuals.append(suspected)
+        # web_turns 全量校验（共用谓词 + 预算）
+        try:
+            turn_records = webstore.iter_turn_records(session_id)
+            turn_records.sort(
+                key=lambda item: (
+                    parse_tz_datetime(item[1].get("saved_at"))
+                    or datetime(1, 1, 1, tzinfo=timezone.utc),
+                    item[0],
+                )
+            )
+        except InvalidTurnRecord as exc:
+            report.web_reports.append(
+                {
+                    "session_id": session_id,
+                    "reason": "需人工核验（web_turn 记录损坏）",
+                    "key": exc.key,
+                }
+            )
+            if apply:  # 退避是写操作，dry-run 不写
+                self._mark_reconcile_failure(webstore, session_id, record, report)
+            return
+        except ScanLimitExceeded:
+            report.web_reports.append(
+                {"session_id": session_id, "reason": "需人工核验（web_turns 扫描超限）"}
+            )
+            if apply:
+                self._mark_reconcile_failure(webstore, session_id, record, report)
+            return
+        except StoreUnavailable:
+            report.web_reports.append(
+                {
+                    "session_id": session_id,
+                    "reason": "web_turns 读取失败（保留，不猜测删除）",
+                }
+            )
+            return
+        # 保留期清理（archive_retention_days；损坏的 saved_at 不会到达这里）
+        expired = [
+            (key, rec)
+            for key, rec in turn_records
+            if (parse_tz_datetime(rec.get("saved_at")) or datetime.now(timezone.utc))
+            < archive_before
+        ]
+        if not apply:
+            # dry-run 严格只读：只报告将删除项，不做任何写（含校正/退避）
+            report.web_turns_deleted.extend(f"{key} (dry-run)" for key, _rec in expired)
+            return
+        deleted: set[str] = set()
+        for key, _rec in expired:
+            try:
+                webstore.delete_turn(session_id, key)
+                report.web_turns_deleted.append(key)
+                deleted.add(key)
+            except StoreUnavailable as exc:
+                report.errors.append(
+                    {
+                        "session_id": session_id,
+                        "key": key,
+                        "error": f"web_turn 删除失败: {type(exc).__name__}",
+                    }
+                )
+        # 删除失败的轮次仍在库中：按实际存活集校正，不按“已删除”更新缓存
+        kept = [item for item in turn_records if item[0] not in deleted]
+        # 元数据校正（登记存在且归属可核对时；单次扫描内完成）
+        if record is not None and core_ownership_ok(record, session_id):
+            try:
+                self._reconcile_registration_locked(webstore, session_id, record, kept)
+                report.web_reconciled.append(session_id)
+            except Exception as exc:  # noqa: BLE001
+                report.web_reports.append(
+                    {
+                        "session_id": session_id,
+                        "reason": "元数据校正失败",
+                        "detail": type(exc).__name__,
+                    }
+                )
+                self._mark_reconcile_failure(webstore, session_id, record, report)
+
+    def _reconcile_registration_locked(
+        self, webstore, session_id: str, record: dict, kept: list
+    ) -> None:
+        """锁内全量校正（与 WebStore.reconcile_metadata 同规则，记录由调用方
+        扫描提供以满足单次扫描预算）。"""
+        from src.api.v2.webstore import (
+            SessionMetadataInvalid,
+            derive_title,
+            parse_tz_datetime,
+        )
+
+        created = parse_tz_datetime(record.get("created_at"))
+        if created is None:
+            raise SessionMetadataInvalid(session_id, ["created_at"])
+        updated = dict(record)
+        updated["turn_count"] = len(kept)
+        title = record.get("title")
+        # §4.4：已有合法标题保留（含仍为默认“新对话”），缺失/非法按首问派生
+        if not isinstance(title, str) or not title.strip():
+            first_question = kept[0][1]["question"] if kept else ""
+            updated["title"] = derive_title(first_question)
+        times = [created]
+        existing_last = parse_tz_datetime(record.get("last_active_at"))
+        if existing_last is not None and existing_last >= created:
+            times.append(existing_last)
+        for _key, rec in kept:
+            saved = parse_tz_datetime(rec.get("saved_at"))
+            if saved is not None:
+                times.append(saved)
+        updated["last_active_at"] = max(times).isoformat()
+        updated["metadata_reconciled_at"] = webstore.now_iso()
+        updated["metadata_reconcile_retry_after"] = None
+        webstore.put_registration(session_id, updated)
+
+    def _mark_reconcile_failure(
+        self, webstore, session_id: str, record, report: CleanupReport
+    ) -> None:
+        """校正失败：登记可写时设 retry_after=当前+300 秒（doc 2 §4.4）。"""
+        from src.api.v2.webstore import core_ownership_ok
+
+        if record is None or not core_ownership_ok(record, session_id):
+            return
+        try:
+            webstore.mark_reconcile_failure(session_id, record)
+        except Exception as exc:  # noqa: BLE001
+            report.web_reports.append(
+                {
+                    "session_id": session_id,
+                    "reason": "退避标记写入失败（本次仅尝试一次）",
+                    "detail": type(exc).__name__,
+                }
+            )
+
+    def _suspected_create_residual(
+        self, session_id: str, *, conn, result_refs, webstore
+    ):
+        """疑似 Web 创建残留（doc 2 §4.4 report-only）：长 ID + 有通用绑定 +
+        无 Web 登记 + 无任何执行/历史痕迹。None=核验未完成（读取失败）。"""
+        import re
+
+        from src.api.v2.webstore import StoreUnavailable
+
+        if not re.fullmatch(r"s_[0-9a-f]{32}", session_id or ""):
+            return None
+        generic = self._archive.get_session(session_id)
+        if generic is None:
+            return None
+        try:
+            checkpoint_threads = self._checkpoint_thread_ids(conn, session_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.info(
+                "创建残留核验未完成（checkpoint 读取失败）session=%s: %s",
+                session_id,
+                type(exc).__name__,
+            )
+            return None
+        try:
+
+            def _has_any(namespace) -> bool | None:
+                try:
+                    page = self._archive._store.search(  # noqa: SLF001（同一持久化层）
+                        namespace, limit=1, offset=0
+                    )
+                    return bool(list(getattr(page, "items", page)))
+                except Exception:  # noqa: BLE001
+                    return None
+
+            has_threads = _has_any(("db_deepagent", "threads", session_id))
+            has_qa = _has_any(("db_deepagent", "qa", session_id))
+            has_run_errors = _has_any(("db_deepagent", "run_errors", session_id))
+            if None in (has_threads, has_qa, has_run_errors):
+                logger.info(
+                    "创建残留核验未完成（Store 读取失败）session=%s", session_id
+                )
+                return None
+            try:
+                turn_keys = webstore.iter_turn_records(session_id)
+                has_turns = bool(turn_keys)
+                turns_verified = True
+            except Exception:  # noqa: BLE001（坏记录/超限也说明“有数据”）
+                has_turns = True
+                turns_verified = False
+        except StoreUnavailable:
+            logger.info("创建残留核验未完成（Store 读取失败）session=%s", session_id)
+            return None
+        has_carried = bool(generic.get("carried_evidence"))
+        has_results = bool(result_refs)
+        has_local_runs = (
+            Path(self._cfg.workspace.root) / "sessions" / session_id
+        ).exists()
+        if any(
+            (
+                checkpoint_threads,
+                has_threads,
+                has_qa,
+                has_run_errors,
+                has_turns,
+                has_carried,
+                has_results,
+                has_local_runs,
+            )
+        ):
+            return None
+        return {
+            "session_id": session_id,
+            "reason": "疑似 Web 创建残留（仅报告，不自动删除/解禁）",
+            "note": "长 ID 仅缩小候选，不证明 Web 来源；人工处理须先核验无执行/历史数据",
+            "turns_verified": turns_verified,
+        }
 
     def _scan_result_metas(self) -> dict[str, list[tuple[str, dict[str, Any]]]]:
         """按会话归组的结果目录元数据（{session_id: [(result_ref, meta)]}）。"""

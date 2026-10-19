@@ -576,3 +576,121 @@ class TestJudgement:
         _thread(store, "s1", "dbda:s1:1", last_active=None)
         verdict = self._judge(svc, store, thread_id="dbda:s1:1")
         assert verdict.action == "skip" and verdict.reason == "skip-undecidable"
+
+
+# ============================================================================
+# Web 命名空间清理（doc 2 §4.4）：dry-run 只读；apply 删除失败不按已删除计
+# ============================================================================
+
+
+def _web_registration(store, sid):
+    from src.api.v2.webstore import WebStore
+
+    webstore = WebStore(store)
+    record = webstore.new_registration(
+        session_id=sid,
+        source_id="11111111-1111-1111-1111-111111111111",
+        source_fingerprint="fp",
+        knowledge_snapshot={},
+        creation_id="create_" + "a" * 27,
+    )
+    webstore.put_registration(sid, record)
+    return webstore
+
+
+def _web_turn(store, sid, key, *, saved_at, question="问", answer="答"):
+    from src.api.v2.webstore import web_turns_ns
+
+    store.put(
+        web_turns_ns(sid),
+        key,
+        {
+            "question": question,
+            "answer": answer,
+            "request_id": key,
+            "run_id": "run_1",
+            "status": "completed",
+            "saved_at": saved_at,
+        },
+    )
+
+
+OLD_KEY = "req_" + "1" * 28
+NEW_KEY = "req_" + "2" * 28
+
+
+class TestWebCleanup:
+    SID = "s_" + "a" * 32
+
+    def _run(self, svc, webstore, *, apply):
+        from src.modules.db_deepagent.persistence.maintenance import CleanupReport
+
+        report = CleanupReport(dry_run=not apply)
+        svc._web_cleanup(
+            webstore,
+            self.SID,
+            conn=FakeConn(),
+            result_refs=[],
+            archive_before=NOW - timedelta(days=30),
+            apply=apply,
+            report=report,
+        )
+        return report
+
+    def _seed(self, store):
+        webstore = _web_registration(store, self.SID)
+        _web_turn(
+            store, self.SID, OLD_KEY, saved_at=(NOW - timedelta(days=90)).isoformat()
+        )
+        _web_turn(store, self.SID, NEW_KEY, saved_at=NOW.isoformat())
+        return webstore
+
+    def test_dry_run_reports_only_no_write(self, svc, store):
+        webstore = self._seed(store)
+        report = self._run(svc, webstore, apply=False)
+        assert report.web_turns_deleted == [f"{OLD_KEY} (dry-run)"]
+        # 只读：轮次未删、登记未被校正/退避改写
+        assert webstore.read_turn(self.SID, OLD_KEY) is not None
+        rec = webstore.get_registration(self.SID)
+        assert rec["turn_count"] == 0
+        assert rec["metadata_reconciled_at"] is None
+        assert rec["metadata_reconcile_retry_after"] is None
+        assert report.web_reconciled == []
+
+    def test_dry_run_bad_record_no_backoff_write(self, svc, store):
+        webstore = _web_registration(store, self.SID)
+        _web_turn(store, self.SID, OLD_KEY, saved_at=NOW.isoformat(), question=" ")
+        report = self._run(svc, webstore, apply=False)
+        assert any("损坏" in item["reason"] for item in report.web_reports)
+        rec = webstore.get_registration(self.SID)
+        assert rec["metadata_reconcile_retry_after"] is None  # dry-run 不写退避
+
+    def test_apply_deletes_and_reconciles_survivors(self, svc, store):
+        webstore = self._seed(store)
+        report = self._run(svc, webstore, apply=True)
+        assert report.web_turns_deleted == [OLD_KEY]
+        assert webstore.read_turn(self.SID, OLD_KEY) is None
+        rec = webstore.get_registration(self.SID)
+        assert rec["turn_count"] == 1  # 幸存轮计数
+        assert rec["metadata_reconciled_at"] is not None
+        assert report.web_reconciled == [self.SID]
+
+    def test_apply_delete_failure_kept_in_count(self, svc, store):
+        from src.api.v2.webstore import StoreUnavailable
+
+        webstore = self._seed(store)
+        orig_delete = webstore.delete_turn
+
+        def _flaky_delete(session_id, key):
+            if key == OLD_KEY:
+                raise StoreUnavailable("delete down (fake)")
+            return orig_delete(session_id, key)
+
+        webstore.delete_turn = _flaky_delete
+        report = self._run(svc, webstore, apply=True)
+        assert report.web_turns_deleted == []
+        assert len(report.errors) == 1 and report.errors[0]["key"] == OLD_KEY
+        # 删除失败的那条仍在库中，缓存按实际存活集校正（不按“已删除”计）
+        assert webstore.read_turn(self.SID, OLD_KEY) is not None
+        rec = webstore.get_registration(self.SID)
+        assert rec["turn_count"] == 2

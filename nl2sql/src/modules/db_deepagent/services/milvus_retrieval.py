@@ -21,7 +21,7 @@ from __future__ import annotations
 import json
 import logging
 import uuid
-from typing import Any
+from typing import Any, Iterator
 
 from pymilvus import Collection, connections, db as milvus_db, utility
 
@@ -136,6 +136,33 @@ class DbMilvusRetrieval:
     def _source_expr(self) -> str:
         """本实例绑定的 source_id 过滤表达式（doc 4 §3.1，六入口统一组合）。"""
         return f'source_id == "{self.source_id}"'
+
+    def iter_source_records(
+        self, kind: str, output_fields: list[str]
+    ) -> Iterator[dict[str, Any]]:
+        """按本实例 source_id 全量枚举集合记录（doc 2 §5.5 readiness 用）。
+
+        用 query_iterator 分页遍历，返回 dict 记录（含请求的 output_fields）。
+        kind 为 table_schema/dim_value/sql_example；超时与检索一致取
+        cfg.milvus.timeout。
+        """
+        collection = self._collection(kind)
+        iterator = collection.query_iterator(
+            batch_size=1000,
+            limit=-1,
+            expr=self._source_expr,
+            output_fields=list(output_fields),
+            timeout=self._cfg.milvus.timeout,
+        )
+        try:
+            while True:
+                batch = iterator.next()
+                if not batch:
+                    break
+                for record in batch:
+                    yield dict(record)
+        finally:
+            iterator.close()
 
     # ---------------------------------------------------------------- 检索
 

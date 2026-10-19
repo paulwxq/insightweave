@@ -327,9 +327,12 @@ thread:
   rotate_after_messages: 400             # 线程消息数超过该值时，下一轮前轮换线程
   carry_max_evidence: 200                # 轮换时携带的证据条数上限（§13.4）
   carry_recent_executions: 3             # 轮换时携带的最近执行／分析记录条数（0 关闭，§7.12.1、§13.4）
-  checkpoint_retention_days: 30
-  archive_retention_days: 180
-  result_retention_days: 30              # 结果保留期；同时是复用保留期（§7.12.1，沿用登记不续期）
+  checkpoint_retention_days: 30          # 执行家族：至少 30 天，具体以配置为准（§13.5）
+  archive_retention_days: 365            # 对话家族（web_turns＋qa/run_errors）：至少 365 天，
+                                         #   具体以配置为准（2026-10-19 由 180 调整，docs/3.1 §7）
+  result_retention_days: 30              # 执行家族：全量原始明细的下载/审计窗口，至少 30 天，
+                                         #   具体以配置为准；到期即删，无引用保护（2026-10-19 修订，
+                                         #   docs/3.1 §7）；同时是复用保留期（§7.12.1，沿用登记不续期）
 
 workspace:
   root: ${DB_DEEPAGENT_WORKSPACE:var/db_deepagent}
@@ -1856,12 +1859,12 @@ pool = ConnectionPool(conninfo, min_size=..., max_size=...,
 
 ### 13.5 清理（`persistence/maintenance.py`）
 
-命令：`cli maintenance cleanup [--dry-run|--apply] [--before YYYY-MM-DD]`，默认 `--dry-run`；显式传 `--apply` 才执行清理，两个模式互斥。`--before` 为可选日期筛选参数，不绕过活动线程、待恢复任务与结果引用的保护检查。命令参数与 §15.1 保持一致。
+命令：`cli maintenance cleanup [--dry-run|--apply] [--before YYYY-MM-DD]`，默认 `--dry-run`；显式传 `--apply` 才执行清理，两个模式互斥。`--before` 为可选日期筛选参数，不绕过活动线程与待恢复任务的保护检查（结果目录引用保护已于 2026-10-19 移除，docs/3.1 §7）。命令参数与 §15.1 保持一致。
 
 1. **线程级判定（doc 7 §2 折入）**：候选＝序号推导（`dbda:<session_id>:<seq>`，按 `sessions.thread_seq` 反推）＋ checkpoint 枚举兜底（参数化＋LIKE 通配符转义 `\`/`%`/`_`，`ESCAPE '\'`）。逐线程：① 当前线程（`== sessions.current_thread_id`）保护；② `get_state(config).next` 非空保护待恢复任务，**`get_state` 异常时跳过该线程并报告"状态读取失败"**（时间兜底不替代待恢复检查）；③ 过期判定 `effective_at = max(last_active_at, retired_at, 最新 checkpoint 时间)`——checkpoint 时间优先公开 `StateSnapshot.created_at`，已确认无待恢复任务但 `created_at` 缺失时以 `checkpoints.checkpoint->>'ts'` 最大值兜底，统一 UTC 忽略空值，三来源全空不清理；`retired` 只作清理优先级排序；`--before` 只收紧不放宽。**会话归属复核**：候选 `thread_id` 经 `parse_thread_id(thread_id) -> tuple[str, int] | None` 解析（`rsplit(":", 1)`，`dbda:` 前缀＋正整数序号），调用方比较返回会话 ID 与预期会话精确一致才保留；会话 ID 字符集限制 `^[A-Za-z0-9_-]+$`（禁冒号）。
 2. 预览列出线程数、checkpoint 行数估计、待删结果目录。
 3. 执行时对每个线程调用 `PostgresSaver.delete_thread(thread_id)`（K16）。
-4. 结果目录：早于 `result_retention_days`，且不被保留中的线程状态、`qa` 归档引用时才删除。
+4. 结果目录：早于 `result_retention_days`（30 天）即删除，**无引用保护**。——2026-10-19 修订：原"不被保留中的线程状态、`qa` 归档引用时才删除"条款移除，历史展示改由结果快照表承接（docs/3.1 §7）。保留期语义为下限口径，具体以配置为准。
 5. `qa` 与 `run_errors` 按 `archive_retention_days` 独立清理；checkpoint 过期不删除问答档案。
 
 **运行与清理互斥（doc 7 §2.3 折入）**：会话级 advisory lock `pg_try_advisory_lock(hashtext('dbda_session:' || session_id))`。Runner **进入 P0 读取 sessions／checkpoint 之前**取锁（专用连接持有）至 P2 读取、P3 归档与轨迹写入完成，外层 `finally` 释放；取锁失败按 runtime 失败返回且**不做任何 sessions／threads／qa 写入**（防覆盖运行中进程指针），仍写 P4 本地记录。清理逐会话 `pg_try_advisory_lock`，拿不到跳过该会话（报告"运行中"），拿到后**重新核对**上述资格再删除，完成或异常后解锁。memory 持久化模式无 PG，跳过互斥。
@@ -1872,7 +1875,7 @@ pool = ConnectionPool(conninfo, min_size=..., max_size=...,
 - 每个线程建立一个显式事务，事务内以 `SET LOCAL` 设置 `maintenance.statement_timeout_ms`（初始 60000 ms）与 `maintenance.lock_timeout_ms`（初始 5000 ms），然后调用绑定**该连接**的 `PostgresSaver(conn).delete_thread(thread_id)`。不能改用绑定共享池的 Saver，否则删除可能发生在另一连接、脱离当前事务和超时设置。
 - SDK 对 `checkpoints`、`checkpoint_blobs`、`checkpoint_writes` 的删除均在该事务内完成；事务提交后才报告该线程清理成功、更新其清理状态。任一句超时、锁等待超时或其他数据库错误，回滚该线程全部删除并记录失败；不把部分删除或未提交结果标为成功。
 - 按线程独立提交，不将整个批次包在一个大事务中。已成功线程保留提交结果，失败线程可在后续维护命令中重试；连接失效时先关闭并重建同样配置的连接。批次有失败时维护命令以非零码结束，并列出成功／失败线程及原因。
-- 每线程操作前重新核对活动状态与待恢复任务，结果文件和归档删除仍须满足引用与保留规则。时间限制是每条语句及锁等待的限制，不承诺整个批次 60 秒内结束；线程体量与删除耗时需实测，不能由消息数直接推算。
+- 每线程操作前重新核对活动状态与待恢复任务；归档删除仍须满足保留期与引用规则，结果文件按到期即删（无引用保护，2026-10-19 修订）。时间限制是每条语句及锁等待的限制，不承诺整个批次 60 秒内结束；线程体量与删除耗时需实测，不能由消息数直接推算。
 
 ## 14. Runner 与结果协议
 

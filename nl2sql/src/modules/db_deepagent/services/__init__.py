@@ -115,13 +115,19 @@ def _neo4j_manager(cfg: DbAgentConfig):
     )
 
 
-def build_services(cfg: DbAgentConfig, *, source_id=None) -> DbAgentServices:
+def build_services(
+    cfg: DbAgentConfig, *, source_id=None, verify_embedding: bool = True
+) -> DbAgentServices:
     """按依赖顺序构造已交付的服务并执行 Embedding 一致性检查（§6.3）。
 
     source_id（doc 4 §3.2/§4.7）为必填的服务端绑定：会话启动层读取并校验
     持久化的会话绑定后传入，Milvus 检索与 Neo4j 图查询构造为来源不可变
     服务；按源运行配置（database/expected_database/table_key_prefix）必须
     在本调用之前构造完成（``apply_source_runtime_config``）。
+
+    verify_embedding=False 跳过一致性检查（不再发起 embed_query 探针），
+    仅限调用方已在近期以同一配置核验过的链路使用（Web 执行链复用
+    readiness 的 300 秒探针缓存，doc 2 §5.5.2）。
     """
     normalized_source = _normalized_source_id(source_id)
     # 构造失败的资源回收（doc 4 §4.7：每轮独立构造的 Web 模式下，部分构造
@@ -139,7 +145,12 @@ def build_services(cfg: DbAgentConfig, *, source_id=None) -> DbAgentServices:
             request_timeout_s=cfg.embedding.request_timeout_seconds,
         )
         milvus = DbMilvusRetrieval(cfg, embedding, source_id=normalized_source)
-        release = check_embedding_consistency(cfg, profile, embedding, milvus)
+        if verify_embedding:
+            release = check_embedding_consistency(cfg, profile, embedding, milvus)
+        else:
+            # 跳过检查：调用方（Web 执行链）已在同一请求内经 readiness
+            # 探针核验（300 秒缓存），避免每题重复一次 embed_query 模型请求
+            release = {}
 
         catalog = TableCatalog(cfg, milvus, business_db)
         join_graph = JoinGraphService(

@@ -13,7 +13,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, Optional, TypedDict
 
 from langchain_core.messages import HumanMessage
 
@@ -64,11 +64,22 @@ def _mark_primary(failures: _RunFailures, status: str) -> list[RunFailureRecord]
     """primary 标在与最终状态对应的那一类中最早的一条（§14.3）。
 
     failed 可由 runtime／tool_set_mismatch／no_final_answer 任一触发，按该
-    优先顺序取最早匹配，使 primary 总有可标记的记录。
+    优先顺序取最早匹配，使 primary 总有可标记的记录。Web 前置拒绝的结构化
+    类型（session_busy／lock_backend_error 等，doc 2 §4.2）优先于普通
+    runtime，保证主错误可被 Web 层机器读取。
     """
     kinds_by_status: dict[str, tuple[str, ...]] = {
         "persistence_error": ("persistence",),
-        "failed": ("runtime", "tool_set_mismatch", "no_final_answer"),
+        "failed": (
+            "session_busy",
+            "lock_backend_error",
+            "knowledge_changed",
+            "dependency_unavailable",
+            "result_encoding_error",
+            "runtime",
+            "tool_set_mismatch",
+            "no_final_answer",
+        ),
         "budget_exhausted": ("budget_exhausted",),
     }
     targets = kinds_by_status.get(status)
@@ -110,6 +121,7 @@ class DbAgentRunner:
         archive: QaArchive,
         persistence=None,
         fixed_now: datetime | None = None,
+        finalize_hook: Optional[Callable[..., Optional["FinalizeHookOutcome"]]] = None,
     ):
         self._services = services
         self._handle = handle
@@ -121,6 +133,9 @@ class DbAgentRunner:
         self._lock_conninfo = (
             _platform_conninfo(services.config) if persistence is not None else None
         )
+        # 锁内终态收尾钩子（doc 2 §4.4）：P3 归档尝试后、释放会话锁前执行一次，
+        # 由 Web 装配传入（Web 文本日志 + pending 收尾 + 终态复核）；默认无。
+        self._finalize_hook = finalize_hook
 
     # ------------------------------------------------------------ 入口
 
@@ -132,28 +147,62 @@ class DbAgentRunner:
         request_id: str | None = None,
         force_rotate: bool = False,
         source_id: str | None = None,
+        session_lock=None,
     ) -> DbAgentResult:
+        # ID 校验先于一切副作用（doc 2 §4.2）：目录、锁、本地记录、Store、
+        # checkpoint 均不得用非法 ID 创建；非法值直接拒绝。Runner 未传
+        # request_id 时先生成（req_ + 完整 UUID4 hex），再校验。
+        from src.modules.db_deepagent.persistence.checkpoint import valid_web_id
+
+        if not valid_web_id(session_id):
+            raise ValueError(
+                f"session_id 非法（允许 [A-Za-z0-9_-]，长度 1–64，禁冒号）: "
+                f"{session_id!r}"
+            )
+        request_id = request_id or ("req_" + uuid.uuid4().hex)
+        if not valid_web_id(request_id):
+            raise ValueError(
+                f"request_id 非法（允许 [A-Za-z0-9_-]，长度 1–64）: {request_id!r}"
+            )
         # 会话级互斥（doc 7 §2.3）：P0 读取前取锁，P3 完成后外层 finally 释放；
         # memory 持久化模式无 PG，跳过互斥。取锁失败：不写任何元数据（防覆盖
         # 运行中进程指针），仅返回失败结果与 P4 本地记录。
+        # session_lock（Web 执行链锁交接，doc 2 §4.4）：外层已持有同一会话
+        # 锁并负责释放；沿用可消除“释放-重取”间隙内他请求把在途 pending
+        # 误判为遗留而失效会话。非本层获取的锁不在本层释放。
         lock = None
-        if self._lock_conninfo is not None:
+        if session_lock is not None:
+            lock = session_lock
+        elif self._lock_conninfo is not None:
             from src.modules.db_deepagent.persistence.checkpoint import (
+                LockBackendError,
                 SessionAdvisoryLock,
             )
 
             lock = SessionAdvisoryLock(self._lock_conninfo, session_id)
             acquired = False
+            lock_backend_error: LockBackendError | None = None
             try:
                 acquired = lock.try_acquire()
-            except Exception:  # noqa: BLE001（连接失败按取锁失败处理）
+            except LockBackendError as exc:
+                # 锁后端异常 ≠ 忙碌（doc 2 §4.2）：映射依赖不可用，不误报占用
+                lock_backend_error = exc
                 acquired = False
-            if not acquired:
-                request_id = request_id or "req_" + uuid.uuid4().hex[:12]
+            if lock_backend_error is not None or not acquired:
                 run_id = "run_" + uuid.uuid4().hex
                 failures = _RunFailures()
                 failures.add(
-                    "runtime", "P1", "会话正在另一进程运行或清理中（advisory lock）"
+                    (
+                        "lock_backend_error"
+                        if lock_backend_error is not None
+                        else "session_busy"
+                    ),
+                    "P0",
+                    (
+                        str(lock_backend_error)
+                        if lock_backend_error is not None
+                        else "会话正在另一进程运行或清理中（advisory lock）"
+                    ),
                 )
                 return self._finalize(
                     time.monotonic(),
@@ -182,7 +231,7 @@ class DbAgentRunner:
                 source_id,
             )
         finally:
-            if lock is not None:
+            if lock is not None and session_lock is None:
                 lock.release()
 
     def _run_locked(
@@ -219,6 +268,12 @@ class DbAgentRunner:
                 raise _RejectedSession(
                     "session_id 含非法字符（允许 [A-Za-z0-9_-]，禁冒号）"
                 )
+            # 锁内检查已有本地诊断（doc 2 §4.2）：同会话复用已有 request_id
+            # 直接拒绝，不覆盖诊断/归档/文本日志，不当作幂等重放
+            if self._local_record_exists(session_id, request_id):
+                raise RequestIdConflictError(
+                    f"request_id 已存在本地运行记录: {request_id}"
+                )
             session_rec = self._archive.get_session(session_id)
             source_binding = _resolve_source_binding(
                 session_rec, source_id, self._services.source_id
@@ -226,6 +281,13 @@ class DbAgentRunner:
             current_thread, thread_seq, carried, old_values, max_seq = (
                 self._resolve_thread(session_id, thread_id, session_rec)
             )
+            if session_rec is None and old_values and old_values.get("messages"):
+                # 孤立 checkpoint 拒绝（doc 2 §4.4）：sessions 记录不存在而将
+                # 要恢复的 checkpoint 已有状态时，不推断来源、不复用旧上下文
+                # （复用 _resolve_thread 已读取的 values，不额外探测）
+                raise _RejectedSession(
+                    "会话记录缺失但存在遗留 checkpoint，不能续聊；请新建会话"
+                )
             thread_id_resolved = current_thread
             if old_values is not None:
                 texts, messages = _thread_user_texts(old_values)
@@ -372,7 +434,7 @@ class DbAgentRunner:
         # P2 诊断账本（values）仍然保留——归档条件 a 与执行轨迹依赖它，
         # “SQL 成功后模型失败”的轮次按 §13.3 应进 qa 并保留真实状态
         evaluate = invoke_started and not failures.has("runtime") and values is not None
-        return self._finalize(
+        result = self._finalize(
             started,
             request_id,
             run_id,
@@ -392,6 +454,30 @@ class DbAgentRunner:
             read_final_answer=evaluate,
             source_binding=source_binding,
         )
+        # 锁内终态收尾钩子（doc 2 §4.4）：仍在会话 advisory lock 内执行；
+        # 失败不抹去运行结果（history_saved 由 Web 侧按回读判定）
+        if self._finalize_hook is not None:
+            try:
+                outcome = self._finalize_hook(
+                    question=question,
+                    request_id=request_id,
+                    run_id=run_id,
+                    session_id=session_id,
+                    result=result,
+                )
+            except Exception as exc:  # noqa: BLE001（收尾失败不覆盖运行结果）
+                logger.warning(
+                    "终态收尾钩子失败 session=%s request=%s: %s: %s",
+                    session_id,
+                    request_id,
+                    type(exc).__name__,
+                    exc,
+                )
+            else:
+                replacement = (outcome or {}).get("result")
+                if replacement is not None:
+                    result = replacement
+        return result
 
     # ------------------------------------------------------------ P0 辅助
 
@@ -792,6 +878,22 @@ class DbAgentRunner:
             },
         )
 
+    def _local_record_path(self, session_id: str, request_id: str) -> Path:
+        return (
+            Path(self._cfg.workspace.root)
+            / "sessions"
+            / session_id
+            / "runs"
+            / f"{request_id}.json"
+        )
+
+    def _local_record_exists(self, session_id: str, request_id: str) -> bool:
+        """锁内已有同 request_id 的本地诊断（doc 2 §4.2 防覆盖检查）。"""
+        try:
+            return self._local_record_path(session_id, request_id).exists()
+        except OSError:
+            return False
+
     def _write_local_record(
         self,
         session_id: str,
@@ -800,15 +902,23 @@ class DbAgentRunner:
         failures: _RunFailures,
         rotated: bool,
     ) -> None:
-        """P4：<workspace>/sessions/<session_id>/runs/<request_id>.json；失败只记日志。"""
+        """P4：<workspace>/sessions/<session_id>/runs/<request_id>.json；失败只记日志。
+
+        排他创建（doc 2 §4.2）：已有文件不覆盖，报告冲突后跳过该次落盘。
+        """
         try:
-            path = Path(self._cfg.workspace.root) / "sessions" / session_id / "runs"
-            path.mkdir(parents=True, exist_ok=True)
+            path = self._local_record_path(session_id, request_id)
+            path.parent.mkdir(parents=True, exist_ok=True)
             payload = result.model_dump()
             payload["failures"] = [r.model_dump() for r in failures.records]
             payload["rotated"] = rotated
-            (path / f"{request_id}.json").write_text(
-                json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8"
+            with open(path, "x", encoding="utf-8") as fh:
+                fh.write(json.dumps(payload, ensure_ascii=False, indent=1))
+        except FileExistsError:
+            logger.warning(
+                "本地运行记录已存在，跳过覆盖: session=%s request=%s",
+                session_id,
+                request_id,
             )
         except OSError as exc:
             logger.warning("本地运行记录写入失败: %s", exc)
@@ -989,6 +1099,18 @@ def _thread_id_of(session_id: str, seq: int) -> str:
 
 class _RejectedSession(Exception):
     """入口校验拒绝（会话/线程标识不合规、跨会话或来源绑定不一致）"""
+
+
+class RequestIdConflictError(Exception):
+    """同会话复用已有 request_id（doc 2 §4.2）：锁内拒绝，不覆盖既有
+    诊断/归档/文本日志，也不当作幂等重放。"""
+
+
+class FinalizeHookOutcome(TypedDict, total=False):
+    """锁内终态收尾钩子的返回（doc 2 §4.4）：可选替换结果（不可信终态的
+    安全投影）及 Web 层附加信息；键缺失表示不替换。"""
+
+    result: "DbAgentResult"
 
 
 def _resolve_source_binding(

@@ -84,10 +84,28 @@ def parse_thread_id(thread_id: str) -> tuple[str, int] | None:
 
 
 def valid_session_id(session_id: str) -> bool:
-    """会话 ID 字符集限制 ^[A-Za-z0-9_-]+$（禁冒号，doc 7 §2.1）。"""
+    """会话 ID 字符集限制 ^[A-Za-z0-9_-]{1,64}$（禁冒号，doc 7 §2.1；长度
+    上限为 doc 2 §4.2 的统一 ID 契约，修复此前无长度上限的正则）。"""
     import re
 
-    return bool(re.fullmatch(r"[A-Za-z0-9_-]+", session_id or ""))
+    return bool(re.fullmatch(r"[A-Za-z0-9_-]{1,64}", session_id or ""))
+
+
+def valid_web_id(value: object) -> bool:
+    """Web 层 session_id/request_id 的同一 ID 契约（doc 2 §4.2）：
+    完整匹配 ``[A-Za-z0-9_-]{1,64}``；Runner/build_db_agent/build_session_dir
+    入口与 API 共用本校验，先于任何目录/锁/记录副作用。"""
+    import re
+
+    return isinstance(value, str) and bool(re.fullmatch(r"[A-Za-z0-9_-]{1,64}", value))
+
+
+class LockBackendError(RuntimeError):
+    """锁后端（平台库连接/查询）异常，与“明确未取得锁”区分（doc 2 §4.2）。
+
+    只有 PostgreSQL 明确返回未取得锁才归为忙碌；连接/查询异常抛本异常，
+    由调用方映射为持久化或服务不可用错误，不误报 session_busy。
+    """
 
 
 class SessionAdvisoryLock:
@@ -106,9 +124,14 @@ class SessionAdvisoryLock:
         return self._conn is not None
 
     def try_acquire(self) -> bool:
-        """尝试取锁；失败返回 False（会话正在另一进程运行或清理中）。"""
+        """尝试取锁；明确未取得返回 False，后端异常抛 LockBackendError。
+
+        连接建立后、赋给 self._conn 前若 execute 抛错，局部连接在此处关闭，
+        不依赖只检查 self._conn 的旧异常路径（doc 2 §4.2 连接回收修复）。
+        """
         import psycopg
 
+        conn = None
         try:
             conn = psycopg.connect(self._conninfo, connect_timeout=5)
             row = conn.execute(
@@ -117,16 +140,21 @@ class SessionAdvisoryLock:
             if row is None or not row[0]:
                 conn.close()
                 return False
-            self._conn = conn
+            self._conn = conn  # 取得锁后才移交生命周期管理
             return True
-        except psycopg.Error:
+        except psycopg.Error as exc:
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:  # noqa: BLE001（回收失败不覆盖原始错误）
+                    pass
             if self._conn is not None:
                 try:
                     self._conn.close()
-                except Exception:  # noqa: BLE001（关闭失败忽略）
+                except Exception:  # noqa: BLE001
                     pass
                 self._conn = None
-            return False
+            raise LockBackendError(f"会话锁后端异常: {type(exc).__name__}") from exc
 
     def release(self) -> None:
         if self._conn is None:

@@ -155,7 +155,7 @@ class TestExecuteSql:
     ):
         """source_truncated=true 提示不能把已保存行当总体。"""
         _pipeline, db, *_ = pipeline_stack
-        db.rows = [(i, "已支付") for i in range(1, 20)]  # 超过 max_saved_rows 时截断
+        db.rows = [(i, "已支付") for i in range(1, 20)]  # 超过 max_saved_result_rows 时截断
         db.source_truncated = True
         node2 = ToolNode(
             [

@@ -289,6 +289,14 @@ _HIDDEN_PATHS = ["/**/.*", "/**/.*/**"]
 
 
 def build_session_dir(cfg: "DbAgentConfig", session_id: str) -> Path:
+    # ID 校验先于目录副作用（doc 2 §4.2）：非法 session_id 不得创建目录
+    from src.modules.db_deepagent.persistence.checkpoint import valid_web_id
+
+    if not valid_web_id(session_id):
+        raise ValueError(
+            f"session_id 非法（允许 [A-Za-z0-9_-]，长度 1–64，禁冒号）: "
+            f"{session_id!r}"
+        )
     session_dir = Path(cfg.workspace.root) / "sessions" / session_id
     (session_dir / "artifacts").mkdir(parents=True, exist_ok=True)
     (session_dir / "empty_root").mkdir(parents=True, exist_ok=True)

@@ -68,7 +68,7 @@ def _service(expected: str) -> BusinessDbService:
         pool_max_size=2,
         explain_timeout_seconds=5,
         statement_timeout_seconds=30,
-        max_saved_rows=10000,
+        max_saved_result_rows=10000,
     )
     return svc
 

@@ -1,8 +1,20 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
+import ConversationList from '../modules/nl2sql/components/ConversationList.vue'
+import {
+  activeSessionId,
+  loadMoreSessions,
+  refreshSessions,
+  sessions,
+  sessionsError,
+  sessionsHasMore,
+  sessionsLoading,
+  sessionsNotice,
+} from '../modules/nl2sql/sessionList'
 
 const route = useRoute()
+const router = useRouter()
 const assetsActive = computed(
   () => route.path === '/data-assets' || route.path.startsWith('/data-assets/'),
 )
@@ -15,10 +27,17 @@ const collectionActive = computed(
 const publishActive = computed(
   () => route.path === '/profile-publishing' || route.path.startsWith('/profile-publishing/'),
 )
+const queryActive = computed(
+  () => route.path === '/query' || route.path.startsWith('/query/'),
+)
+
+function openSession(sessionId: string) {
+  void router.push({ name: 'nl2sql-query-session', params: { sessionId } })
+}
 </script>
 
 <template>
-  <aside class="sidebar">
+  <aside class="sidebar" :class="{ 'sidebar-lock': queryActive }">
     <div class="brand">
       <img class="brand-logo" src="/favicon.svg" width="34" height="34" alt="" />
       <div class="brand-text">
@@ -28,8 +47,8 @@ const publishActive = computed(
     </div>
 
     <div class="sidebar-actions">
-      <button class="button button-outline full-width" disabled title="后续阶段开放">⌁&nbsp; 新建查询 · 待开放</button>
-      <button class="button button-primary full-width" disabled title="后续阶段开放">＋&nbsp; 新建分析 · 待开放</button>
+      <RouterLink to="/query" class="button button-primary full-width query-entry">›&nbsp; 新建查询</RouterLink>
+      <button class="button button-outline full-width" disabled title="后续阶段开放">＋&nbsp; 新建分析</button>
     </div>
 
     <nav class="sidebar-nav" aria-label="主导航">
@@ -88,10 +107,50 @@ const publishActive = computed(
       </span>
     </nav>
 
-    <div class="sidebar-footer">
+    <div v-if="queryActive" class="sidebar-history">
+      <ConversationList
+        :sessions="sessions"
+        :loading="sessionsLoading"
+        :error="sessionsError"
+        :has-more="sessionsHasMore"
+        :notice="sessionsNotice"
+        :current-session-id="activeSessionId"
+        @open="openSession"
+        @load-more="loadMoreSessions"
+        @refresh="refreshSessions"
+      />
+    </div>
+    <div v-else class="sidebar-footer">
       <span class="eyebrow">RECENT PROJECTS</span>
       <p>分析项目待接入</p>
       <small>当前可登记并管理数据源连接。</small>
     </div>
   </aside>
 </template>
+
+<style scoped>
+.sidebar-actions :deep(.button) {
+  border-radius: 12px;
+}
+
+.sidebar-actions :deep(.query-entry) {
+  background: #2e7cd6;
+  box-shadow: none;
+}
+
+.sidebar-lock {
+  height: 100vh;
+  position: sticky;
+  top: 0;
+  overflow: hidden;
+}
+
+.sidebar-history {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  margin-top: 8px;
+  padding-top: 14px;
+  border-top: 1px solid #d9e3ef;
+}
+</style>

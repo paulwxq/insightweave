@@ -282,6 +282,13 @@ class RunFailureRecord(BaseModel):
         "tool_set_mismatch",
         "budget_exhausted",
         "no_final_answer",
+        # Web 前置拒绝的结构化类型（doc 2 §4.2）：分别映射同名 error_code；
+        # Runner 的 status 仍为 failed（session_busy 等是“请求未执行”特例）
+        "session_busy",
+        "lock_backend_error",
+        "knowledge_changed",
+        "dependency_unavailable",
+        "result_encoding_error",
     ]
     message: str
     primary: bool = False

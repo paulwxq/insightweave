@@ -63,7 +63,7 @@ class BusinessDbConfig(_StrictModel):
     pool_max_size: int = Field(gt=0)
     explain_timeout_seconds: float = Field(gt=0)
     statement_timeout_seconds: float = Field(gt=0)
-    max_saved_rows: int = Field(gt=0)
+    max_saved_result_rows: int = Field(gt=0)
 
 
 class PlatformDbConfig(_StrictModel):
@@ -393,6 +393,26 @@ def compute_validation_fingerprint(cfg: DbAgentConfig) -> str:
     return hashlib.sha256((canonical + GUARD_RULES_VERSION).encode("utf-8")).hexdigest()
 
 
+def load_base_db_agent_config(config_path: str | Path | None = None) -> DbAgentConfig:
+    """读取源无关的基础配置内容（doc 2 §5.3 Web 装配顺序）。
+
+    只做 yaml 解析与结构校验，不执行 §4.2 跨字段检查——business_db 三键
+    一致性在按源登记覆盖（apply_source_runtime_config）之后才成立；环境
+    DB_NAME 与 YAML 默认 orders 不同时也能先完成解析。Web 公共装配在应用
+    登记快照后调用 run_config_checks 完成最终校验。
+    """
+    path = Path(config_path) if config_path is not None else _CONFIG_PATH
+    if not path.exists():
+        raise DbAgentConfigError(f"配置文件不存在: {path}")
+    raw = ConfigLoader(str(path)).load()
+    try:
+        return DbAgentConfig.model_validate(raw)
+    except ValidationError as exc:
+        raise DbAgentConfigError(
+            f"配置结构错误（字段路径）: {_field_paths(exc)}"
+        ) from exc
+
+
 def load_db_agent_config(config_path: str | Path | None = None) -> DbAgentConfig:
     """加载 §4.1 yaml → DbAgentConfig，并执行 §4.2 全部检查。
 
@@ -402,15 +422,6 @@ def load_db_agent_config(config_path: str | Path | None = None) -> DbAgentConfig
     Raises:
         DbAgentConfigError: 文件缺失、结构错误、检查表任一失败（消息不含密码）
     """
-    path = Path(config_path) if config_path is not None else _CONFIG_PATH
-    if not path.exists():
-        raise DbAgentConfigError(f"配置文件不存在: {path}")
-    raw = ConfigLoader(str(path)).load()
-    try:
-        cfg = DbAgentConfig.model_validate(raw)
-    except ValidationError as exc:
-        raise DbAgentConfigError(
-            f"配置结构错误（字段路径）: {_field_paths(exc)}"
-        ) from exc
+    cfg = load_base_db_agent_config(config_path)
     run_config_checks(cfg)
     return cfg

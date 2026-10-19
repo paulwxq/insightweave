@@ -14,6 +14,7 @@ import ObjectListView from '../views/ObjectListView.vue'
 import ObjectDetailView from '../views/ObjectDetailView.vue'
 import CollectionHomeView from '../views/CollectionHomeView.vue'
 import PublishHomeView from '../views/PublishHomeView.vue'
+import { nl2sqlRoutes } from '../modules/nl2sql/routes'
 
 function keepQuery(path: string) {
   return (to: RouteLocationGeneric) => ({ path, query: to.query, hash: to.hash })
@@ -85,6 +86,7 @@ export default createRouter({
       component: PublishJobsView,
     },
     { path: '/data-sources/:sourceId', name: 'data-source-detail', component: DataSourceDetailView },
+    ...nl2sqlRoutes,
     { path: '/data-assets/new', redirect: keepQuery('/data-sources/new') },
     {
       path: '/data-assets/:sourceId/edit',

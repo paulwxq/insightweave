@@ -534,7 +534,7 @@ class SqlPipeline:
             else (
                 probe_limit
                 if probe_limit is not None
-                else self._cfg.business_db.max_saved_rows
+                else self._cfg.business_db.max_saved_result_rows
             )
         )
         try:

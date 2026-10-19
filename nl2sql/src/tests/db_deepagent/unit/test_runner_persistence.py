@@ -368,9 +368,11 @@ class TestStep5Gates:
             ),
             archive=QaArchive(store),
         )
-        result = runner.run("问", "a:b")
-        assert result.status == "failed"
-        assert any("非法字符" in e.message for e in result.errors)
+        # doc 2 §4.2：ID 校验先于一切副作用（目录/锁/本地记录），直接拒绝
+        import pytest as _pytest
+
+        with _pytest.raises(ValueError, match="session_id 非法"):
+            runner.run("问", "a:b")
 
     def test_rotation_does_not_reuse_existing_seq(self, assembly_services):
         """恢复线程 1 后轮换：新编号=会话最大序号+1，不复用已有线程 2。"""
