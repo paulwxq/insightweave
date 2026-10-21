@@ -1,20 +1,27 @@
-"""清理（docs/v4/5 §13.5 + doc 7 §2 折入）
+"""清理（docs/v4/5 §13.5 + doc 7 §2 折入 + docs/3.1 R2/R3）
 
 线程级判定：当前线程／待恢复保护，effective_at = max(last_active_at,
 retired_at, 最新 checkpoint 时间)；会话归属 parse_thread_id 精确复核；
 advisory lock 会话级互斥（拿不到跳过该会话，拿到后重新核对资格）；
 独立短连接逐线程显式事务删除（§13.5 清理连接与事务）。
+
+结果目录（R2）与会话循环解耦：全局按目录年龄删除，不读会话归属、
+不看引用、不取会话锁；快照表不存在时跳过实删。快照行（R3）按
+last_referenced_at + archive_retention_days 全局删除。
 """
 
 from __future__ import annotations
 
+import json
+import re
+import shutil
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 from src.modules.db_deepagent.config import DbAgentConfig
-from src.modules.db_deepagent.persistence.archive import QaArchive, refs_of_record
+from src.modules.db_deepagent.persistence.archive import QaArchive
 from src.modules.db_deepagent.persistence.checkpoint import (
     SessionAdvisoryLock,
     parse_thread_id,
@@ -23,6 +30,8 @@ from src.modules.db_deepagent.persistence.platform_pool import make_platform_con
 from src.utils.logger import get_module_logger
 
 logger = get_module_logger("nl2sql.db_deepagent.persistence.maintenance")
+
+_RESULT_REF_RE = re.compile(r"^res_[0-9a-f]{32}$")
 
 
 @dataclass
@@ -46,6 +55,7 @@ class CleanupReport:
     result_dirs: list[str] = field(
         default_factory=list
     )  # §13.5 第 4 点（含 dry-run 标注）
+    snapshot_deleted: int = 0  # result_snapshots 删除（或 dry-run 计数）
     archives: list[tuple[str, str]] = field(
         default_factory=list
     )  # (qa|run_errors, key)
@@ -189,13 +199,12 @@ class MaintenanceService:
         apply: bool,
         before: datetime | None = None,
     ) -> CleanupReport:
-        """§13.5：线程 → 结果目录 → qa/run_errors 三段清理。
+        """§13.5 + docs/3.1：会话内线程/归档/Web 清理，循环外 R2/R3 全局清理。
 
         清理会话＝sessions 记录 ∪ 结果目录 ∪ 归档中发现的所有会话，统一走
         同一套 advisory lock 流程（sessions 缺失不代表没有运行：首次请求
-        尚未到 P3、或此前 P3 写入失败都可能出现）；取锁失败跳过该会话
-        全部清理，避免引用检查与实际删除之间与运行中的会话竞争。
-        引用是会话内的（结果读取有会话归属校验），无跨会话保护需求。
+        尚未到 P3、或此前 P3 写入失败都可能出现）；取锁失败跳过该会话的
+        线程/归档/Web 清理。结果目录由循环外的 R2 全局步骤处理，不取会话锁。
         before 规范化为 aware UTC 且只收紧不放宽（晚于当前时刻按当前时刻）。
         """
         report = CleanupReport(dry_run=not apply)
@@ -274,17 +283,7 @@ class MaintenanceService:
                     self._cleanup_session(
                         conn, session_id, cutoff=cutoff, apply=apply, report=report
                     )
-                    # 2) 结果目录（第 4 点）：同锁内收集保护引用再判删除
-                    self._cleanup_session_results(
-                        session_id,
-                        result_metas.get(session_id, []),
-                        retention=result_retention,
-                        now=reference_now,
-                        apply=apply,
-                        report=report,
-                        conn=conn,
-                    )
-                    # 3) 归档（第 5 点）：同锁内按保留期清理
+                    # 2) 归档（第 5 点）：同锁内按保留期清理
                     report.archives.extend(
                         self._archive.purge_archives(
                             session_id=session_id, before=archive_before, apply=apply
@@ -304,6 +303,20 @@ class MaintenanceService:
                         )
                 finally:
                     lock.release()
+            # R2/R3：会话循环之外的全局步骤（不取会话锁）
+            self._cleanup_result_dirs_global(
+                retention=result_retention,
+                now=reference_now,
+                apply=apply,
+                report=report,
+                conn=conn,
+            )
+            self._cleanup_snapshots(
+                before=archive_before,
+                apply=apply,
+                report=report,
+                conn=conn,
+            )
         return report
 
     # ------------------------------------------------------------ Web 命名空间
@@ -596,45 +609,43 @@ class MaintenanceService:
                 meta = _json.loads((path / "meta.json").read_text(encoding="utf-8"))
             except (OSError, ValueError):
                 continue
+            if not isinstance(meta, dict):
+                continue
             out.setdefault(str(meta.get("session_id", "")), []).append(
                 (path.name, meta)
             )
         return out
 
-    def _protected_refs(
-        self, session_id: str, surviving_threads: set[str]
-    ) -> tuple[set[str], bool]:
-        """该会话仍被引用的 result_ref 集合（§13.5 第 4 点保护口径）。
+    def _snapshot_table_ready(self, conn) -> bool | None:
+        """R2/R3 统一门禁：只核对一次快照表是否存在；None=无法确认。"""
+        try:
+            row = conn.execute(
+                "SELECT to_regclass('result_snapshots') AS reg"
+            ).fetchone()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("快照表存在性核对失败: %s: %s", type(exc).__name__, exc)
+            return None
+        return bool(row and row.get("reg"))
 
-        来源：保留线程状态、sessions 携带证据、qa 归档证据；执行／分析
-        记录统一经 refs_of_record 提取（分析含 input_result_refs）。
-        任何线程状态读取失败即返回 (…, False)——保护信息不完整时跳过
-        该会话的结果删除。
-        """
-        refs: set[str] = set()
-        for thread_id in sorted(surviving_threads):
-            try:
-                values = self._agent.get_state(
-                    {"configurable": {"thread_id": thread_id}}
-                ).values
-            except Exception as exc:  # noqa: BLE001（保护信息不完整→跳过删除）
-                logger.warning("保护引用读取失败 %s: %s", thread_id, exc)
-                return set(), False
-            for record in values.get("db_executions") or []:
-                refs |= refs_of_record(dict(record))
-            for record in values.get("db_analyses") or []:
-                refs |= refs_of_record(dict(record))
-        session_rec = self._archive.get_session(session_id) or {}
-        for item in session_rec.get("carried_evidence") or []:
-            record = item.get("record") or {}
-            refs |= refs_of_record(dict(record))
-        refs |= self._archive.collect_result_refs(session_id=session_id)
-        return refs, True
+    def _result_dir_age(self, path: Path, now: datetime) -> datetime:
+        """目录年龄基准：meta.created_at 可解析且不晚于基准时间时优先，
+        否则回退目录 mtime；mtime 在未来时夹紧到基准时间。"""
+        try:
+            meta = json.loads((path / "meta.json").read_text(encoding="utf-8"))
+            if isinstance(meta, dict):
+                created = _as_utc(meta.get("created_at"))
+                if created is not None and created <= now:
+                    return created
+        except (OSError, ValueError, TypeError, AttributeError):
+            pass
+        try:
+            mtime = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
+        except OSError:
+            return now
+        return min(mtime, now)
 
-    def _cleanup_session_results(
+    def _cleanup_result_dirs_global(
         self,
-        session_id: str,
-        entries: list[tuple[str, dict[str, Any]]],
         *,
         retention: timedelta,
         now: datetime,
@@ -642,43 +653,64 @@ class MaintenanceService:
         report: CleanupReport,
         conn,
     ) -> None:
-        """§13.5 第 4 点：结果目录早于 result_retention_days，且不被保留中
-        的线程状态（含分析的输入引用）、携带证据、qa 归档引用时才删除。"""
-        if not entries:
+        """R2：全局按目录时间删除，不读会话归属、不看引用、不取会话锁。"""
+        root = Path(self._cfg.workspace.root) / "results"
+        if not root.is_dir():
             return
-        surviving = self._checkpoint_thread_ids(conn, session_id)
-        protected, readable = self._protected_refs(session_id, surviving)
-        if not readable:
+        if self._snapshot_table_ready(conn) is not True:
             report.skipped.append(
                 {
-                    "session_id": session_id,
-                    "reason": "保护引用读取失败，跳过该会话结果目录清理",
+                    "result_ref": "*",
+                    "reason": "快照表不存在或无法确认，跳过 R2 实删",
                 }
             )
             return
-        from src.modules.db_deepagent.errors import ResultStoreError
-        from src.modules.db_deepagent.services.result_store import ResultStore
-
-        results = ResultStore(Path(self._cfg.workspace.root))
-        for name, meta in entries:
-            if meta.get("thread_id") in surviving or name in protected:
+        for path in sorted(root.iterdir()):
+            if not path.is_dir() or not _RESULT_REF_RE.match(path.name):
                 continue
-            created = _as_utc(meta.get("created_at"))
-            if created is None or (now - created) < retention:
+            if (now - self._result_dir_age(path, now)) < retention:
                 continue
             if not apply:
-                report.result_dirs.append(name + " (dry-run)")
+                report.result_dirs.append(path.name + " (dry-run)")
                 continue
             try:
-                results.delete(name, session_id=meta.get("session_id", ""))
-                report.result_dirs.append(name)
-            except ResultStoreError as exc:
+                shutil.rmtree(path)
+                report.result_dirs.append(path.name)
+            except OSError as exc:
                 report.errors.append(
-                    {
-                        "result_ref": name,
-                        "error": f"{exc.error_type}: {exc.message}",
-                    }
+                    {"result_ref": path.name, "error": f"{type(exc).__name__}: {exc}"}
                 )
+
+    def _cleanup_snapshots(
+        self,
+        *,
+        before: datetime,
+        apply: bool,
+        report: CleanupReport,
+        conn,
+    ) -> None:
+        """R3：按 last_referenced_at 清理快照行。"""
+        if self._snapshot_table_ready(conn) is not True:
+            report.skipped.append(
+                {
+                    "snapshot": "*",
+                    "reason": "快照表不存在或无法确认，跳过 R3 清理",
+                }
+            )
+            return
+        if apply:
+            cur = conn.execute(
+                "DELETE FROM result_snapshots WHERE last_referenced_at < %s",
+                (before,),
+            )
+            report.snapshot_deleted = int(cur.rowcount or 0)
+        else:
+            row = conn.execute(
+                "SELECT count(*) AS n FROM result_snapshots "
+                "WHERE last_referenced_at < %s",
+                (before,),
+            ).fetchone()
+            report.snapshot_deleted = int(row["n"] if row else 0)
 
     def _list_sessions(self) -> list[str]:
         out: list[str] = []

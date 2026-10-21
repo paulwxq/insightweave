@@ -9,12 +9,14 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 from pathlib import Path
 from typing import Any, Callable, Optional
 from uuid import UUID
 
 from fastapi import APIRouter, Query, Request
+from fastapi.responses import Response
 
 from src.api.v2 import codes
 from src.api.v2.dto import QueryRequest, SessionCreateRequest
@@ -67,6 +69,128 @@ async def _run_read(request: Request, fn: Callable[[], Any]) -> Any:
         raise codes.WebApiError(
             codes.DEPENDENCY_UNAVAILABLE, "依赖读取未能完成"
         ) from None
+
+
+def _max_display_rows() -> int:
+    """前端表格展示上限（config.yaml api.max_display_rows，默认 200）。"""
+    from src.services.config_loader import get_config
+
+    value = get_config().get("api", {}).get("max_display_rows", 200)
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return 200
+    return parsed if parsed > 0 else 200
+
+
+def _require_web_session(webstore, session_id: str) -> None:
+    """结果读取/导出共用的 Web 会话登记归属校验。"""
+    try:
+        record = webstore.get_registration(session_id)
+    except StoreUnavailable:
+        raise codes.WebApiError(
+            codes.DEPENDENCY_UNAVAILABLE, "会话存储暂时不可用"
+        ) from None
+    if record is None or not core_ownership_ok(record, session_id):
+        raise codes.WebApiError(codes.SESSION_NOT_FOUND, "会话不存在")
+
+
+def _result_dir(root: str, result_ref: str) -> Path:
+    return Path(root) / "results" / result_ref
+
+
+def _complete_files(path: Path) -> bool:
+    return (
+        path.is_dir()
+        and (path / "meta.json").is_file()
+        and (path / "rows.jsonl").is_file()
+    )
+
+
+def _snapshot_page(
+    runtime,
+    session_id: str,
+    result_ref: str,
+    *,
+    offset: int,
+    limit: int,
+) -> dict:
+    """按 session_id + result_ref 读取快照并切片；表缺失按 404 处理。"""
+    from src.api.v2.snapshots import SnapshotTableMissing
+
+    try:
+        snapshot = runtime.get_snapshot_store().fetch(session_id, result_ref)
+    except SnapshotTableMissing:
+        logger.warning(
+            "快照表不存在，按无快照处理 session=%s ref=%s", session_id, result_ref
+        )
+        raise codes.WebApiError(
+            codes.RESULT_NOT_FOUND, "结果不存在或不可访问"
+        ) from None
+    except Exception as exc:  # noqa: BLE001（查询失败 ≠ 无快照）
+        logger.warning(
+            "快照查询失败 session=%s ref=%s: %s",
+            session_id,
+            result_ref,
+            type(exc).__name__,
+        )
+        raise codes.WebApiError(
+            codes.DEPENDENCY_UNAVAILABLE, "结果快照读取暂时不可用"
+        ) from None
+    if snapshot is None:
+        raise codes.WebApiError(codes.RESULT_NOT_FOUND, "结果不存在或不可访问")
+    rows = snapshot.get("rows_snapshot") or []
+    total = int(snapshot.get("snapshot_row_count") or len(rows))
+    meta = snapshot.get("meta_jsonb") or {}
+    page_rows = rows[offset : offset + limit]
+    next_offset = offset + limit if offset + limit < total else None
+    return {
+        "columns": [
+            {"name": c["name"], "pg_type": c["pg_type"]}
+            for c in (meta.get("columns") or [])
+        ],
+        "rows": page_rows,
+        "offset": offset,
+        "limit": limit,
+        "next_offset": next_offset,
+        "has_more": next_offset is not None,
+        "saved_row_count": int(snapshot.get("saved_row_count") or 0),
+        "source_truncated": bool(meta.get("source_truncated", False)),
+        "data_from_snapshot": True,
+        "snapshot_rows_available": int(snapshot.get("snapshot_row_count") or len(rows)),
+        "max_display_rows": _max_display_rows(),
+    }
+
+
+def _cell_text(cell: Any) -> str:
+    """v2 cell 信封 → CSV 文本（与页面展示语义一致）。"""
+    if not isinstance(cell, dict):
+        return "" if cell is None else str(cell)
+    kind = cell.get("kind")
+    value = cell.get("value")
+    if kind == "null":
+        return "NULL"
+    if kind == "boolean":
+        return "true" if value else "false"
+    if kind == "binary":
+        length = int((value or {}).get("length", 0))
+        return f"二进制 {length} 字节"
+    if kind == "array":
+        return "{" + ", ".join(_cell_text(v) for v in (value or [])) + "}"
+    return "" if value is None else str(value)
+
+
+def _csv_escape(value: str) -> str:
+    if any(ch in value for ch in ('"', ",", "\n", "\r")):
+        return '"' + value.replace('"', '""') + '"'
+    return value
+
+
+def _rows_to_csv(columns: list[dict], rows: list[list[Any]]) -> str:
+    lines = [",".join(_csv_escape(str(c.get("name", ""))) for c in columns)]
+    for row in rows:
+        lines.append(",".join(_csv_escape(_cell_text(cell)) for cell in row))
+    return "﻿" + "\n".join(lines) + "\n"
 
 
 # ----------------------------------------------------------------------------
@@ -350,8 +474,8 @@ async def read_result(
     limit: int = Query(100, ge=1, le=500),
     offset: int = Query(0, ge=0),
 ):
-    """结果分页读取（doc 2 §4.5）：先核对 Web 会话登记（§8.1 读取校验），
-    v2 cell 信封直通；旧引用按 Q2 可读。"""
+    """结果分页读取（doc 2 §4.5）：文件完整时读结果目录；目录或必需文件
+    缺失时按 session_id + result_ref 回退快照表。"""
     _validate_session_id(session_id)
     if not _RESULT_REF_RE.match(result_ref or ""):
         raise codes.WebApiError(codes.RESULT_NOT_FOUND, "结果不存在或不可访问")
@@ -361,56 +485,155 @@ async def read_result(
         from src.modules.db_deepagent.errors import ResultStoreError
         from src.modules.db_deepagent.services.result_store import ResultStore
 
-        # 先核对 Web 会话登记归属（doc 2 §8.1）：结果文件中的 session_id
-        # 只作第二道校验，不作为唯一依据
         runtime = get_web_runtime()
         webstore = runtime.get_webstore()
-        try:
-            record = webstore.get_registration(session_id)
-        except StoreUnavailable:
-            raise codes.WebApiError(
-                codes.DEPENDENCY_UNAVAILABLE, "会话存储暂时不可用"
-            ) from None
-        if record is None or not core_ownership_ok(record, session_id):
-            raise codes.WebApiError(codes.SESSION_NOT_FOUND, "会话不存在")
+        _require_web_session(webstore, session_id)
 
         cfg = load_base_db_agent_config()
         store = ResultStore(Path(cfg.workspace.root))
-        try:
-            page = store.read_rows_cells(
-                result_ref, session_id=session_id, offset=offset, limit=limit
-            )
-        except ResultStoreError as exc:
-            if exc.error_type in (
-                "result_not_found",
-                "result_access_denied",
-                "invalid_result_ref",
-            ):
-                raise codes.WebApiError(
-                    codes.RESULT_NOT_FOUND, "结果不存在或不可访问"
-                ) from None
-            if exc.error_type == "result_integrity_error":
-                raise codes.WebApiError(
-                    codes.RESULT_INTEGRITY_ERROR, "结果完整性校验失败"
-                ) from None
-            if exc.error_type == "result_encoding_error":
-                # 结果无法安全读取/转码（doc 2 §4.2：500，不混同参数非法）
-                raise codes.WebApiError(
-                    codes.RESULT_ENCODING_ERROR, "结果无法安全读取或转码"
-                ) from None
-            raise codes.WebApiError(codes.INVALID_REQUEST, "请求参数非法") from None
-        return {
-            "columns": [
-                {"name": c["name"], "pg_type": c["pg_type"]} for c in page.columns
-            ],
-            "rows": [list(row) for row in page.rows],
-            "offset": page.offset,
-            "limit": limit,
-            "next_offset": page.next_offset,
-            "has_more": page.next_offset is not None,
-            "saved_row_count": page.saved_row_count,
-            "source_truncated": page.source_truncated,
-        }
+        path = _result_dir(cfg.workspace.root, result_ref)
+        if _complete_files(path):
+            try:
+                page = store.read_rows_cells(
+                    result_ref, session_id=session_id, offset=offset, limit=limit
+                )
+            except ResultStoreError as exc:
+                # TOCTOU：检查后文件被清理 → 复检并回退快照
+                if exc.error_type == "result_not_found" and not _complete_files(path):
+                    return _snapshot_page(
+                        runtime,
+                        session_id,
+                        result_ref,
+                        offset=offset,
+                        limit=limit,
+                    )
+                if exc.error_type in (
+                    "result_not_found",
+                    "result_access_denied",
+                    "invalid_result_ref",
+                ):
+                    raise codes.WebApiError(
+                        codes.RESULT_NOT_FOUND, "结果不存在或不可访问"
+                    ) from None
+                if exc.error_type == "result_integrity_error":
+                    raise codes.WebApiError(
+                        codes.RESULT_INTEGRITY_ERROR, "结果完整性校验失败"
+                    ) from None
+                if exc.error_type == "result_encoding_error":
+                    raise codes.WebApiError(
+                        codes.RESULT_ENCODING_ERROR, "结果无法安全读取或转码"
+                    ) from None
+                raise codes.WebApiError(codes.INVALID_REQUEST, "请求参数非法") from None
+            return {
+                "columns": [
+                    {"name": c["name"], "pg_type": c["pg_type"]} for c in page.columns
+                ],
+                "rows": [list(row) for row in page.rows],
+                "offset": page.offset,
+                "limit": limit,
+                "next_offset": page.next_offset,
+                "has_more": page.next_offset is not None,
+                "saved_row_count": page.saved_row_count,
+                "source_truncated": page.source_truncated,
+                "data_from_snapshot": False,
+                "snapshot_rows_available": None,
+                "max_display_rows": _max_display_rows(),
+            }
+        return _snapshot_page(
+            runtime, session_id, result_ref, offset=offset, limit=limit
+        )
 
     data = await _run_read(request, _work)
     return success_response(data, request)
+
+
+@router.get("/sessions/{session_id}/results/{result_ref}/export")
+async def export_result(
+    session_id: str,
+    result_ref: str,
+    request: Request,
+):
+    """CSV 导出：文件完整时导出全部已保存行；否则导出快照行。
+
+    与分页读取共用 Web 会话归属校验；导出不执行 rows_sha256 校验。
+    """
+    _validate_session_id(session_id)
+    if not _RESULT_REF_RE.match(result_ref or ""):
+        raise codes.WebApiError(codes.RESULT_NOT_FOUND, "结果不存在或不可访问")
+
+    def _work() -> Response:
+        from src.api.v2.snapshots import SnapshotTableMissing
+        from src.modules.db_deepagent.config import load_base_db_agent_config
+        from src.modules.db_deepagent.services.result_store import ResultStore
+
+        runtime = get_web_runtime()
+        webstore = runtime.get_webstore()
+        _require_web_session(webstore, session_id)
+
+        cfg = load_base_db_agent_config()
+        path = _result_dir(cfg.workspace.root, result_ref)
+        if _complete_files(path):
+            from src.modules.db_deepagent.errors import ResultStoreError
+
+            store = ResultStore(Path(cfg.workspace.root))
+            try:
+                meta = store.load_meta(result_ref, session_id=session_id)
+            except ResultStoreError as exc:
+                if exc.error_type in (
+                    "result_not_found",
+                    "result_access_denied",
+                    "invalid_result_ref",
+                ):
+                    raise codes.WebApiError(
+                        codes.RESULT_NOT_FOUND, "结果不存在或不可访问"
+                    ) from None
+                if exc.error_type == "result_encoding_error":
+                    raise codes.WebApiError(
+                        codes.RESULT_ENCODING_ERROR, "结果无法安全转换"
+                    ) from None
+                raise codes.WebApiError(codes.INVALID_REQUEST, "请求参数非法") from None
+            try:
+                text = (path / "rows.jsonl").read_text(encoding="utf-8")
+                rows = [json.loads(line) for line in text.splitlines() if line]
+            except (OSError, json.JSONDecodeError) as exc:
+                raise codes.WebApiError(
+                    codes.RESULT_ENCODING_ERROR, "结果无法安全转换"
+                ) from exc
+            csv = _rows_to_csv(meta.columns, rows)
+            filename = f"{result_ref}.csv"
+        else:
+            try:
+                snapshot = runtime.get_snapshot_store().fetch(session_id, result_ref)
+            except SnapshotTableMissing:
+                logger.warning(
+                    "快照表不存在，导出按无结果处理 session=%s ref=%s",
+                    session_id,
+                    result_ref,
+                )
+                raise codes.WebApiError(
+                    codes.RESULT_NOT_FOUND, "结果不存在或不可访问"
+                ) from None
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "快照查询失败 session=%s ref=%s: %s",
+                    session_id,
+                    result_ref,
+                    type(exc).__name__,
+                )
+                raise codes.WebApiError(
+                    codes.DEPENDENCY_UNAVAILABLE, "结果快照读取暂时不可用"
+                ) from None
+            if snapshot is None:
+                raise codes.WebApiError(codes.RESULT_NOT_FOUND, "结果不存在或不可访问")
+            meta = snapshot.get("meta_jsonb") or {}
+            csv = _rows_to_csv(
+                meta.get("columns") or [], snapshot.get("rows_snapshot") or []
+            )
+            filename = f"{result_ref}.snapshot.csv"
+        return Response(
+            content=csv,
+            media_type="text/csv; charset=utf-8",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+
+    return await _run_read(request, _work)

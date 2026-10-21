@@ -344,6 +344,7 @@ class TestCleanupWiring:
                     errors=[],
                     result_dirs=[],
                     archives=[],
+                    snapshot_deleted=0,
                 )
 
         monkeypatch.setattr(maintenance_mod, "MaintenanceService", FakeMaintenance)

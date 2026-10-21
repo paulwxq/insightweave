@@ -29,6 +29,40 @@ PLATFORM_TABLES = (
     "store_migrations",
 )
 
+# 历史结果快照表（docs/3.1）：由 init-platform 显式创建；不在六表阻断核对内。
+SNAPSHOT_TABLE = "result_snapshots"
+SNAPSHOT_DDL = (
+    """
+    CREATE TABLE IF NOT EXISTS result_snapshots (
+        result_ref text PRIMARY KEY,
+        session_id text NOT NULL,
+        request_id text,
+        thread_id text,
+        saved_row_count int NOT NULL,
+        rows_snapshot jsonb NOT NULL,
+        snapshot_row_count int NOT NULL,
+        meta_jsonb jsonb NOT NULL,
+        created_at timestamptz NOT NULL DEFAULT now(),
+        last_referenced_at timestamptz NOT NULL DEFAULT now()
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_result_snapshots_session "
+    "ON result_snapshots (session_id, created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_result_snapshots_request "
+    "ON result_snapshots (request_id)",
+    "CREATE INDEX IF NOT EXISTS idx_result_snapshots_lastref "
+    "ON result_snapshots (last_referenced_at)",
+)
+
+
+def snapshot_table_exists(pool: ConnectionPool) -> bool:
+    """快照表是否存在（当前 schema）；不抛“表不存在”，只在连接失败时抛。"""
+    with pool.connection() as conn:
+        row = conn.execute(
+            "SELECT to_regclass(%s) AS reg", (SNAPSHOT_TABLE,)
+        ).fetchone()
+    return bool(row and row.get("reg"))
+
 
 def make_platform_conninfo(
     cfg: PlatformDbConfig, *, with_search_path: bool = True
@@ -132,7 +166,8 @@ def init_platform(cfg: PlatformDbConfig) -> list[str]:
 
     1. 不设 search_path 的管理连接：CREATE SCHEMA IF NOT EXISTS，并快照 public 行数
     2. 打开连接池，PostgresSaver(pool).setup()、PostgresStore(pool).setup()
-    3. 核对六张表位于 db_deepagent，且 public 旧表行数未变化（P08）
+    3. 执行历史快照表 DDL（幂等）
+    4. 核对六张表位于 db_deepagent，且 public 旧表行数未变化（P08）
 
     Returns: db_deepagent 下的表名列表
 
@@ -155,6 +190,9 @@ def init_platform(cfg: PlatformDbConfig) -> list[str]:
             PostgresSaver(conn).setup()
         with pool.connection() as conn:
             PostgresStore(conn).setup()
+        with pool.connection() as conn:
+            for statement in SNAPSHOT_DDL:
+                conn.execute(statement)
         missing = check_platform_tables(pool, cfg.schema_name)
         if missing:
             raise PlatformSchemaError(f"init-platform 后仍缺表: {', '.join(missing)}")

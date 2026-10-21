@@ -733,7 +733,8 @@ def _run_maintenance_cleanup(args, cfg) -> int:
         print(f"  - {thread_id}")
     print(
         f"保留: {len(report.kept_threads)}  跳过: {len(report.skipped)}  "
-        f"结果目录: {len(report.result_dirs)}  归档条目: {len(report.archives)}"
+        f"结果目录: {len(report.result_dirs)}  归档条目: {len(report.archives)}  "
+        f"快照行: {report.snapshot_deleted}"
     )
     for item in report.skipped:
         print(f"  - {item}")

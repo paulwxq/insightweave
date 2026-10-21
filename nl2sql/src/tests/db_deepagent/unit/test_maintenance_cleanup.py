@@ -7,6 +7,7 @@ get_state 异常跳过、会话名相似与嵌套不互扰。
 
 from __future__ import annotations
 
+import os
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
@@ -24,21 +25,43 @@ RECENT = NOW - timedelta(days=1)
 
 
 class FakeConn:
-    """记录 SQL；thread_rows/surviving_rows 模拟 checkpoints 查询（dict_row）"""
+    """记录 SQL；模拟 checkpoints 查询与 result_snapshots 维护 SQL。"""
 
-    def __init__(self, thread_rows=None, surviving_rows=None):
+    def __init__(
+        self,
+        thread_rows=None,
+        surviving_rows=None,
+        *,
+        snapshot_table=True,
+        snapshot_rows=0,
+    ):
         self.queries: list[tuple[str, tuple]] = []
         self.thread_rows = thread_rows or []
         self.surviving_rows = surviving_rows or []
+        self.snapshot_table = snapshot_table
+        self.snapshot_rows = snapshot_rows
+        self.snapshot_delete_rowcount = snapshot_rows
+        self.snapshot_deletes: list[tuple] = []
 
     def execute(self, sql, params=None):
         self.queries.append((sql, params))
+        if "to_regclass" in sql:
+            return SimpleNamespace(
+                fetchone=lambda: {
+                    "reg": "result_snapshots" if self.snapshot_table else None
+                }
+            )
+        if "DELETE FROM result_snapshots" in sql:
+            self.snapshot_deletes.append(params or ())
+            return SimpleNamespace(rowcount=self.snapshot_delete_rowcount)
+        if "count(*) AS n FROM result_snapshots" in sql:
+            return SimpleNamespace(fetchone=lambda: {"n": self.snapshot_rows})
         if "DISTINCT thread_id" in sql:
             if "LIKE" in sql:  # 会话内前缀枚举
                 return SimpleNamespace(
                     fetchall=lambda: [{"thread_id": t} for t in self.thread_rows]
                 )
-            return SimpleNamespace(  # 清理后幸存线程（结果目录保护）
+            return SimpleNamespace(  # 清理后幸存线程（仅会话发现）
                 fetchall=lambda: [{"thread_id": t} for t in self.surviving_rows]
             )
         if "checkpoint->>'ts'" in sql and "max(" in sql:
@@ -121,6 +144,8 @@ class TestResultsAndArchiveCleanup:
         sessions=(),
         lock_ok=True,
         agent=None,
+        snapshot_table=True,
+        snapshot_rows=0,
     ):
         import psycopg
 
@@ -140,7 +165,13 @@ class TestResultsAndArchiveCleanup:
 
         # thread_rows 服务会话内 LIKE 枚举；surviving_rows 服务全表 DISTINCT
         # （checkpoint 会话发现）——两分支同源即可
-        conn = _Conn(thread_rows=list(surviving), surviving_rows=list(surviving))
+        conn = _Conn(
+            thread_rows=list(surviving),
+            surviving_rows=list(surviving),
+            snapshot_table=snapshot_table,
+            snapshot_rows=snapshot_rows,
+        )
+        captured["conn"] = conn
 
         def fake_connect(conninfo, **kwargs):
             captured.update(kwargs)
@@ -206,9 +237,10 @@ class TestResultsAndArchiveCleanup:
             )
         return meta
 
-    def test_results_cleanup_reference_protected(
+    def test_results_cleanup_global_deletes_all_expired(
         self, monkeypatch, db_agent_config, store, tmp_path
     ):
+        """R2：过期目录全局删除，不再看线程/qa 引用保护。"""
         from src.modules.db_deepagent.services.result_store import ResultStore
 
         cfg = db_agent_config.model_copy(deep=True)
@@ -227,72 +259,60 @@ class TestResultsAndArchiveCleanup:
             monkeypatch,
             cfg,
             store,
-            surviving=["dbda:s1:1"],  # 线程仍在：r_thread 受保护
+            surviving=["dbda:s1:1"],  # 旧实现会保护；R2 不再看引用
         )
         report = service.cleanup(apply=True)
         assert report.ok, report.errors
-        assert report.result_dirs == [r_free.result_ref]
-        results = ResultStore(tmp_path)
-        for ref in (r_thread.result_ref, r_qa.result_ref, r_recent.result_ref):
-            assert (results._root / ref).is_dir(), ref
-        assert not (results._root / r_free.result_ref).exists()
-
-    def test_results_referenced_by_other_thread_state_protected(
-        self, monkeypatch, db_agent_config, store, tmp_path
-    ):
-        """结果由已删线程生成、仍被保留线程状态引用（含分析输入）→ 不删。"""
-        from src.modules.db_deepagent.services.result_store import ResultStore
-
-        cfg = db_agent_config.model_copy(deep=True)
-        cfg.workspace.root = str(tmp_path)
-        old = (datetime.now(timezone.utc) - timedelta(days=400)).isoformat()
-        r_referenced = self._save_result(
-            cfg, thread_id="dbda:s1:1", created_at=old
-        )  # 生成线程已删除
-        agent = FakeAgent({})
-        agent.states_by_thread = {
-            "dbda:s1:2": {  # 保留线程仍引用它
-                "messages": [object()],
-                "db_executions": [],
-                "db_analyses": [
-                    {
-                        "evidence_id": "A-1",
-                        "output_result_ref": "res_" + "5" * 32,
-                        "input_result_refs": [r_referenced.result_ref],
-                    }
-                ],
-            }
+        assert set(report.result_dirs) == {
+            r_thread.result_ref,
+            r_qa.result_ref,
+            r_free.result_ref,
         }
-        service, _captured = self._install(
-            monkeypatch, cfg, store, surviving=["dbda:s1:2"], agent=agent
-        )
-        report = service.cleanup(apply=True)
-        assert report.ok, report.errors
-        assert report.result_dirs == []
         results = ResultStore(tmp_path)
-        assert (results._root / r_referenced.result_ref).is_dir()
+        for ref in (r_thread.result_ref, r_qa.result_ref, r_free.result_ref):
+            assert not (results._root / ref).exists(), ref
+        assert (results._root / r_recent.result_ref).is_dir()
 
-    def test_protected_refs_read_failure_skips_results(
+    def test_r2_future_created_at_falls_back_to_old_mtime(
         self, monkeypatch, db_agent_config, store, tmp_path
     ):
-        """保留线程状态读取失败 → 跳过该会话结果目录清理（不盲删）。"""
+        """meta.created_at 在未来时不作为年龄基准，回退目录 mtime。"""
+        from src.modules.db_deepagent.services.result_store import ResultStore
+
+        cfg = db_agent_config.model_copy(deep=True)
+        cfg.workspace.root = str(tmp_path)
+        future = (datetime.now(timezone.utc) + timedelta(days=3650)).isoformat()
+        result = self._save_result(cfg, thread_id="dbda:s1:1", created_at=future)
+        result_dir = ResultStore(tmp_path)._root / result.result_ref
+        old = datetime.now(timezone.utc) - timedelta(days=400)
+        os.utime(result_dir, (old.timestamp(), old.timestamp()))
+
+        service, _captured = self._install(monkeypatch, cfg, store)
+        report = service.cleanup(apply=True)
+
+        assert report.ok, report.errors
+        assert result.result_ref in report.result_dirs
+        assert not result_dir.exists()
+
+    def test_r2_skips_when_snapshot_table_missing(
+        self, monkeypatch, db_agent_config, store, tmp_path
+    ):
+        """快照表不存在 → R2 不实删，报告原因。"""
         from src.modules.db_deepagent.services.result_store import ResultStore
 
         cfg = db_agent_config.model_copy(deep=True)
         cfg.workspace.root = str(tmp_path)
         old = (datetime.now(timezone.utc) - timedelta(days=400)).isoformat()
-        r_free = self._save_result(cfg, thread_id="dbda:s1:3", created_at=old)
-        agent = FakeAgent({"messages": []})
-        agent.get_state_side_effect = RuntimeError("state down")
+        r_old = self._save_result(cfg, thread_id="dbda:s1:1", created_at=old)
         service, _captured = self._install(
-            monkeypatch, cfg, store, surviving=["dbda:s1:2"], agent=agent
+            monkeypatch, cfg, store, snapshot_table=False
         )
         report = service.cleanup(apply=True)
         assert report.ok
         assert report.result_dirs == []
-        assert any("保护引用读取失败" in str(item) for item in report.skipped)
+        assert any("快照表不存在" in str(item) for item in report.skipped)
         results = ResultStore(tmp_path)
-        assert (results._root / r_free.result_ref).is_dir()
+        assert (results._root / r_old.result_ref).is_dir()
 
     def test_lock_failure_skips_session_archives(
         self, monkeypatch, db_agent_config, store
@@ -354,10 +374,10 @@ class TestResultsAndArchiveCleanup:
         assert report.ok
         assert any("s-ckpt-only" in str(i) for i in report.skipped), report.skipped
 
-    def test_qa_analysis_input_refs_protected(
+    def test_r2_ignores_qa_analysis_input_refs(
         self, monkeypatch, db_agent_config, store, tmp_path
     ):
-        """qa 归档中分析证据引用的输入结果也受保护（不只输出引用）。"""
+        """R2 不再保护 qa 归档中分析证据引用的输入结果。"""
         from src.modules.db_deepagent.services.result_store import ResultStore
 
         cfg = db_agent_config.model_copy(deep=True)
@@ -380,9 +400,9 @@ class TestResultsAndArchiveCleanup:
         service, _captured = self._install(monkeypatch, cfg, store)
         report = service.cleanup(apply=True)
         assert report.ok, report.errors
-        assert report.result_dirs == []
+        assert report.result_dirs == [r_input.result_ref]
         results = ResultStore(tmp_path)
-        assert (results._root / r_input.result_ref).is_dir()
+        assert not (results._root / r_input.result_ref).exists()
 
     def test_session_archives_purged_under_lock(
         self, monkeypatch, db_agent_config, store, tmp_path
@@ -460,6 +480,36 @@ class TestResultsAndArchiveCleanup:
         assert report.result_dirs == [r_free.result_ref + " (dry-run)"]
         results = ResultStore(tmp_path)
         assert (results._root / r_free.result_ref).is_dir()  # dry-run 不删
+
+    def test_r3_snapshot_cleanup_dry_run_and_apply(
+        self, monkeypatch, db_agent_config, store
+    ):
+        cfg = db_agent_config.model_copy(deep=True)
+        cfg.workspace.root = "/nonexistent-dbda-workspace"
+        service, captured = self._install(monkeypatch, cfg, store, snapshot_rows=2)
+        dry = service.cleanup(apply=False)
+        assert dry.snapshot_deleted == 2
+        assert captured["conn"].snapshot_deletes == []
+        applied = service.cleanup(apply=True)
+        assert applied.snapshot_deleted == 2
+        assert len(captured["conn"].snapshot_deletes) == 1
+
+    def test_r3_skips_when_snapshot_table_missing(
+        self, monkeypatch, db_agent_config, store
+    ):
+        cfg = db_agent_config.model_copy(deep=True)
+        cfg.workspace.root = "/nonexistent-dbda-workspace"
+        service, captured = self._install(
+            monkeypatch,
+            cfg,
+            store,
+            snapshot_table=False,
+            snapshot_rows=2,
+        )
+        report = service.cleanup(apply=True)
+        assert report.snapshot_deleted == 0
+        assert captured["conn"].snapshot_deletes == []
+        assert any("快照表不存在" in str(item) for item in report.skipped)
 
     def test_before_naive_does_not_crash_and_future_clamped(
         self, monkeypatch, db_agent_config, store

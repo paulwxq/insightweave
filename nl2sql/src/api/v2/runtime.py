@@ -77,12 +77,16 @@ class WebRuntime:
         lock_factory: Optional[Callable[[str], SessionLockHandle]] = None,
         query_runner: Optional[Callable[..., Any]] = None,
         now: Optional[Callable[..., Any]] = None,
+        snapshot_store: Optional[Any] = None,
     ):
         from src.api.v2.webstore import WebStore
 
         self._store_obj = store
+        self._store_injected = store is not None
         self._store_lock = threading.Lock()
         self._platform_pool = None
+        self._snapshot_store = snapshot_store
+        self._snapshot_table_ready: Optional[bool] = None
         self.webstore = WebStore(store, now=now) if store is not None else None
         self.readiness = readiness_service
         self._lock_factory = lock_factory
@@ -168,6 +172,38 @@ class WebRuntime:
 
             self.readiness = ReadinessService(DefaultReadinessBackend())
         return self.readiness
+
+    def get_snapshot_store(self) -> Any:
+        """结果快照表读取门面（惰性；复用运行时平台池）。"""
+        if self._snapshot_store is None:
+            from src.api.v2.snapshots import SnapshotStore
+
+            self.get_store()  # 确保平台池已建立
+            self._snapshot_store = SnapshotStore(self._platform_pool)
+        return self._snapshot_store
+
+    def snapshot_table_ready(self) -> bool:
+        """查询入口门禁：快照表缺失时拒绝新查询（docs/3.1 §7.2）。
+
+        生产路径首次调用时核对并缓存；测试注入 fake Store 时视为就绪。
+        """
+        if self._store_injected:
+            return True
+        if self._snapshot_table_ready is not None:
+            return self._snapshot_table_ready
+        from src.modules.db_deepagent.persistence.platform_pool import (
+            snapshot_table_exists,
+        )
+
+        self.get_store()
+        self._snapshot_table_ready = snapshot_table_exists(self._platform_pool)
+        if not self._snapshot_table_ready:
+            logger.warning(
+                "快照表 %s 不存在，query 入口拒绝新查询；"
+                "请先运行 maintenance init-platform",
+                "db_deepagent.result_snapshots",
+            )
+        return self._snapshot_table_ready
 
     def acquire_session_lock(self, session_id: str) -> SessionLockHandle:
         if self._lock_factory is not None:

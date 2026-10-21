@@ -8,7 +8,12 @@ import pytest
 
 from src.api.v2.readiness import ReadinessService
 from src.api.v2.runtime import WebRuntime, set_web_runtime, shutdown_web_runtime
-from src.tests.unit.api.v2.fakes import FakeBackend, FakeLockPool, FakeStore
+from src.tests.unit.api.v2.fakes import (
+    FakeBackend,
+    FakeLockPool,
+    FakeSnapshotStore,
+    FakeStore,
+)
 
 
 @pytest.fixture()
@@ -18,6 +23,7 @@ def web_env():
     backend = FakeBackend()
     readiness = ReadinessService(backend)
     locks = FakeLockPool()
+    snapshots = FakeSnapshotStore()
     runner_calls: list[dict] = []
 
     def _default_runner(**kwargs):
@@ -28,6 +34,7 @@ def web_env():
         readiness_service=readiness,
         lock_factory=locks.factory,
         query_runner=_default_runner,
+        snapshot_store=snapshots,
     )
     set_web_runtime(runtime)
     env = SimpleNamespace(
@@ -35,6 +42,7 @@ def web_env():
         backend=backend,
         readiness=readiness,
         locks=locks,
+        snapshots=snapshots,
         runtime=runtime,
         runner_calls=runner_calls,
     )

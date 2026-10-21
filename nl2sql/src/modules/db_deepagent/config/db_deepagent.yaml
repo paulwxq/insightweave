@@ -133,9 +133,6 @@ results:
   probe_max_values: 50                   # 守卫探针执行的最大行数（时间/维度证据探测用）；
                                          #   探针不产生证据条目、不进证据列表
 
-  # 注：历史对话快照的行数上限 snapshot_max_rows 为 docs/3.1 快照方案的新增参数，
-  #     在该方案实施时加入本段，当前不生效
-
 budget:
   max_model_calls_per_run: 40            # 主 Agent 模型节点的步骤预占上限，不是全部模型／HTTP 请求上限
   max_tool_calls_per_run: 80             # 需实测调整
@@ -155,8 +152,10 @@ thread:
   rotate_after_messages: 400             # 线程消息数超过该值时，下一轮前轮换线程
   carry_max_evidence: 200                # 轮换时携带的证据条数上限（§13.4）
   checkpoint_retention_days: 30
-  archive_retention_days: 180
+  archive_retention_days: 365
   result_retention_days: 30
+  snapshot_max_rows: 200                 # 历史快照保留的最大行数；写入时截断，调整不追溯存量
+                                         #   快照。与前端展示上限 api.max_display_rows 独立
 
 workspace:
   root: ${DB_DEEPAGENT_WORKSPACE:var/db_deepagent}

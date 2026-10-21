@@ -4,10 +4,11 @@
  * 结果按 result_ref 分页读取，查询响应本身不带行数据。
  */
 import { computed, onMounted, ref } from 'vue'
-import { getResult } from '../api/client'
+import { exportResultCsv, getResult } from '../api/client'
 import type { CellV2, ResultPageData } from '../api/types'
 import { formatElapsed } from '../format'
 import { cellDisplay } from '../utils/cellDisplay'
+import { summarizeResultPage } from '../utils/resultSummary'
 import ResultTable from './ResultTable.vue'
 import SqlBlock from './SqlBlock.vue'
 
@@ -21,16 +22,21 @@ const props = defineProps<{
 
 const PREVIEW = 10
 const PAGE_SIZE = 100
-const MAX_ROWS = 200
+const DEFAULT_MAX_ROWS = 200
 
 const page = ref<ResultPageData | null>(null)
 const extraRows = ref<CellV2[][]>([])
 const loading = ref(false)
 const error = ref('')
+const exportError = ref('')
 const showAll = ref(false)
 const sqlOpen = ref(false)
 const chartOpen = ref(false)
 const exporting = ref(false)
+
+const maxRows = computed(
+  () => page.value?.max_display_rows ?? DEFAULT_MAX_ROWS,
+)
 
 const loadedRows = computed(() => {
   if (!page.value) return []
@@ -38,16 +44,31 @@ const loadedRows = computed(() => {
 })
 
 const visibleRows = computed(() =>
-  showAll.value ? loadedRows.value : loadedRows.value.slice(0, PREVIEW),
+  showAll.value
+    ? loadedRows.value.slice(0, maxRows.value)
+    : loadedRows.value.slice(0, Math.min(PREVIEW, maxRows.value)),
 )
 
-const totalCount = computed(() => page.value?.saved_row_count ?? loadedRows.value.length)
+const summary = computed(() =>
+  page.value ? summarizeResultPage(page.value) : null,
+)
+
+const totalCount = computed(
+  () => summary.value?.totalCount ?? loadedRows.value.length,
+)
+
+const snapshotNotice = computed(() => summary.value?.snapshotNotice ?? '')
 
 const shownCount = computed(() => visibleRows.value.length)
 
 const canReveal = computed(() => {
   if (!page.value) return false
-  return loadedRows.value.length > PREVIEW || page.value.has_more || extraRows.value.length > 0
+  return (
+    maxRows.value > PREVIEW &&
+    (loadedRows.value.length > PREVIEW ||
+      page.value.has_more ||
+      extraRows.value.length > 0)
+  )
 })
 
 const elapsedText = computed(() => formatElapsed(props.elapsedMs))
@@ -86,7 +107,16 @@ async function load(offset: number, append: boolean) {
   loading.value = true
   error.value = ''
   try {
-    const next = await getResult(props.sessionId, props.resultRef, offset, PAGE_SIZE)
+    const remaining = Math.max(
+      1,
+      maxRows.value - (append ? loadedRows.value.length : 0),
+    )
+    const next = await getResult(
+      props.sessionId,
+      props.resultRef,
+      offset,
+      Math.min(PAGE_SIZE, remaining),
+    )
     if (append && page.value) {
       extraRows.value = [...extraRows.value, ...next.rows]
       page.value = { ...page.value, has_more: next.has_more, next_offset: next.next_offset }
@@ -107,7 +137,7 @@ async function revealAll() {
   while (
     page.value?.has_more &&
     page.value.next_offset !== null &&
-    loadedRows.value.length < MAX_ROWS &&
+    loadedRows.value.length < maxRows.value &&
     guard < 8
   ) {
     const offset = page.value.next_offset
@@ -116,30 +146,24 @@ async function revealAll() {
   }
 }
 
-function csvCell(value: string): string {
-  if (/[",\n]/.test(value)) return `"${value.replace(/"/g, '""')}"`
-  return value
-}
-
 async function exportCsv() {
-  if (!page.value || exporting.value) return
+  if (!props.resultRef || !page.value || exporting.value) return
   exporting.value = true
+  exportError.value = ''
   try {
-    if (!showAll.value) await revealAll()
-    const columns = page.value.columns
-    const lines = [
-      columns.map((column) => csvCell(column.name)).join(','),
-      ...loadedRows.value.map((row) =>
-        row.map((cell) => csvCell(cellDisplay(cell).text)).join(','),
-      ),
-    ]
-    const blob = new Blob([`\uFEFF${lines.join('\n')}`], { type: 'text/csv;charset=utf-8' })
+    const { blob, filename } = await exportResultCsv(
+      props.sessionId,
+      props.resultRef,
+    )
     const url = URL.createObjectURL(blob)
     const link = document.createElement('a')
     link.href = url
-    link.download = 'query-result.csv'
+    link.download = filename
     link.click()
     URL.revokeObjectURL(url)
+  } catch (err) {
+    exportError.value =
+      err instanceof Error && err.message ? err.message : '\u5BFC\u51FA\u5931\u8D25\uFF0C\u8BF7\u7A0D\u540E\u91CD\u8BD5\u3002'
   } finally {
     exporting.value = false
   }
@@ -161,6 +185,7 @@ onMounted(() => {
       <div class="stats">
         <span>
           已显示 {{ shownCount }} / 共 {{ totalCount }} 条
+          · 当前最多展示 {{ maxRows }} 条样例数据
           <template v-if="elapsedText"> · {{ elapsedText }}</template>
           <template v-if="sourceTruncated || page.source_truncated"> · 结果已截断</template>
         </span>
@@ -169,6 +194,7 @@ onMounted(() => {
           <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m6 4 4 4-4 4" /></svg>
         </button>
       </div>
+      <p v-if="snapshotNotice" class="hint">{{ snapshotNotice }}</p>
     </template>
 
     <div v-if="sql || resultRef" class="actions">
@@ -191,6 +217,7 @@ onMounted(() => {
         </button>
       </div>
     </div>
+    <p v-if="exportError" class="hint warn">{{ exportError }}</p>
 
     <SqlBlock v-if="sqlOpen && sql" :sql="sql" />
 

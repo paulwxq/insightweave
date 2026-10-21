@@ -173,6 +173,9 @@ export interface ResultPageData {
   has_more: boolean
   saved_row_count: number
   source_truncated: boolean
+  max_display_rows: number
+  data_from_snapshot?: boolean
+  snapshot_rows_available?: number | null
 }
 
 // --------------------------------------------------------------- 就绪检查

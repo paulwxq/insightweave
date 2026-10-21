@@ -28,6 +28,21 @@ _COLUMNS = [
 ]
 
 
+def test_max_display_rows_config(monkeypatch):
+    from src.api.v2.router import _max_display_rows
+
+    monkeypatch.setattr(
+        "src.services.config_loader.get_config",
+        lambda: {"api": {"max_display_rows": 50}},
+    )
+    assert _max_display_rows() == 50
+    monkeypatch.setattr(
+        "src.services.config_loader.get_config",
+        lambda: {"api": {"max_display_rows": 0}},
+    )
+    assert _max_display_rows() == 200
+
+
 def _ctx(session_id: str) -> DbAgentContext:
     return DbAgentContext(
         session_id=session_id,
@@ -48,12 +63,20 @@ def _hook_runner(**result_overrides):
     """契约层 fake runner：调用 finalize hook 后返回终态（同真实 Runner）。"""
 
     def runner(**kwargs):
+        from src.api.v2.runs import _make_finalize_hook
+
         result = make_result(
             session_id=kwargs["session_id"],
             request_id=kwargs["request_id"],
             **result_overrides,
         )
-        replacement = kwargs["finalize_hook"](
+        hook = _make_finalize_hook(
+            kwargs["webstore"],
+            kwargs["readiness"],
+            SOURCE_ID,
+            kwargs["holder"],
+        )
+        replacement = hook(
             question=kwargs["question"],
             request_id=kwargs["request_id"],
             run_id=result.run_id,
@@ -207,7 +230,8 @@ class TestTurnsEndpoint:
         assert [t["question"] for t in items] == ["第一问", "第二问"]
         # 未附带展示投影的旧写入：证据为空，不把内部字段透出
         assert all(
-            set(t.keys()) == {"question", "answer", "saved_at", "elapsed_ms", "evidence"}
+            set(t.keys())
+            == {"question", "answer", "saved_at", "elapsed_ms", "evidence"}
             for t in items
         )
         assert all(t["evidence"] == [] and t["elapsed_ms"] is None for t in items)
@@ -257,6 +281,20 @@ class TestQueryEndpoint:
         # 轮次随后可在历史中读取
         turns = client.get(f"/api/v2/sessions/{sid}/turns", headers=LOCAL)
         assert turns.json()["data"]["items"][0]["question"] == "契约层提问"
+
+    def test_snapshot_table_missing_rejects_query(
+        self, web_env, client, api_session, monkeypatch
+    ):
+        web_env.runtime._query_runner = _hook_runner()
+        monkeypatch.setattr(web_env.runtime, "snapshot_table_ready", lambda: False)
+        sid = api_session["session_id"]
+        r = client.post(
+            f"/api/v2/sessions/{sid}/query",
+            headers=JSON_HEAD,
+            json={"question": "表未建", "source_id": SOURCE_ID},
+        )
+        assert r.status_code == 503
+        assert r.json()["data"]["error_code"] == "dependency_unavailable"
 
     def test_rate_limited_with_retry_after(self, web_env, client, api_session):
         web_env.runtime._query_runner = _hook_runner()
@@ -366,6 +404,8 @@ class TestResultEndpoint:
         ]
         assert data["has_more"] is True and data["next_offset"] == 2
         assert data["saved_row_count"] == 3 and data["source_truncated"] is False
+        assert data["max_display_rows"] == 200
+        assert data["data_from_snapshot"] is False
 
         r2 = client.get(
             f"/api/v2/sessions/{sid}/results/{meta.result_ref}?limit=2&offset=2",
@@ -428,3 +468,84 @@ class TestResultEndpoint:
         )
         assert r.status_code == 500
         assert r.json()["data"]["error_code"] == "result_encoding_error"
+
+    def test_snapshot_fallback_when_files_missing(self, web_env, client, api_session):
+        sid = api_session["session_id"]
+        ref = "res_" + "c" * 32
+        web_env.snapshots.rows[(sid, ref)] = {
+            "rows_snapshot": [[{"kind": "integer", "value": "7"}]],
+            "snapshot_row_count": 1,
+            "saved_row_count": 1,
+            "meta_jsonb": {
+                "columns": [{"name": "id", "pg_type": "int4"}],
+                "source_truncated": False,
+            },
+        }
+        r = client.get(f"/api/v2/sessions/{sid}/results/{ref}?limit=10", headers=LOCAL)
+        assert r.status_code == 200
+        data = r.json()["data"]
+        assert data["data_from_snapshot"] is True
+        assert data["snapshot_rows_available"] == 1
+        assert data["max_display_rows"] == 200
+        assert data["rows"] == [[{"kind": "integer", "value": "7"}]]
+
+    def test_export_file_all_rows_without_sha(
+        self, web_env, client, api_session, result_env
+    ):
+        """导出不校验 SHA：文件内容变化仍导出全部行。"""
+        import json as _json
+
+        sid = api_session["session_id"]
+        meta = self._save(result_env, sid, [(1, Decimal("1.00")), (2, Decimal("2.00"))])
+        path = result_env._root / meta.result_ref / "rows.jsonl"
+        lines = path.read_text(encoding="utf-8").splitlines()
+        row = _json.loads(lines[0])
+        row[0]["value"] = "99"
+        lines[0] = _json.dumps(row, ensure_ascii=False)
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+        r = client.get(
+            f"/api/v2/sessions/{sid}/results/{meta.result_ref}/export",
+            headers=LOCAL,
+        )
+        assert r.status_code == 200
+        assert "text/csv" in r.headers["content-type"]
+        assert f"{meta.result_ref}.csv" in r.headers["content-disposition"]
+        text = r.content.decode("utf-8-sig")
+        assert text.splitlines()[0] == "id,amount"
+        assert len(text.splitlines()) == 3
+        assert "99" in text
+
+    def test_export_snapshot_fallback(self, web_env, client, api_session):
+        sid = api_session["session_id"]
+        ref = "res_" + "d" * 32
+        web_env.snapshots.rows[(sid, ref)] = {
+            "rows_snapshot": [
+                [{"kind": "integer", "value": "7"}],
+                [{"kind": "integer", "value": "8"}],
+            ],
+            "snapshot_row_count": 2,
+            "saved_row_count": 2,
+            "meta_jsonb": {
+                "columns": [{"name": "id", "pg_type": "int4"}],
+                "source_truncated": False,
+            },
+        }
+        r = client.get(f"/api/v2/sessions/{sid}/results/{ref}/export", headers=LOCAL)
+        assert r.status_code == 200
+        assert f"{ref}.snapshot.csv" in r.headers["content-disposition"]
+        text = r.content.decode("utf-8-sig")
+        assert text.splitlines() == ["id", "7", "8"]
+
+    def test_export_other_session_denied(
+        self, web_env, client, api_session, result_env
+    ):
+        sid = api_session["session_id"]
+        other = create_web_session(web_env.runtime, SOURCE_ID)["session_id"]
+        meta = self._save(result_env, sid, [(1, Decimal("1.00"))])
+        r = client.get(
+            f"/api/v2/sessions/{other}/results/{meta.result_ref}/export",
+            headers=LOCAL,
+        )
+        assert r.status_code == 404
+        assert r.json()["data"]["error_code"] == "result_not_found"

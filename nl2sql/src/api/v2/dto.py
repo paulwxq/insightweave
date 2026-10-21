@@ -141,6 +141,9 @@ class ResultPageData(StrictModel):
     has_more: bool
     saved_row_count: int
     source_truncated: bool
+    max_display_rows: int
+    data_from_snapshot: Optional[bool] = None
+    snapshot_rows_available: Optional[int] = None
 
 
 class ReadinessCheckItem(StrictModel):

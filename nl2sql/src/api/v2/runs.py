@@ -351,6 +351,9 @@ def _make_finalize_hook(
     readiness,
     source_id: str,
     holder: dict,
+    *,
+    results: Any = None,
+    snapshot_writer: Any = None,
 ) -> Callable[..., Optional[dict]]:
     """构造 Runner 收尾钩子：终态轻量复核 → 安全投影或文本轮次写入 +
     元数据增量更新 + pending 清除。history_saved 经 holder 传出。"""
@@ -452,6 +455,7 @@ def _make_finalize_hook(
             else:
                 answer = f"本轮未生成答案（状态：{result.status}）"
         saved: Optional[bool] = None
+        rec2: Optional[dict] = None
         try:
             webstore.write_turn(
                 session_id,
@@ -474,6 +478,30 @@ def _make_finalize_hook(
             except Exception:  # noqa: BLE001
                 saved = None
         holder["history_saved"] = saved
+        # 历史轮次确认落库后写快照（仅正常收尾分支；失败只 WARN，不阻断收尾）
+        if saved is True and snapshot_writer is not None and results is not None:
+            display = (rec2 or {}).get("display") or display_from_result(result)
+            evidence = [
+                item
+                for item in (display.get("evidence") or [])
+                if isinstance(item, dict) and item.get("result_ref")
+            ]
+            if evidence:
+                try:
+                    snapshot_writer.write(
+                        session_id=session_id,
+                        request_id=request_id,
+                        evidence=evidence,
+                        results=results,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "快照写入失败 session=%s request=%s: %s: %s",
+                        session_id,
+                        request_id,
+                        type(exc).__name__,
+                        exc,
+                    )
         updated = dict(record)
         if saved is True:
             updated["turn_count"] = int(record.get("turn_count") or 0) + 1
@@ -575,9 +603,22 @@ def execute_web_query(
     if not outcome.compatible or not outcome.ready:
         raise _readiness_error(outcome, request_id=request_id)
 
-    # 4) 锁内确认写入 pending（§4.4 收尾保护）后交 Runner 执行
+    # 4) 快照表门禁：未建表时拒绝新查询，避免产生永远无快照的轮次
+    try:
+        snapshot_ready = runtime.snapshot_table_ready()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "快照表状态核对失败 session=%s: %s", session_id, type(exc).__name__
+        )
+        raise _err(codes.DEPENDENCY_UNAVAILABLE, "结果快照表状态无法确认") from exc
+    if not snapshot_ready:
+        raise _err(
+            codes.DEPENDENCY_UNAVAILABLE,
+            "结果快照表未初始化，请先运行 maintenance init-platform",
+        )
+
+    # 5) 锁内确认写入 pending（§4.4 收尾保护）后交 Runner 执行
     holder: dict = {}
-    hook = _make_finalize_hook(webstore, readiness, source_id, holder)
     lock = runtime.acquire_session_lock(session_id)
     pending_written = False
     try:
@@ -652,7 +693,9 @@ def execute_web_query(
                 request_id=request_id,
                 source_id=source_id,
                 registration=registration,
-                finalize_hook=hook,
+                webstore=webstore,
+                readiness=readiness,
+                holder=holder,
                 session_lock=lock,
             )
         except codes.WebApiError:
@@ -784,7 +827,10 @@ def run_agent_query(
     request_id: str,
     source_id: str,
     registration,
-    finalize_hook,
+    finalize_hook=None,
+    webstore=None,
+    readiness=None,
+    holder=None,
     session_lock=None,
 ):
     """每轮独立装配并执行 Runner（doc 2 §5.3 顺序：基础配置 → 登记注入 →
@@ -801,6 +847,7 @@ def run_agent_query(
     from src.modules.db_deepagent.source_registry import apply_registration_to_config
 
     locate = {"request_id": request_id, "run_id": None}
+    holder = holder if holder is not None else {}
     cfg = apply_registration_to_config(load_base_db_agent_config(), registration)
     # verify_embedding=False：readiness 在本请求内已对同一配置核验过
     # Embedding 一致性（300 秒探针缓存），不再每题重复一次 embed_query
@@ -810,6 +857,21 @@ def run_agent_query(
     try:
         platform_pool = _open_platform_pool(cfg)
         persistence = build_persistence(cfg, platform_pool=platform_pool)
+        hook = finalize_hook
+        if hook is None and webstore is not None and readiness is not None:
+            from src.api.v2.snapshots import SnapshotStore
+
+            snapshot_writer = SnapshotStore(
+                platform_pool, max_rows=cfg.thread.snapshot_max_rows
+            )
+            hook = _make_finalize_hook(
+                webstore,
+                readiness,
+                source_id,
+                holder,
+                results=services.results,
+                snapshot_writer=snapshot_writer,
+            )
         handle = build_db_agent(
             services,
             session_id=session_id,
@@ -836,7 +898,7 @@ def run_agent_query(
             handle=handle,
             archive=archive,
             persistence=persistence,
-            finalize_hook=finalize_hook,
+            finalize_hook=hook,
         )
         try:
             return runner.run(

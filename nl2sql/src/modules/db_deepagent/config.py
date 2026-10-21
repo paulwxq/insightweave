@@ -207,6 +207,8 @@ class ThreadConfig(_StrictModel):
     checkpoint_retention_days: int = Field(gt=0)
     archive_retention_days: int = Field(gt=0)
     result_retention_days: int = Field(gt=0)
+    # 历史快照保留的最大行数；缺失时按默认 200（旧配置兼容）
+    snapshot_max_rows: int = Field(default=200, gt=0)
 
 
 class WorkspaceConfig(_StrictModel):

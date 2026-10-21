@@ -35,7 +35,13 @@ def _hook_runner(calls=None, *, invoke_hook=True, **result_overrides):
         )
         if not invoke_hook:
             return result
-        replacement = kwargs["finalize_hook"](
+        hook = _make_finalize_hook(
+            kwargs["webstore"],
+            kwargs["readiness"],
+            SOURCE_ID,
+            kwargs["holder"],
+        )
+        replacement = hook(
             question=kwargs["question"],
             request_id=kwargs["request_id"],
             run_id=result.run_id,
@@ -233,7 +239,8 @@ class TestExecuteQuery:
         assert result.source_id == SOURCE_ID
         # 装配参数完整传递（登记与钩子随请求传递）
         assert calls[0]["registration"] is web_env.backend.registration
-        assert callable(calls[0]["finalize_hook"])
+        assert calls[0]["webstore"] is web_env.runtime.get_webstore()
+        assert calls[0]["holder"] is not None
         # 轮次已写入、元数据增量、pending 清除
         webstore = web_env.runtime.get_webstore()
         turn = webstore.read_turn(web_session["session_id"], result.request_id)
@@ -669,11 +676,75 @@ class TestExecuteQuery:
 
 
 class TestFinalizeHook:
-    def _hook(self, web_env):
+    def _hook(self, web_env, *, results=None, snapshot_writer=None):
         webstore = web_env.runtime.get_webstore()
         holder = {}
-        hook = _make_finalize_hook(webstore, web_env.readiness, SOURCE_ID, holder)
+        hook = _make_finalize_hook(
+            webstore,
+            web_env.readiness,
+            SOURCE_ID,
+            holder,
+            results=results,
+            snapshot_writer=snapshot_writer,
+        )
         return hook, holder, webstore
+
+    def test_normal_branch_writes_snapshot_evidence(self, web_env, web_session):
+        from src.tests.unit.api.v2.fakes import make_evidence
+
+        class _Writer:
+            def __init__(self):
+                self.calls = []
+
+            def write(self, **kwargs):
+                self.calls.append(kwargs)
+
+        sid = web_session["session_id"]
+        ref = "res_" + "a" * 32
+        writer = _Writer()
+        hook, holder, _ = self._hook(web_env, results=object(), snapshot_writer=writer)
+        request_id = "req_" + "6" * 28
+        hook(
+            question="问",
+            request_id=request_id,
+            run_id="r",
+            session_id=sid,
+            result=make_result(
+                session_id=sid,
+                request_id=request_id,
+                evidence=[make_evidence(result_ref=ref)],
+            ),
+        )
+        assert holder["history_saved"] is True
+        assert len(writer.calls) == 1
+        assert writer.calls[0]["evidence"][0]["result_ref"] == ref
+
+    def test_unsafe_branch_does_not_write_snapshot(self, web_env, web_session):
+        from src.tests.unit.api.v2.fakes import make_evidence
+
+        class _Writer:
+            def __init__(self):
+                self.calls = []
+
+            def write(self, **kwargs):
+                self.calls.append(kwargs)
+
+        sid = web_session["session_id"]
+        writer = _Writer()
+        hook, holder, _ = self._hook(web_env, results=object(), snapshot_writer=writer)
+        web_env.backend.publish_id_ts = "pub-ts-2"  # 知识变化 → unsafe 分支
+        hook(
+            question="问",
+            request_id="req_" + "7" * 28,
+            run_id="r",
+            session_id=sid,
+            result=make_result(
+                session_id=sid,
+                evidence=[make_evidence(result_ref="res_" + "b" * 32)],
+            ),
+        )
+        assert holder["history_saved"] is True
+        assert writer.calls == []
 
     def _setup_pending(self, webstore, sid, request_id):
         record = webstore.get_registration(sid)

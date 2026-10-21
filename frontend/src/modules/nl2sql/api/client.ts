@@ -207,3 +207,53 @@ export function getResult(
     `/api/v2/sessions/${encodeURIComponent(sessionId)}/results/${encodeURIComponent(resultRef)}?${query.toString()}`,
   )
 }
+
+export interface DownloadedCsv {
+  blob: Blob
+  filename: string
+}
+
+/** 下载结果 CSV：文件存在时导出全部已保存行，文件缺失时导出快照行。 */
+export async function exportResultCsv(
+  sessionId: string,
+  resultRef: string,
+): Promise<DownloadedCsv> {
+  const base = nl2sqlBaseUrl()
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT_MS)
+  let response: Response
+  try {
+    response = await fetch(
+      new URL(
+        `/api/v2/sessions/${encodeURIComponent(sessionId)}/results/${encodeURIComponent(resultRef)}/export`,
+        base,
+      ),
+      { headers: { 'Content-Type': 'application/json' }, signal: controller.signal },
+    )
+  } catch (err) {
+    if (err instanceof DOMException && err.name === 'AbortError') {
+      throw new Nl2sqlApiError('timeout', '导出超时，请稍后重试。')
+    }
+    throw new Nl2sqlApiError('network_error', '无法连接 NL2SQL 服务，请检查后端是否已启动。')
+  } finally {
+    clearTimeout(timer)
+  }
+  if (!response.ok) {
+    let body: Envelope<unknown> | null = null
+    try {
+      body = (await response.json()) as Envelope<unknown>
+    } catch {
+      body = null
+    }
+    const data = (body?.data ?? null) as ErrorData | null
+    const code = typeof data?.error_code === 'string' ? data.error_code : 'internal_error'
+    const message = typeof body?.message === 'string' && body.message ? body.message : code
+    throw new Nl2sqlApiError(code, message, response.status, data, parseRetryAfter(response))
+  }
+  const disposition = response.headers.get('Content-Disposition') ?? ''
+  const match = /filename="([^"]+)"/.exec(disposition)
+  return {
+    blob: await response.blob(),
+    filename: match ? match[1] : `${resultRef}.csv`,
+  }
+}

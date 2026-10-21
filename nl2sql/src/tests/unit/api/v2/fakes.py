@@ -24,6 +24,27 @@ class FakeItem:
         self.value = dict(value)
 
 
+class FakeSnapshotStore:
+    """内存快照表读取/写入 fake（不连 PG）。"""
+
+    def __init__(self):
+        self.rows: dict[tuple[str, str], dict] = {}
+        self.writes: list[dict] = []
+
+    def fetch(self, session_id: str, result_ref: str):
+        return self.rows.get((session_id, result_ref))
+
+    def write(self, *, session_id, request_id, evidence, results):
+        self.writes.append(
+            {
+                "session_id": session_id,
+                "request_id": request_id,
+                "evidence": list(evidence),
+                "results": results,
+            }
+        )
+
+
 class FakeStore:
     """内存 Store：search 按 key 升序返回，模拟 PostgresStore 行为子集。"""
 
