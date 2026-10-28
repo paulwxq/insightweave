@@ -1,16 +1,12 @@
-"""受管 Domain 步骤的入口准备链；Web 采集与重跑共用（doc 21.1 §5）。
+"""受管 Domain 步骤 worker（doc 21.1 §5、6.2 §7.2）。
 
-准备链先做入口校验（步骤 1），再分两段：平台库读取段（源校验、工作区归属、
-md 步骤行）与本地文件/配置段（md 目录枚举、domain 目录解析、快照构造、
-LLM 预检）。失败分类（§5.2）：
-
-- 依赖或配置类失败 → `DbStepConfigError`（源禁用 → `SourceDisabledError`）；
-- 平台库连接或读取异常 → 返回「平台库连接或读取失败（…）」失败结果；
-- 本地段非 `ValueError`（含 LLM 预检非受控故障）→ `DomainPreparationError`。
-
-三类都在 `start_step` 之前返回，不写 domain 行（§5.6）。会话 2 固定顺序：
-锁源行 → 复查 md → 锁下解析生效描述 →（可选）同事务写数据源描述 →
-`start_step(..., db_desc=生效值)` 唯一一次 commit；离开会话后才调用 LLM（§5.4）。
+Domain 描述生命周期（doc 6.2 §7.2）：
+- 首次生成且无 YAML：本次明确输入（临时覆盖优先于版本默认）→ 均未提供
+  时用数据源描述兜底；确定的输入为空时允许无补充描述生成
+  （`user_description=None`）。
+- 已有有效 YAML：先读取 `database.description`，整目录备份后重跑只更新
+  domains 和表归属，保留该描述（不回写数据源描述、不写回作业版本）。
+- 已有 YAML 损坏：明确报文件无效（blocked），不得当作未生成过而覆盖。
 """
 
 import logging
@@ -18,77 +14,43 @@ import time
 from pathlib import Path
 
 import yaml
-from sqlalchemy import func
 
 from backend.data_sources.ddl_step_service import build_managed_output_snapshot
-from backend.data_sources.db_step_service import (
+from backend.data_sources.step_context import (
     DbStepConfigError,
-    SourceDisabledError,
+    StepContext,
+    StepOutcome,
 )
-from backend.data_sources.registration_service import PlatformUnavailableError
-from backend.data_sources.repository import get_db_source
-from backend.jobs.repository import (
-    STATUS_FAILED,
-    STATUS_SUCCESS,
-    SourceRegistrationMissingError,
-    StepAlreadyRunningError,
-    WorkspaceMissingError,
-    WorkspaceSourceMismatchError,
-    assert_workspace_owner,
-    finish_step,
-    get_step_row,
-    start_step,
-)
-from backend.persistence.platform_db import (
-    load_platform_settings_from_env,
-    platform_session,
-)
-from backend.publishing.repository import lock_db_source_row
+from backend.data_sources.step_context import SourceDisabledError  # noqa: F401 兼容导入
+from backend.workspace_files.backups import backup_directory_before_update
+from backend.workspace_files.markers import read_collection_marker
 from metaweave.core.clean_targets import (
     resolve_domain_output_dir,
     resolve_md_output_dir,
 )
 from metaweave.core.metadata.domain_generator import DomainGenerator
-from metaweave.core.metadata.execution import (
-    load_main_config_snapshot,
-    set_operation_step,
-)
 from metaweave.services.llm_config_resolver import resolve_module_llm_config
 from metaweave.services.llm_service import LLMService
-from metaweave.utils.file_utils import clean_top_level_files
-from metaweave.utils.source_id import normalize_source_id
 
 logger = logging.getLogger("backend.data_sources")
 
 DOMAIN_STEP_NAME = "domain"
 MD_STEP_FOR_DOMAIN = "md"
 DOMAIN_ARTIFACT_NAME = "db_domains.yaml"
-MD_NOT_READY = "同一作业的 MD 产物未就绪；请先执行 MD 或指定已有 job_id"
-SOURCE_GONE = "未找到指定 source_id 的数据源"
+MD_NOT_READY = "工作区的 MD 产物未就绪；请先执行 MD 采集"
 
-# 哨兵：区分「未保存过描述」与「显式携带的 None」的语义（doc 21.1 §5）
+# 兼容既有导入（collection_run 曾引用 _UNSET 哨兵；新模型由 step_params 携带）
 _UNSET: object = object()
 
 
-class DomainPreparationError(PlatformUnavailableError):
+class DomainPreparationError(RuntimeError):
     """Domain 准备阶段故障（本地文件/配置段与 LLM 预检的非受控异常）。
 
-    子类化 `PlatformUnavailableError`（doc 21.1 §5.2）：`collection_run`
-    既有 `except PlatformUnavailableError` 分支直接覆盖——`results` 为空时
-    重抛，已有结果时以封装消息计入该步 failed；API 侧由更具体的 handler
-    按 MRO 先命中，返回 503 `domain_preparation_error`。
+    503 `domain_preparation_error` 的载体；不携带异常原文。
     """
 
-
-def _failure(started: float, message: str, job_id=None) -> dict:
-    result = {
-        "success": False,
-        "execution_time": time.perf_counter() - started,
-        "message": message,
-    }
-    if job_id is not None:
-        result["job_id"] = str(job_id)
-    return result
+    def __init__(self, message: str):
+        super().__init__(message)
 
 
 def _strip_or_none(value) -> "str | None":
@@ -98,27 +60,10 @@ def _strip_or_none(value) -> "str | None":
     return text or None
 
 
-def _resolve_effective_description(session, job_uuid, source_row, requested):
-    """锁下解析生效描述（doc 21.1 §5.3）。
-
-    请求携带（非 `_UNSET`）优先；未携带时先用本作业 domain 行的 `db_desc`，
-    为空再回退数据源描述。从库里读出的值先 `strip()`、strip 后为空按 NULL——
-    与 `generate_from_context(user_description=…)` 收到的参数逐字节一致。
-    """
-    if requested is not _UNSET:
-        return requested
-    domain_row = get_step_row(session, job_uuid, DOMAIN_STEP_NAME)
-    stored = _strip_or_none(domain_row.db_desc if domain_row is not None else None)
-    if stored is not None:
-        return stored
-    return _strip_or_none(source_row.description)
-
-
 def verify_domain_artifact(yaml_path: Path) -> "tuple[bool, str]":
     """成功判定（doc 21.1 §5.4）：普通文件 → YAML 可解析为对象 → domains 非空。
 
-    doc 23.1 §5.2 公开化（原私有 ``_verify_domain_output``）：rel 准备链对
-    受管 db_domains.yaml 做同款三查，两服务共用一份口径。
+    rel 准备链与发布 loader 共用同一口径。
     """
     if yaml_path.is_symlink() or not yaml_path.is_file():
         return False, "Domain 产物缺失或不是普通文件"
@@ -135,77 +80,64 @@ def verify_domain_artifact(yaml_path: Path) -> "tuple[bool, str]":
     return True, ""
 
 
-def run_domain_step(
-    config_path,
-    source_id,
-    job_id=None,
-    *,
-    domain_description=_UNSET,
-    sync_domain_description: bool = False,
-) -> dict:
-    """准备链 → 会话 2 固定顺序登记 → 清理并生成 → 核验 → 写回状态（doc 21.1 §5）。"""
+def _load_existing_description(
+    yaml_path: Path,
+) -> tuple[bool, "str | None", "str | None"]:
+    """读取现有 db_domains.yaml 的 database.description。
+
+    返回 (exists, description, error)：文件不存在 → (False, None, None)；
+    损坏 → (True, None, 错误消息)。
+    """
+    if not yaml_path.exists():
+        return False, None, None
+    if yaml_path.is_symlink() or not yaml_path.is_file():
+        return True, None, "现有 db_domains.yaml 不是普通文件"
+    try:
+        parsed = yaml.safe_load(yaml_path.read_text(encoding="utf-8"))
+    except Exception as exc:  # noqa: BLE001
+        return True, None, f"现有 db_domains.yaml 无法解析（{type(exc).__name__}）"
+    if not isinstance(parsed, dict) or not isinstance(parsed.get("domains"), list):
+        return True, None, "现有 db_domains.yaml 结构无效"
+    database = parsed.get("database")
+    description = None
+    if isinstance(database, dict):
+        description = _strip_or_none(database.get("description"))
+    return True, description, None
+
+
+def _resolve_first_generation_description(ctx: StepContext) -> "str | None":
+    """首次生成输入解析（doc 6.2 §7.2）：明确输入优先，兜底数据源描述。
+
+    `ctx.step_params` 已由运行请求解析合并（临时覆盖优先于版本默认）；
+    空白视为无补充描述，不再向下兜底。
+    """
+    explicit = None
+    params = ctx.step_params or {}
+    domain_params = params.get("domain")
+    if isinstance(domain_params, dict) and "description" in domain_params:
+        explicit = _strip_or_none(domain_params.get("description"))
+        if explicit is not None:
+            return explicit
+        # 显式空白 = 无补充描述首次生成，不落回数据源描述
+        return None
+    return _strip_or_none(ctx.source.description)
+
+
+def run_domain_step(ctx: StepContext) -> StepOutcome:
+    """执行受管 Domain 步骤：MD 前置 → 描述解析 → 备份 → LLM 生成 → 核验。"""
     started = time.perf_counter()
-    set_operation_step(DOMAIN_STEP_NAME)
-    if job_id is None:
-        # 新作业 Domain 单选没有任何工作区可用（与 md 相同）
+    md_dir = resolve_md_output_dir(ctx.source_id, ctx.workspace_id)
+    md_marker, md_error = read_collection_marker(md_dir)
+    if md_marker is None:
+        raise DbStepConfigError(md_error or MD_NOT_READY)
+    if md_marker.status != "success":
         raise DbStepConfigError(MD_NOT_READY)
-    if sync_domain_description and domain_description is _UNSET:
-        raise DbStepConfigError("同步数据源描述必须同时携带 domain_description")
 
-    # ---- 入口校验段（对齐 md 入口，doc 21.1 §5.2 步骤 1） ----
-    try:
-        source_uuid = normalize_source_id(source_id)
-        job_uuid = normalize_source_id(job_id)
-    except ValueError as exc:
-        raise DbStepConfigError(str(exc)) from None
-    try:
-        main_config = load_main_config_snapshot(config_path)
-    except ValueError as exc:
-        raise DbStepConfigError(str(exc)) from None
-    except Exception as exc:
-        raise DbStepConfigError(
-            f"主配置加载或校验失败（{type(exc).__name__}）"
-        ) from None
-    try:
-        settings = load_platform_settings_from_env()
-    except ValueError as exc:
-        raise DbStepConfigError(str(exc)) from None
-
-    # ---- 平台库读取段（with 内只放数据库操作，兜底只覆盖这一段） ----
-    try:
-        with platform_session(settings) as session:
-            source = get_db_source(session, source_uuid)
-            if source is None:
-                raise DbStepConfigError(SOURCE_GONE)
-            if source.db_type != "postgresql":
-                raise DbStepConfigError("当前仅支持 PostgreSQL 数据源")
-            if not source.username or not source.host or not source.db_name:
-                raise DbStepConfigError("数据源登记缺少必要的连接字段")
-            if not source.is_active:
-                raise SourceDisabledError("该数据源已禁用，不能执行作业")
-            try:
-                assert_workspace_owner(session, job_uuid, source_uuid)
-            except (WorkspaceMissingError, WorkspaceSourceMismatchError) as exc:
-                raise DbStepConfigError(str(exc)) from None
-            md_step = get_step_row(session, job_uuid, MD_STEP_FOR_DOMAIN)
-            if md_step is None or md_step.last_status != STATUS_SUCCESS:
-                raise DbStepConfigError(MD_NOT_READY)
-    except DbStepConfigError:
-        raise
-    except ValueError as exc:
-        raise DbStepConfigError(str(exc)) from None
-    except Exception as exc:
-        return _failure(started, f"平台库连接或读取失败（{type(exc).__name__}）")
-
-    # ---- 本地文件与配置段（不依赖数据库连接） ----
     stage = "md 目录枚举"
     try:
-        md_dir = resolve_md_output_dir(source_uuid, job_uuid)
         md_files = []
         for candidate in sorted(md_dir.glob("*.md")):
-            # 跳过非常规文件而不是整步拒绝（doc 21.1 §5.2 最简口径：只要有普通
-            # .md 即可生成）；读取侧另有 O_NOFOLLOW 加固（§13.2），被跳过文件
-            # 的内容不会进入 LLM 摘要。
+            # 跳过非常规文件（doc 21.1 §5.2 最简口径）；读取侧另有 O_NOFOLLOW 加固
             if candidate.is_symlink() or not candidate.is_file():
                 logger.warning("跳过非常规 md 文件: %s", candidate)
                 continue
@@ -213,15 +145,27 @@ def run_domain_step(
         if not md_files:
             raise DbStepConfigError(MD_NOT_READY)
         stage = "domain 目录解析"
-        domain_dir = resolve_domain_output_dir(source_uuid, job_uuid)
+        domain_dir = resolve_domain_output_dir(ctx.source_id, ctx.workspace_id)
+        yaml_path = domain_dir / DOMAIN_ARTIFACT_NAME
         stage = "快照构造"
         snapshot = build_managed_output_snapshot(
-            main_config,
-            source_uuid,
-            job_uuid,
-            source.db_name,
-            source.selected_schemas,
+            ctx.main_config,
+            ctx.source_id,
+            ctx.workspace_id,
+            ctx.source.db_name,
+            ctx.source.selected_schemas,
         )
+        stage = "描述解析"
+        yaml_exists, preserved_description, yaml_error = _load_existing_description(
+            yaml_path
+        )
+        if yaml_error is not None:
+            # 已有 YAML 损坏：明确报文件无效，不当作未生成过而覆盖（doc 6.2 §7.2）
+            raise DbStepConfigError(f"{yaml_error}；请修复或删除后重试")
+        if yaml_exists:
+            user_description = preserved_description
+        else:
+            user_description = _resolve_first_generation_description(ctx)
         stage = "LLM 预检"
         try:
             llm_config = resolve_module_llm_config(snapshot, "domain_generation.llm")
@@ -233,113 +177,49 @@ def run_domain_step(
     except ValueError as exc:
         raise DbStepConfigError(str(exc)) from None
     except Exception as exc:
-        # 只记阶段与异常类型两个安全字段，不带 exc_info、不写异常原文（§5.2）
-        logger.error(
-            "Domain 准备阶段故障 stage=%s type=%s", stage, type(exc).__name__
-        )
+        logger.error("Domain 准备阶段故障 stage=%s type=%s", stage, type(exc).__name__)
         raise DomainPreparationError(
             f"Domain 准备阶段故障（{stage}：{type(exc).__name__}）"
         ) from None
 
-    # ---- 会话 2：锁下解析描述并登记（start_step 唯一一次 commit） ----
+    # 重跑前读取需保留的描述已完成；执行整目录备份（旧 marker 随旧产物移入）
+    backup_directory_before_update(domain_dir)
     try:
-        with platform_session(settings) as session:
-            source_row = lock_db_source_row(session, source_uuid)
-            if source_row is None:
-                raise DbStepConfigError(SOURCE_GONE)
-            md_step = get_step_row(session, job_uuid, MD_STEP_FOR_DOMAIN)
-            if md_step is None or md_step.last_status != STATUS_SUCCESS:
-                raise DbStepConfigError(MD_NOT_READY)
-            effective = _resolve_effective_description(
-                session, job_uuid, source_row, domain_description
-            )
-            if sync_domain_description:
-                source_row.description = effective
-                source_row.updated_at = func.now()
-            start_step(
-                session,
-                job_uuid,
-                source_uuid,
-                DOMAIN_STEP_NAME,
-                db_desc=effective,
-            )
-    except DbStepConfigError:
-        raise
-    except SourceRegistrationMissingError:
-        raise DbStepConfigError(SOURCE_GONE) from None
-    except StepAlreadyRunningError as exc:
-        return _failure(started, str(exc), job_uuid)
-
-    # ---- 生成（离开锁会话之后才调用 LLM；§5.4） ----
-    yaml_path = domain_dir / DOMAIN_ARTIFACT_NAME
-    try:
-        clean_top_level_files(domain_dir)
         generator = DomainGenerator(
             config=snapshot,
             yaml_path=str(yaml_path),
             md_context_dir=str(md_dir),
         )
-        generated = generator.generate_from_context(user_description=effective)
+        generated = generator.generate_from_context(user_description=user_description)
+        if yaml_exists:
+            # 重跑只更新 domains 与表归属，保留原 database.description
+            database_node = generated.setdefault("database", {})
+            database_node["description"] = preserved_description
         generator.write_to_yaml(generated)
     except Exception as exc:
-        message = f"Domain 生成失败（{type(exc).__name__}）"
-        try:
-            with platform_session(settings) as session:
-                finish_step(session, job_uuid, DOMAIN_STEP_NAME, STATUS_FAILED)
-        except Exception as state_exc:
-            message += (
-                f"；作业状态更新失败（{type(state_exc).__name__}），"
-                "请查看日志确认作业状态"
-            )
-        return _failure(started, message, job_uuid)
+        logger.error(
+            "Domain 生成执行失败 type=%s source_id=%s workspace_id=%s",
+            type(exc).__name__,
+            ctx.source_id,
+            ctx.workspace_id,
+        )
+        return StepOutcome(
+            success=False, message=f"Domain 生成失败（{type(exc).__name__}）"
+        )
 
-    # ---- 核验 ----
     try:
         ok, reason = verify_domain_artifact(yaml_path)
-    except Exception as exc:  # noqa: BLE001 —— 核验异常同样记 failed
+    except Exception as exc:  # noqa: BLE001
         ok, reason = False, f"Domain 生成核验失败（{type(exc).__name__}）"
-
-    # ---- 写回状态（锁下 finish） ----
-    try:
-        with platform_session(settings) as session:
-            if lock_db_source_row(session, source_uuid) is None:
-                raise SourceRegistrationMissingError(
-                    f"数据源登记已不存在: {source_uuid}"
-                )
-            finish_step(
-                session,
-                job_uuid,
-                DOMAIN_STEP_NAME,
-                STATUS_SUCCESS if ok else STATUS_FAILED,
-            )
-    except SourceRegistrationMissingError:
-        return _failure(
-            started,
-            "Domain 产物可能已生成，但数据源登记已不存在；"
-            f"job_id={job_uuid}，请查看日志确认作业状态",
-            job_uuid,
-        )
-    except Exception as exc:
-        logger.error(
-            "作业状态更新失败（%s） source_id=%s job_id=%s 产物目录=%s",
-            type(exc).__name__,
-            source_uuid,
-            job_uuid,
-            domain_dir,
-        )
-        return _failure(
-            started,
-            "Domain 产物可能已生成，但作业状态更新失败"
-            f"（{type(exc).__name__}）；job_id={job_uuid}，"
-            "请查看日志确认作业状态与产物",
-            job_uuid,
-        )
-
     if not ok:
-        return _failure(started, reason, job_uuid)
-    return {
-        "success": True,
-        "execution_time": time.perf_counter() - started,
-        "message": "受管 Domain 生成完成",
-        "job_id": str(job_uuid),
-    }
+        return StepOutcome(success=False, message=reason)
+    input_files = [
+        (f"md/{path.name}", md_marker.run_id)
+        for path in sorted(md_files, key=lambda item: item.name)
+    ]
+    return StepOutcome(
+        success=True,
+        message=f"受管 Domain 生成完成（{time.perf_counter() - started:.1f}s）",
+        input_files=input_files,
+        output_files=[f"domain/{DOMAIN_ARTIFACT_NAME}"],
+    )

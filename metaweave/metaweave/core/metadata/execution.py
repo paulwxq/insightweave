@@ -34,13 +34,15 @@ OPERATION_STEP_MAP = {
     "md": "md",
     "generate-domains": "generate-domains",
     "json": "json",
-    "generate-dim-config": "dim_config",
+    "generate-dim-config": "dim",
     "rel": "rel",
     "cql": "cql",
     # Web 采集步骤 domain（doc 21.1 §5.1）：只进本映射，不进 METADATA_OPERATIONS
     "domain": "domain",
-    # Web 采集步骤 dim_config（doc 22.1 §5.1）：同上，复用 dim_config 日志段
-    "dim_config": "dim_config",
+    # Web 采集 dim 步骤（doc 6 §2 更名）：复用 dim 日志段
+    "dim": "dim",
+    # Web 采集 sql 步骤：复用 SQL 生成日志段，不改变 CLI operation 名称。
+    "sql": "sql-rag-generate",
     # generate-sql-rag 由执行函数按阶段切换 sql-rag-generate / sql-rag-validate
     "generate-sql-rag": "sql-rag-generate",
 }
@@ -561,7 +563,7 @@ def execute_cql(request: MetadataExecutionRequest) -> dict:
             return _task_result(
                 False,
                 _time.perf_counter() - start,
-                "--step cql 需要 --source-id（平台登记 UUID）：实体键身份"
+                "--step cql 需要 --source-id（平台登记短 ID，形如 db_src_1）：实体键身份"
                 "（entity_id = source_id:逻辑id）无法省略",
             )
         generator = CQLGenerator(

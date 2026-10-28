@@ -523,7 +523,7 @@ loaders:
   dim_loader:
     # dim_tables.yaml 路径（--generate-dim-config 写入 & dim_value 加载读取，同一来源）
     # 相对路径基于项目根解析；metadata --dim-config 可覆盖
-    config_file: "output/dim_config/dim_tables.yaml"
+    config_file: "output/dim/dim_tables.yaml"
     collection_name: "dim_value_embeddings"
     options:
       batch_size: 100
@@ -563,7 +563,7 @@ sql_rag:
     questions_per_domain: 3
     uncategorized_questions: 3   # skip_uncategorized=true 时不生效
     skip_uncategorized: true
-    output_dir: "output/sql-rag"  # 仅 CLI；Web 固定写同作业 sql-rag/
+    output_dir: "output/sql"  # 仅 CLI；Web 固定写工作区 sql/
 
   # 为 SQL RAG 指定专属 LLM（深合并覆盖，其余字段继承全局 llm）
   llm:

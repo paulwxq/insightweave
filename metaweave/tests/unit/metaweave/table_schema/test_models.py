@@ -29,9 +29,17 @@ def test_to_milvus_dict_has_full_record_with_entity_id():
     assert row["publish_id"] == PUBLISH
     assert row["object_id"] == "orders.public.orders.order_id"
     assert set(row) == {
-        "entity_id", "source_id", "publish_id", "object_id", "object_type",
-        "parent_id", "object_desc", "embedding", "time_col_hint",
-        "table_category", "updated_at",
+        "entity_id",
+        "source_id",
+        "publish_id",
+        "object_id",
+        "object_type",
+        "parent_id",
+        "object_desc",
+        "embedding",
+        "time_col_hint",
+        "table_category",
+        "updated_at",
     }
     assert row["time_col_hint"] == "" and row["table_category"] == ""
 
@@ -51,7 +59,13 @@ def test_entity_id_without_source_falls_back_to_object_id():
 
 def test_varchar_limits_match_collection_definition():
     assert VARCHAR_LIMITS == {
-        "entity_id": 512, "source_id": 36, "publish_id": 36, "object_id": 256,
-        "object_type": 64, "parent_id": 256, "object_desc": 8192,
-        "time_col_hint": 512, "table_category": 64,
+        "entity_id": 512,
+        "source_id": 36,
+        "publish_id": 36,
+        "object_id": 256,
+        "object_type": 64,
+        "parent_id": 256,
+        "object_desc": 8192,
+        "time_col_hint": 512,
+        "table_category": 64,
     }

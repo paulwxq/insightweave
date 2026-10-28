@@ -96,9 +96,7 @@ def test_generate_domains_mode_works_without_step(tmp_path, monkeypatch):
         "metaweave.core.metadata.domain_generator.DomainGenerator",
         _DummyDomainGenerator,
     )
-    monkeypatch.setattr(
-        "services.config_loader.load_config", lambda _p: {"output": {}}
-    )
+    monkeypatch.setattr("services.config_loader.load_config", lambda _p: {"output": {}})
     monkeypatch.setattr("metaweave.utils.file_utils.get_project_root", lambda: tmp_path)
 
     runner = CliRunner()
@@ -222,7 +220,9 @@ def test_step_json_dispatches_generator(tmp_path, monkeypatch):
             calls.append(step)
             return super().generate(step=step, **kwargs)
 
-    monkeypatch.setattr("metaweave.core.metadata.generator.MetadataGenerator", _RecordingGenerator)
+    monkeypatch.setattr(
+        "metaweave.core.metadata.generator.MetadataGenerator", _RecordingGenerator
+    )
     runner = CliRunner()
     result = runner.invoke(
         metadata_cli.metadata_command, ["--config", str(cfg), "--step", "json"]
@@ -242,7 +242,9 @@ def test_step_duplicate_rejected(tmp_path, monkeypatch):
             calls.append(step)
             return super().generate(step=step, **kwargs)
 
-    monkeypatch.setattr("metaweave.core.metadata.generator.MetadataGenerator", _RecordingGenerator)
+    monkeypatch.setattr(
+        "metaweave.core.metadata.generator.MetadataGenerator", _RecordingGenerator
+    )
     runner = CliRunner()
 
     dup = runner.invoke(

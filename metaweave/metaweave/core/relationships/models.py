@@ -33,6 +33,7 @@ class Relation:
             rule+llm；仅推断关系有值，物理外键直通不设置——FK 关系的来源分档
             直接按 relationship_type == "foreign_key" 判断，不需要此字段）
     """
+
     relationship_id: str
     source_schema: str
     source_table: str
@@ -92,7 +93,7 @@ class Relation:
         if self.is_single_column:
             return f"{self.source_schema}.{self.source_table}.{self.source_columns[0]}"
         else:
-            cols = ', '.join(self.source_columns)
+            cols = ", ".join(self.source_columns)
             return f"{self.source_schema}.{self.source_table}.[{cols}]"
 
     @property
@@ -105,7 +106,7 @@ class Relation:
         if self.is_single_column:
             return f"{self.target_schema}.{self.target_table}.{self.target_columns[0]}"
         else:
-            cols = ', '.join(self.target_columns)
+            cols = ", ".join(self.target_columns)
             return f"{self.target_schema}.{self.target_table}.[{cols}]"
 
     @property
@@ -134,6 +135,7 @@ class RelationshipDiscoveryResult:
         output_files: 输出文件路径列表
         errors: 错误信息列表
     """
+
     success: bool = True
     total_relations: int = 0
     foreign_key_relations: int = 0

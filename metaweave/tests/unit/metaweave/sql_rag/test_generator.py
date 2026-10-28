@@ -72,29 +72,38 @@ class TestGeneratorParseAndClean:
 
     def test_parse_and_clean_valid(self):
         g = self._make_generator()
-        response = json.dumps([
-            {"question": "各客户的订单总额是多少？", "sql": "SELECT c.name, SUM(o.amount) FROM orders o JOIN customers c ON o.cid = c.id GROUP BY c.name"},
-        ])
+        response = json.dumps(
+            [
+                {
+                    "question": "各客户的订单总额是多少？",
+                    "sql": "SELECT c.name, SUM(o.amount) FROM orders o JOIN customers c ON o.cid = c.id GROUP BY c.name",
+                },
+            ]
+        )
         pairs = g._parse_and_clean(response)
         assert len(pairs) == 1
         assert pairs[0].sql.endswith(";")  # 自动添加分号
 
     def test_parse_and_clean_multiline_folded(self):
         g = self._make_generator()
-        response = json.dumps([
-            {"question": "多行\n问题", "sql": "SELECT\n  *\nFROM\n  t"},
-        ])
+        response = json.dumps(
+            [
+                {"question": "多行\n问题", "sql": "SELECT\n  *\nFROM\n  t"},
+            ]
+        )
         pairs = g._parse_and_clean(response)
         assert "\n" not in pairs[0].question
         assert "\n" not in pairs[0].sql
 
     def test_parse_and_clean_skips_empty(self):
         g = self._make_generator()
-        response = json.dumps([
-            {"question": "", "sql": "SELECT 1;"},
-            {"question": "Q", "sql": ""},
-            {"question": "Valid", "sql": "SELECT 1;"},
-        ])
+        response = json.dumps(
+            [
+                {"question": "", "sql": "SELECT 1;"},
+                {"question": "Q", "sql": ""},
+                {"question": "Valid", "sql": "SELECT 1;"},
+            ]
+        )
         pairs = g._parse_and_clean(response)
         assert len(pairs) == 1
 
@@ -111,10 +120,12 @@ class TestGeneratorParseAndClean:
 
 class TestGeneratorGenerate:
     def test_generate_success(self, tmp_path):
-        llm_response = json.dumps([
-            {"question": "总订单数？", "sql": "SELECT COUNT(*) FROM orders;"},
-            {"question": "客户列表？", "sql": "SELECT * FROM customers;"},
-        ])
+        llm_response = json.dumps(
+            [
+                {"question": "总订单数？", "sql": "SELECT COUNT(*) FROM orders;"},
+                {"question": "客户列表？", "sql": "SELECT * FROM customers;"},
+            ]
+        )
         llm = FakeLLMService(llm_response)
         gen_config = {
             "questions_per_domain": 5,
@@ -152,13 +163,15 @@ class TestGeneratorGenerate:
             ],
         }
         domains_path = tmp_path / "domains.yaml"
-        domains_path.write_text(yaml.dump(domains_cfg, allow_unicode=True), encoding="utf-8")
+        domains_path.write_text(
+            yaml.dump(domains_cfg, allow_unicode=True), encoding="utf-8"
+        )
 
         md_dir = tmp_path / "md"
         md_dir.mkdir()
         (md_dir / "t1.md").write_text("# t1", encoding="utf-8")
 
-        llm = FakeLLMService('[]')
+        llm = FakeLLMService("[]")
         gen_config = {
             "questions_per_domain": 5,
             "skip_uncategorized": True,

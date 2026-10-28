@@ -56,13 +56,13 @@ def sample_config():
                     "api_base": "https://dashscope.aliyuncs.com/compatible-mode/v1",
                     "temperature": 0.3,
                     "max_tokens": 500,
-                    "timeout": 30
+                    "timeout": 30,
                 }
             },
             "langchain_config": {
                 "use_async": False,
                 "batch_size": 10,
-            }
+            },
         },
         "json_generation": {
             "comments": {
@@ -167,7 +167,12 @@ def sample_table_json():
             },
             "logical_keys": {
                 "candidate_primary_keys": [
-                    {"columns": ["id"], "confidence_score": 1.0, "uniqueness": 1.0, "null_rate": 0.0}
+                    {
+                        "columns": ["id"],
+                        "confidence_score": 1.0,
+                        "uniqueness": 1.0,
+                        "null_rate": 0.0,
+                    }
                 ]
             },
         },
@@ -188,7 +193,9 @@ def sample_table_json():
 class TestTokenOptimization:
     """测试 Token 优化功能"""
 
-    def test_build_llm_input_view_removes_noise_fields(self, sample_config, sample_table_json):
+    def test_build_llm_input_view_removes_noise_fields(
+        self, sample_config, sample_table_json
+    ):
         """测试输入视图裁剪：移除规则推断字段"""
         enhancer = JsonLlmEnhancer(sample_config)
         llm_input = enhancer._build_llm_input_view(sample_table_json)
@@ -243,7 +250,9 @@ class TestTokenOptimization:
 class TestCommentNeedsAnalysis:
     """测试注释需求分析"""
 
-    def test_analyze_comment_needs_detects_missing(self, sample_config, sample_table_json):
+    def test_analyze_comment_needs_detects_missing(
+        self, sample_config, sample_table_json
+    ):
         """测试检测缺失注释"""
         enhancer = JsonLlmEnhancer(sample_config)
         needs = enhancer._analyze_comment_needs(sample_table_json)
@@ -255,7 +264,9 @@ class TestCommentNeedsAnalysis:
         assert "name" in needs["columns_need_comment"]
         assert "id" not in needs["columns_need_comment"]
 
-    def test_analyze_comment_needs_with_overwrite(self, sample_config, sample_table_json):
+    def test_analyze_comment_needs_with_overwrite(
+        self, sample_config, sample_table_json
+    ):
         """测试覆盖模式"""
         sample_config["json_generation"]["comments"]["overwrite"] = True
         enhancer = JsonLlmEnhancer(sample_config)
@@ -286,9 +297,7 @@ class TestEnhanceDocumentSwitches:
         self, sample_config, sample_table_json
     ):
         sample_config["json_generation"]["comments"]["llm_enabled"] = False
-        sample_config["json_generation"]["table_classification"][
-            "llm_enabled"
-        ] = False
+        sample_config["json_generation"]["table_classification"]["llm_enabled"] = False
         enhancer = JsonLlmEnhancer(sample_config)
         original = _as_v3(sample_table_json)
 
@@ -300,9 +309,7 @@ class TestEnhanceDocumentSwitches:
         assert enhancer.llm_service is None
         assert outcome.document == original
 
-    def test_both_switches_disabled_do_not_require_llm_config(
-        self, sample_table_json
-    ):
+    def test_both_switches_disabled_do_not_require_llm_config(self, sample_table_json):
         config = {
             "json_generation": {
                 "comments": {"llm_enabled": False},
@@ -330,7 +337,9 @@ class TestEnhanceDocumentSwitches:
         assert outcome.success is True
         assert outcome.llm_called is False
         assert "llm_enhanced_at" not in outcome.document
-        assert outcome.document["generated_timestamp"] == original["generated_timestamp"]
+        assert (
+            outcome.document["generated_timestamp"] == original["generated_timestamp"]
+        )
         assert "llm_enhanced_at" in original
 
     def test_legacy_comment_audit_fields_are_removed_without_llm(
@@ -356,7 +365,9 @@ class TestEnhanceDocumentSwitches:
         assert "comment_original" not in outcome.document["object_info"]
         assert "comment_source_original" not in outcome.document["object_info"]
         assert "comment_original" not in outcome.document["column_profiles"]["id"]
-        assert "comment_source_original" not in outcome.document["column_profiles"]["id"]
+        assert (
+            "comment_source_original" not in outcome.document["column_profiles"]["id"]
+        )
         assert "comment_original" in original["object_info"]
 
     def test_incremental_mode_removes_legacy_audit_fields(
@@ -395,9 +406,7 @@ class TestEnhanceDocumentSwitches:
     def test_comments_only_preserves_rule_classification(
         self, sample_config, sample_table_json
     ):
-        sample_config["json_generation"]["table_classification"][
-            "llm_enabled"
-        ] = False
+        sample_config["json_generation"]["table_classification"]["llm_enabled"] = False
         enhancer = JsonLlmEnhancer(sample_config)
         enhancer.llm_service = self._service(
             json.dumps(
@@ -532,7 +541,9 @@ class TestEnhanceDocumentSwitches:
 class TestClassificationOverride:
     """测试分类覆盖逻辑"""
 
-    def test_merge_llm_result_overrides_classification(self, sample_config, sample_table_json):
+    def test_merge_llm_result_overrides_classification(
+        self, sample_config, sample_table_json
+    ):
         """测试 LLM 分类覆盖规则引擎"""
         enhancer = JsonLlmEnhancer(sample_config)
 
@@ -544,7 +555,9 @@ class TestClassificationOverride:
             "column_comments": {"name": "名称字段"},
         }
 
-        enhanced = enhancer._merge_llm_result(sample_table_json, llm_result, need_comments=True)
+        enhanced = enhancer._merge_llm_result(
+            sample_table_json, llm_result, need_comments=True
+        )
 
         # 验证分类覆盖
         assert enhanced["table_profile"]["table_category"] == "fact"
@@ -557,7 +570,9 @@ class TestClassificationOverride:
         assert rule["confidence"] == 0.8
         assert "dim_name_pattern" in rule["inference_basis"]
 
-    def test_merge_llm_result_consistent_classification(self, sample_config, sample_table_json):
+    def test_merge_llm_result_consistent_classification(
+        self, sample_config, sample_table_json
+    ):
         """测试 LLM 分类与规则引擎一致"""
         enhancer = JsonLlmEnhancer(sample_config)
 
@@ -569,7 +584,9 @@ class TestClassificationOverride:
             "column_comments": {},
         }
 
-        enhanced = enhancer._merge_llm_result(sample_table_json, llm_result, need_comments=True)
+        enhanced = enhancer._merge_llm_result(
+            sample_table_json, llm_result, need_comments=True
+        )
 
         # 验证分类仍然覆盖（更新 confidence）
         assert enhanced["table_profile"]["table_category"] == "dim"
@@ -580,7 +597,9 @@ class TestClassificationOverride:
         assert rule["table_category"] == "dim"
         assert rule["confidence"] == 0.8
 
-    def test_merge_llm_result_missing_table_category_raises(self, sample_config, sample_table_json):
+    def test_merge_llm_result_missing_table_category_raises(
+        self, sample_config, sample_table_json
+    ):
         """测试 LLM 未返回 table_category 视为异常，不应落盘覆盖"""
         enhancer = JsonLlmEnhancer(sample_config)
 
@@ -590,7 +609,9 @@ class TestClassificationOverride:
         }
 
         with pytest.raises(ValueError):
-            enhancer._merge_llm_result(sample_table_json, llm_result, need_comments=False)
+            enhancer._merge_llm_result(
+                sample_table_json, llm_result, need_comments=False
+            )
 
     def test_v3_merge_records_source_reason_and_original_rule_once(
         self,

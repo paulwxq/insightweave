@@ -25,7 +25,6 @@ import time as time_mod
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Optional
-from uuid import UUID
 
 from langgraph.store.base import BaseStore
 
@@ -67,13 +66,10 @@ def parse_tz_datetime(value: Any) -> Optional[datetime]:
 
 
 def valid_source_uuid(value: Any) -> bool:
-    if not isinstance(value, str) or not value:
-        return False
-    try:
-        UUID(value)
-    except ValueError:
-        return False
-    return True
+    """数据源短 ID 校验（doc 6 §1：db_src_N；函数名保留历史命名）。"""
+    from src.modules.db_deepagent.source_registry import SOURCE_ID_RE
+
+    return isinstance(value, str) and bool(SOURCE_ID_RE.match(value))
 
 
 def derive_title(question: str) -> str:
@@ -114,7 +110,11 @@ def normalize_turn_display(display: Any) -> dict:
     evidence: list[dict] = []
     if isinstance(display, dict):
         raw_elapsed = display.get("elapsed_ms")
-        if isinstance(raw_elapsed, int) and not isinstance(raw_elapsed, bool) and raw_elapsed >= 0:
+        if (
+            isinstance(raw_elapsed, int)
+            and not isinstance(raw_elapsed, bool)
+            and raw_elapsed >= 0
+        ):
             elapsed = raw_elapsed
         raw_items = display.get("evidence")
         if isinstance(raw_items, list):
@@ -128,11 +128,13 @@ def normalize_turn_display(display: Any) -> dict:
                     {
                         "sql": sql if isinstance(sql, str) and sql.strip() else None,
                         "result_ref": ref if isinstance(ref, str) and ref else None,
-                        "row_count": row_count
-                        if isinstance(row_count, int)
-                        and not isinstance(row_count, bool)
-                        and row_count >= 0
-                        else 0,
+                        "row_count": (
+                            row_count
+                            if isinstance(row_count, int)
+                            and not isinstance(row_count, bool)
+                            and row_count >= 0
+                            else 0
+                        ),
                         "source_truncated": item.get("source_truncated") is True,
                     }
                 )

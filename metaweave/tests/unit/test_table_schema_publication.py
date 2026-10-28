@@ -1,471 +1,407 @@
-"""doc 20：受管输入、CLI 定位及 Web 发布；不使用真实外部服务。"""
+"""table_schema 发布（doc 20.1、6.2 §8）：受管输入、加载器构造与执行链。
+
+受管输入校验（清单、身份、JSON 采集运行 UUID 一致性、字段对齐）经真实
+`prepare_managed_table_schema_input`；预检与执行复查共用同一函数。
+Web 发布链经假 vector loader 验证固定选项、成功/失败语义与 input_manifest。
+"""
 
 import json
-from types import SimpleNamespace
-from uuid import uuid4
-from unittest.mock import MagicMock
+from uuid import UUID
 
 import pytest
-from click.testing import CliRunner
 
-from metaweave.cli import loader_cli
+from backend.profile_loading import table_schema_loader as web_loader
+from backend.publishing import publish_service
+from backend.publishing.precheck import check_step
+from backend.publishing.publish_service import (
+    create_publish_run,
+    execute_publish_run,
+)
 from metaweave.core.loaders.table_schema_loader import TableSchemaLoader
 from metaweave.core.table_schema.managed_input import (
     configure_managed_loader,
+    prepare_managed_table_schema_input,
     read_managed_pairs,
 )
-from metaweave.utils.time_utils import utc_isoformat
-from tests.unit.test_json_publish_loader import sample_document
+from tests.unit.test_json_publish_service import sample_document
 from tests.unit.test_publish_service import (
+    DB_NAME,
+    FakeSession,
+    PUBLISH_JOB_ID,
+    SETTINGS,
     SOURCE_ID,
-    JOB_ID,
-    RUN_MARKER,
-    install_session,
+    WORKSPACE_ID,
+    install,
+    run_step_row,
+    step_dir,
+    write_marker,
 )
-from tests.unit.test_rag_load_cli import _write_config
-from tests.unit.test_web_publishing import _client, _check, _post
-from backend.publishing import publish_service
-from backend.persistence.models import PublishInfo
+
+# MD 清单的 JSON 运行标识契约：json 目录采集 marker 的 collection_run_id
+# （UUID 文本，与采集侧 md_step_service 写入口径一致，doc 6 §4.2）。
+JSON_RUN = UUID("55555555-5555-4555-8555-555555555555")
+MD_RUN = UUID("44444444-4444-4444-8444-444444444444")
+JSON_MARKER = str(JSON_RUN)
 
 
-@pytest.fixture
-def managed(tmp_path, monkeypatch):
-    session = install_session(monkeypatch, tmp_path)
-    session.source.db_name = "ordersdb"
-    session.source.updated_at = RUN_MARKER
-    session.source.selected_schemas = ["public"]
-    for step in ("json", "md"):
-        session.steps.append(
-            SimpleNamespace(
-                job_id=JOB_ID,
-                source_id=SOURCE_ID,
-                step_name=step,
-                last_status="success",
-                updated_at=RUN_MARKER,
-            )
-        )
-    root = tmp_path / "output" / str(SOURCE_ID) / str(JOB_ID)
-    json_dir, md_dir = root / "json", root / "md"
-    json_dir.mkdir(parents=True)
-    md_dir.mkdir()
-    data = sample_document()
-    data["generated_timestamp"] = utc_isoformat(RUN_MARKER)
-    name = "ordersdb.public.orders"
-    (json_dir / f"{name}.json").write_text(json.dumps(data), encoding="utf-8")
-    (json_dir / "manifest.json").write_text(json.dumps({"files": [f"{name}.json"]}))
-    (md_dir / f"{name}.md").write_text(
-        "# ordersdb.public.orders\n## 字段列表\n- order_id (integer) - 订单ID\n"
+def write_managed(tmp_path, *, marker=JSON_MARKER):
+    """写 json/md 受管产物（含清单与成功 marker）。"""
+    json_dir = step_dir(tmp_path, "json")
+    md_dir = step_dir(tmp_path, "md")
+    json_dir.mkdir(parents=True, exist_ok=True)
+    md_dir.mkdir(parents=True, exist_ok=True)
+    document = sample_document(database=DB_NAME)
+    stem = f"{DB_NAME}.public.orders"
+    (json_dir / f"{stem}.json").write_text(
+        json.dumps(document, ensure_ascii=False), encoding="utf-8"
+    )
+    (json_dir / "manifest.json").write_text(
+        json.dumps({"files": [f"{stem}.json"]}), encoding="utf-8"
+    )
+    (md_dir / f"{stem}.md").write_text(
+        f"# {stem}\n## 字段列表\n- order_id (integer) - 订单ID\n"
         "- amount (numeric(10,2)) - 金额\n",
         encoding="utf-8",
     )
     (md_dir / "manifest.json").write_text(
-        json.dumps(
-            {
-                "files": [f"{name}.md"],
-                "source_json_updated_at": utc_isoformat(RUN_MARKER),
-            }
-        )
+        json.dumps({"files": [f"{stem}.md"], "source_collection_run_id": marker}),
+        encoding="utf-8",
     )
-    return session, json_dir, md_dir
+    write_marker(tmp_path, "json", run_id=JSON_RUN)
+    write_marker(tmp_path, "md", run_id=MD_RUN)
+    return json_dir, md_dir, stem
 
 
-def make_loader():
+def make_loader(tmp_path):
     cfg = {"table_schema_loader": {"collection_name": "schemas"}}
-    configure_managed_loader(cfg, SOURCE_ID, JOB_ID)
+    configure_managed_loader(cfg, SOURCE_ID, WORKSPACE_ID)
     return TableSchemaLoader(cfg, metadata_config={})
 
 
-def test_current_format_and_numeric_columns(managed):
-    loader = make_loader()
-    groups = loader.prepare_input(utc_isoformat(RUN_MARKER), "ordersdb")
-    assert loader.collection_name == "schemas"  # 共用集合，不再按源拆分
-    assert len(groups) == 1 and len(groups[0]) == 3
-    assert groups[0][0].table_category == "fact"
-    assert groups[0][2].object_desc == "金额"
-    assert groups[0][0].object_id == "ordersdb.public.orders"
+@pytest.fixture(autouse=True)
+def _env(monkeypatch, tmp_path):
+    install(monkeypatch, tmp_path)
 
 
-@pytest.mark.parametrize(
-    "issue",
-    ["old_marker", "rerun", "missing_md", "missing_column", "identity", "extra_json"],
-)
-def test_reject_bad_input_before_services(managed, issue):
-    _, json_dir, md_dir = managed
-    if issue in ("old_marker", "rerun"):
-        path = md_dir / "manifest.json"
-        data = json.loads(path.read_text())
-        data["source_json_updated_at"] = (
-            RUN_MARKER.isoformat()
-            if issue == "old_marker"
-            else "2026-09-28T10:00:00.000000Z"
+# ---- 受管输入解析（prepare_managed_table_schema_input） ----
+
+
+class TestManagedInput:
+    def test_current_format_builds_table_and_column_objects(self, tmp_path):
+        json_dir, md_dir, stem = write_managed(tmp_path)
+        prepared = prepare_managed_table_schema_input(
+            json_dir,
+            md_dir,
+            SOURCE_ID,
+            web_loader.WEB_LOADER_OPTIONS,
+            JSON_MARKER,
+            DB_NAME,
         )
-        path.write_text(json.dumps(data))
-    elif issue == "missing_md":
-        next(md_dir.glob("*.md")).unlink()
-    elif issue == "missing_column":
+        assert len(prepared.groups) == 1
+        group = prepared.groups[0]
+        # Web 固定加载字段级对象：表级 1 + 字段级 2
+        assert len(group) == 3
+        assert group[0].object_id == stem
+        assert group[0].table_category == "fact"
+        assert group[2].object_desc == "金额"
+
+    @pytest.mark.parametrize(
+        "issue",
+        ["marker-mismatch", "missing-md", "missing-column", "identity", "extra-json"],
+    )
+    def test_reject_bad_input(self, tmp_path, issue):
+        json_dir, md_dir, _stem = write_managed(tmp_path)
+        if issue == "marker-mismatch":
+            path = md_dir / "manifest.json"
+            data = json.loads(path.read_text(encoding="utf-8"))
+            data["source_collection_run_id"] = str(UUID(int=123))
+            path.write_text(json.dumps(data), encoding="utf-8")
+        elif issue == "missing-md":
+            next(md_dir.glob("*.md")).unlink()
+        elif issue == "missing-column":
+            next(md_dir.glob("*.md")).write_text(
+                "# x\n## 字段列表\n- order_id (integer) - ID\n", encoding="utf-8"
+            )
+        elif issue == "identity":
+            path = json_dir / f"{DB_NAME}.public.orders.json"
+            data = json.loads(path.read_text(encoding="utf-8"))
+            data["object_info"]["database"] = "other"
+            path.write_text(json.dumps(data), encoding="utf-8")
+        else:
+            (json_dir / "extra.json").write_text("{}", encoding="utf-8")
+        with pytest.raises(ValueError):
+            prepare_managed_table_schema_input(
+                json_dir,
+                md_dir,
+                SOURCE_ID,
+                web_loader.WEB_LOADER_OPTIONS,
+                JSON_MARKER,
+                DB_NAME,
+            )
+
+    def test_marker_must_be_valid_uuid(self, tmp_path):
+        json_dir, md_dir, _stem = write_managed(
+            tmp_path, marker="2026-10-21T10:00:00.000000Z"
+        )
+        with pytest.raises(ValueError, match="不是合法 UUID"):
+            read_managed_pairs(json_dir, md_dir, JSON_MARKER, DB_NAME)
+
+    def test_foreign_database_rejected(self, tmp_path):
+        json_dir, md_dir, _stem = write_managed(tmp_path)
+        with pytest.raises(ValueError, match="不属于当前登记数据库"):
+            read_managed_pairs(json_dir, md_dir, JSON_MARKER, "otherdb")
+
+
+class TestCheckOutputReady:
+    def test_ready_with_matching_marker(self, tmp_path):
+        write_managed(tmp_path)
+        assert (
+            web_loader.check_table_schema_output_ready(
+                SOURCE_ID, WORKSPACE_ID, JSON_MARKER, DB_NAME
+            )
+            is True
+        )
+
+    def test_input_changed_after_check_is_rejected(self, tmp_path):
+        _json_dir, md_dir, _stem = write_managed(tmp_path)
+        assert (
+            web_loader.check_table_schema_output_ready(
+                SOURCE_ID, WORKSPACE_ID, JSON_MARKER, DB_NAME
+            )
+            is True
+        )
         next(md_dir.glob("*.md")).write_text(
-            "# x\n## 字段列表\n- order_id (integer) - ID\n"
+            "# x\n## 字段列表\n- order_id (integer) - ID\n", encoding="utf-8"
         )
-    elif issue == "identity":
-        path = json_dir / "ordersdb.public.orders.json"
-        data = json.loads(path.read_text())
-        data["object_info"]["database"] = "other"
-        path.write_text(json.dumps(data))
-    else:
-        (json_dir / "extra.json").write_text("{}")
-    loader = make_loader()
-    with pytest.raises(ValueError):
-        loader.prepare_input(utc_isoformat(RUN_MARKER), "ordersdb")
-    assert loader._milvus_client is None and loader._embedding_service is None
-
-
-@pytest.mark.parametrize(
-    "args",
-    [
-        ["--type", "table_schema", "--source_id", str(SOURCE_ID)],
-        ["--type", "table_schema", "--job_id", str(JOB_ID)],
-        ["--type", "table_schema", "--source_id", "bad", "--job_id", str(JOB_ID)],
-    ],
-)
-def test_cli_bad_identifiers(tmp_path, args):
-    result = CliRunner().invoke(
-        loader_cli.rag_load_command, args + ["-c", _write_config(tmp_path)]
-    )
-    assert result.exit_code == 2
-
-
-def test_cli_managed_paths_and_clean_target(managed, tmp_path, monkeypatch):
-    loader = MagicMock()
-    loader.validate.return_value = True
-    loader.load.return_value = {"success": True}
-    factory = MagicMock(return_value=loader)
-    monkeypatch.setattr(loader_cli.LoaderFactory, "create", factory)
-    result = CliRunner().invoke(
-        loader_cli.rag_load_command,
-        [
-            "--type",
-            "table_schema",
-            "--source_id",
-            str(SOURCE_ID),
-            "--job_id",
-            str(JOB_ID),
-            "-c",
-            _write_config(tmp_path),
-            "--clean",
-        ],
-    )
-    assert result.exit_code == 0, result.output
-    cfg = factory.call_args.args[1]["table_schema_loader"]
-    assert cfg["md_directory"] == str(managed[2])
-    assert cfg["json_llm_directory"] == str(managed[1])
-    assert cfg["collection_name"] == "ts_c"  # 共用集合，不再按源追加 UUID
-    loader.load.assert_called_once_with(clean=False)
-
-
-def fake_loader(monkeypatch, success=True, started=None, validate=True):
-    loader = make_loader()
-    monkeypatch.setattr(loader, "validate", lambda: validate)
-    result = {
-        "success": success,
-        "replacement_started": success if started is None else started,
-    }
-    load = MagicMock(return_value=result)
-    monkeypatch.setattr(loader, "load", load)
-    monkeypatch.setattr(publish_service, "build_table_schema_loader", lambda *_: loader)
-    return load
-
-
-def test_api_precheck_and_success_record(managed, monkeypatch):
-    load = fake_loader(monkeypatch)
-    with _client() as client:
-        response = _check(client)
-        assert response.status_code == 200
-        step = next(
-            s for s in response.json()["steps"] if s["step_name"] == "table_schema"
+        assert (
+            web_loader.check_table_schema_output_ready(
+                SOURCE_ID, WORKSPACE_ID, JSON_MARKER, DB_NAME
+            )
+            is False
         )
-        assert step["publishable"] is True
-        assert not load.called
-        response = _post(client, ["table_schema"])
-    assert response.status_code == 200, response.text
-    assert response.json()["results"][0]["status"] == "success"
-    load.assert_called_once_with()
-    assert managed[0].publishes[0].step_name == "table_schema"
-    assert managed[0].publishes[0].is_current_publish
 
-
-def test_api_failure_and_stale_md(managed, monkeypatch):
-    load = fake_loader(monkeypatch, success=False)
-    with _client() as client:
-        response = _post(client, ["table_schema"])
-        assert response.status_code == 200
-        assert response.json()["results"][0]["status"] == "failed"
-        assert not managed[0].publishes[0].is_current_publish
-        managed[0].steps[-2].updated_at = RUN_MARKER.replace(day=28)
-        response = _check(client)
-        step = next(
-            s for s in response.json()["steps"] if s["step_name"] == "table_schema"
+    def test_none_marker_or_db_not_ready(self, tmp_path):
+        write_managed(tmp_path)
+        assert (
+            web_loader.check_table_schema_output_ready(
+                SOURCE_ID, WORKSPACE_ID, None, DB_NAME
+            )
+            is False
         )
-        assert not step["publishable"]
-        response = _post(client, ["table_schema"])
-    assert response.status_code == 200
-    assert response.json()["results"][0]["status"] == "failed"
-    assert load.call_count == 1
+        assert (
+            web_loader.check_table_schema_output_ready(
+                SOURCE_ID, WORKSPACE_ID, JSON_MARKER, None
+            )
+            is False
+        )
+
+    def test_precheck_and_execution_share_one_preparation_function(
+        self, tmp_path, monkeypatch
+    ):
+        """A10：预检与加载器 prepare_input 经同一函数解析；预检不触碰外部服务。"""
+        from metaweave.core.table_schema import managed_input
+
+        write_managed(tmp_path)
+        calls = []
+        real = managed_input.prepare_managed_table_schema_input
+
+        def spy(*args, **kwargs):
+            calls.append(args[3])  # LoaderOptions
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(web_loader, "prepare_managed_table_schema_input", spy)
+        monkeypatch.setattr(managed_input, "prepare_managed_table_schema_input", spy)
+
+        assert web_loader.check_table_schema_output_ready(
+            SOURCE_ID, WORKSPACE_ID, JSON_MARKER, DB_NAME
+        )
+        loader = make_loader(tmp_path)
+        loader.prepare_input(JSON_MARKER, DB_NAME)
+
+        assert len(calls) == 2
+        assert calls[0].include_columns is True and calls[0].skip_empty_desc is True
+        assert loader._milvus_client is None and loader._embedding_service is None
 
 
-def _old_current(managed):
-    old = PublishInfo(
-        publish_id=uuid4(),
-        source_id=SOURCE_ID,
-        job_id=JOB_ID,
-        step_name="table_schema",
-        status="success",
-        is_current_publish=True,
-        created_at=RUN_MARKER,
-        updated_at=RUN_MARKER,
-    )
-    managed[0].publishes.append(old)
-    return old
+# ---- 加载器构造（固定选项 + 快照不被改写，doc 20.1 §4.2） ----
 
 
-@pytest.mark.parametrize(
-    "scenario, old_stays_current",
-    [
-        ("validate_fails", True),  # 连接/配置不可用：尚未写 Milvus
-        ("fails_before_first_upsert", True),  # 输入/集合/向量化失败
-        ("fails_after_first_upsert", False),  # 可能新旧混合：撤销旧 current
-    ],
-)
-def test_old_current_only_revoked_when_replacement_starts(
-    managed, monkeypatch, scenario, old_stays_current
-):
-    old = _old_current(managed)
-    load = fake_loader(
-        monkeypatch,
-        success=False,
-        started=scenario == "fails_after_first_upsert",
-        validate=scenario != "validate_fails",
-    )
-    with _client() as client:
-        response = _post(client, ["table_schema"])
-    assert response.status_code == 200
-    assert response.json()["results"][0]["status"] == "failed"
-    assert old.is_current_publish is old_stays_current
-    assert load.called is (scenario != "validate_fails")
-    failed = [p for p in managed[0].publishes if p is not old]
-    assert len(failed) == 1 and failed[0].status == "failed"
-    assert not failed[0].is_current_publish
+class TestBuildTableSchemaLoader:
+    def _snapshot(self):
+        return {
+            "vector_database": {"providers": {"milvus": {}}},
+            "loaders": {
+                "table_schema_loader": {
+                    "collection_name": "schemas",
+                    "options": {
+                        "include_columns": False,
+                        "skip_empty_desc": False,
+                        "batch_size": 7,
+                    },
+                }
+            },
+        }
 
+    def test_forces_fixed_options_and_keeps_snapshot(self, monkeypatch, tmp_path):
+        snapshot = self._snapshot()
+        monkeypatch.setattr(
+            web_loader, "load_main_config_snapshot", lambda *_: snapshot
+        )
+        publish_run_id = UUID(int=1)
+        loader = web_loader.build_table_schema_loader(
+            SOURCE_ID, WORKSPACE_ID, publish_run_id
+        )
+        assert loader.options.include_columns is True
+        assert loader.options.skip_empty_desc is True
+        assert loader.options.batch_size == 7  # 其他配置不被覆盖
+        # 原配置快照不被改写
+        assert snapshot["loaders"]["table_schema_loader"]["options"] == {
+            "include_columns": False,
+            "skip_empty_desc": False,
+            "batch_size": 7,
+        }
+        assert loader.collection_name == "schemas"
+        # 受管目录注入指向工作区
+        assert loader.md_directory == step_dir(tmp_path, "md")
+        assert loader.json_llm_directory == step_dir(tmp_path, "json")
 
-def test_loader_exception_after_start_is_treated_as_started(managed, monkeypatch):
-    old = _old_current(managed)
-    loader = make_loader()
-    monkeypatch.setattr(loader, "validate", lambda: True)
-    monkeypatch.setattr(loader, "load", MagicMock(side_effect=RuntimeError("x")))
-    monkeypatch.setattr(publish_service, "build_table_schema_loader", lambda *_: loader)
-    with _client() as client:
-        response = _post(client, ["table_schema"])
-    assert response.json()["results"][0]["status"] == "failed"
-    assert old.is_current_publish is False
-
-
-@pytest.mark.parametrize("success", [True, False])
-def test_loader_close_called_through_public_interface(managed, monkeypatch, success):
-    loader = make_loader()
-    monkeypatch.setattr(loader, "validate", lambda: True)
-    monkeypatch.setattr(
-        loader,
-        "load",
-        MagicMock(return_value={"success": success, "replacement_started": success}),
-    )
-    close = MagicMock()
-    monkeypatch.setattr(loader, "close", close)
-    monkeypatch.setattr(publish_service, "build_table_schema_loader", lambda *_: loader)
-    with _client() as client:
-        _post(client, ["table_schema"])
-    close.assert_called_once_with()
-
-
-def test_loader_close_called_even_when_validate_raises(managed, monkeypatch):
-    loader = make_loader()
-    monkeypatch.setattr(loader, "validate", MagicMock(side_effect=RuntimeError("x")))
-    close = MagicMock()
-    monkeypatch.setattr(loader, "close", close)
-    monkeypatch.setattr(publish_service, "build_table_schema_loader", lambda *_: loader)
-    with _client() as client:
-        response = _post(client, ["table_schema"])
-    assert response.json()["results"][0]["status"] == "failed"
-    close.assert_called_once_with()
-
-
-def test_build_loader_forces_fixed_options_and_keeps_snapshot(monkeypatch):
-    from backend.profile_loading import table_schema_loader as web_loader
-
-    snapshot = {
-        "vector_database": {"providers": {"milvus": {}}},
-        "loaders": {
+    def test_cli_loader_keeps_config_driven_options(self, tmp_path):
+        cfg = {
             "table_schema_loader": {
                 "collection_name": "schemas",
-                "options": {
-                    "include_columns": False,
-                    "skip_empty_desc": False,
-                    "batch_size": 7,
-                },
+                "options": {"include_columns": False, "skip_empty_desc": False},
             }
-        },
-    }
-    monkeypatch.setattr(web_loader, "load_main_config_snapshot", lambda *_: snapshot)
-    publish_id = uuid4()
-    loader = web_loader.build_table_schema_loader(SOURCE_ID, JOB_ID, publish_id)
-    assert loader.options.include_columns is True
-    assert loader.options.skip_empty_desc is True
-    assert loader.options.batch_size == 7  # 其他配置不被覆盖
-    assert loader.publish_id == str(publish_id) and loader.source_id == str(SOURCE_ID)
-    # 原配置快照不被改写
-    assert snapshot["loaders"]["table_schema_loader"]["options"] == {
-        "include_columns": False,
-        "skip_empty_desc": False,
-        "batch_size": 7,
-    }
-    assert loader.collection_name == "schemas"
-
-
-def test_cli_loader_keeps_config_driven_options():
-    cfg = {
-        "table_schema_loader": {
-            "collection_name": "schemas",
-            "options": {"include_columns": False, "skip_empty_desc": False},
         }
-    }
-    configure_managed_loader(cfg, SOURCE_ID, JOB_ID)
-    loader = TableSchemaLoader(cfg, metadata_config={})
-    assert loader.options.include_columns is False
-    assert loader.options.skip_empty_desc is False
+        configure_managed_loader(cfg, SOURCE_ID, WORKSPACE_ID)
+        loader = TableSchemaLoader(cfg, metadata_config={})
+        assert loader.options.include_columns is False
+        assert loader.options.skip_empty_desc is False
 
 
-def _add_step(session, name, status):
-    session.steps.append(
-        SimpleNamespace(
-            job_id=JOB_ID,
-            source_id=SOURCE_ID,
-            step_name=name,
-            last_status=status,
-            updated_at=RUN_MARKER,
+# ---- Web 发布链（预检走真实链路；vector loader 用假件） ----
+
+
+class FakeVectorLoader:
+    def __init__(self):
+        self.validate_result = True
+        self.load_result = {"success": True, "objects_loaded": 3}
+        self.closed = 0
+        self.load_calls = 0
+
+    def validate(self):
+        return self.validate_result
+
+    def load(self):
+        self.load_calls += 1
+        return dict(self.load_result)
+
+    def close(self):
+        self.closed += 1
+
+
+def _publish_table_schema(monkeypatch, tmp_path, loader):
+    write_managed(tmp_path)
+    session = install(monkeypatch, tmp_path, FakeSession(steps=("table_schema",)))
+    monkeypatch.setattr(publish_service, "build_table_schema_loader", lambda *a: loader)
+    monkeypatch.setattr(
+        publish_service, "_milvus_collection", lambda _key: "table_schema_embeddings"
+    )
+    result = create_publish_run(
+        SETTINGS,
+        PUBLISH_JOB_ID,
+        revision_no=1,
+        mode="custom",
+        steps=["table_schema"],
+        step_config=None,
+    )
+    run_id = UUID(result["publish_run_id"])
+    execute_publish_run(SETTINGS, run_id)
+    return session, run_id
+
+
+class TestPublishExecution:
+    def test_check_step_ready_with_real_chain(self, tmp_path):
+        write_managed(tmp_path)
+        result = check_step(
+            FakeSession(), SOURCE_ID, WORKSPACE_ID, "table_schema", db_name=DB_NAME
         )
-    )
+        assert result.ready is True
+        assert result.input_files == (
+            (f"json/{DB_NAME}.public.orders.json", str(JSON_RUN)),
+            (f"md/{DB_NAME}.public.orders.md", str(MD_RUN)),
+        )
 
+    def test_success_message_and_manifests(self, monkeypatch, tmp_path):
+        loader = FakeVectorLoader()
+        session, run_id = _publish_table_schema(monkeypatch, tmp_path, loader)
+        step = run_step_row(session, run_id, "table_schema")
+        assert step.status == "success"
+        assert step.message == "表结构已发布到 Milvus（3 条）"
+        assert loader.load_calls == 1 and loader.closed == 1
+        # input_manifest 覆盖 json（不含清单）与 md 文件，来源各自目录 marker
+        entries = {
+            item["path"]: item["collection_run_id"]
+            for item in step.input_manifest["files"]
+        }
+        assert set(entries) == {
+            f"json/{DB_NAME}.public.orders.json",
+            f"md/{DB_NAME}.public.orders.md",
+        }
+        assert entries[f"json/{DB_NAME}.public.orders.json"] == str(JSON_RUN)
+        assert entries[f"md/{DB_NAME}.public.orders.md"] == str(MD_RUN)
+        assert step.target_manifest == {
+            "targets": [{"type": "milvus", "collection": "table_schema_embeddings"}]
+        }
 
-@pytest.mark.parametrize("other_status", ["failed", "running"])
-def test_job_level_admission_blocks_every_publish_item(
-    managed, monkeypatch, other_status
-):
-    """J03：同一 Job 任一现有步骤行 failed/running，包括本次未选择的 md/ddl，都不能发布。"""
-    session = managed[0]
-    _add_step(session, "ddl", other_status)
-    load = fake_loader(monkeypatch)
-    with _client() as client:
-        check = _check(client)
-        assert check.status_code == 200
-        by_step = {s["step_name"]: s for s in check.json()["steps"]}
-        assert by_step["table_schema"]["publishable"] is False
-        assert by_step["json"]["publishable"] is False
-        response = _post(client, ["table_schema"])
-    assert response.status_code == 409
-    assert response.json()["code"] == "job_not_publishable"
-    assert session.publishes == [] and not load.called
+    def test_validate_failure_message(self, monkeypatch, tmp_path):
+        loader = FakeVectorLoader()
+        loader.validate_result = False
+        session, run_id = _publish_table_schema(monkeypatch, tmp_path, loader)
+        step = run_step_row(session, run_id, "table_schema")
+        assert step.status == "failed"
+        assert step.message == "表结构发布失败：Milvus 或 Embedding 服务不可用"
+        assert loader.closed == 1
 
+    def test_partial_load_failure_message(self, monkeypatch, tmp_path):
+        loader = FakeVectorLoader()
+        loader.load_result = {
+            "success": False,
+            "objects_loaded": 1,
+            "objects_skipped": 2,
+        }
+        session, run_id = _publish_table_schema(monkeypatch, tmp_path, loader)
+        step = run_step_row(session, run_id, "table_schema")
+        assert step.status == "failed"
+        assert step.message == (
+            "表结构未全部发布到 Milvus（成功 1 条 / 失败 2 条），请重新发布"
+        )
 
-@pytest.mark.parametrize("own_status", ["failed", "running"])
-def test_selected_step_itself_failed_is_job_not_publishable(
-    managed, monkeypatch, own_status
-):
-    """所选 table_schema 依赖的 md 步骤自身 failed/running：整个 Job 不可发布，409。"""
-    session = managed[0]
-    for step in session.steps:
-        if step.step_name == "md":
-            step.last_status = own_status
-    load = fake_loader(monkeypatch)
-    with _client() as client:
-        response = _post(client, ["table_schema"])
-    assert response.status_code == 409
-    assert response.json()["code"] == "job_not_publishable"
-    assert session.publishes == [] and not load.called
-
-
-def test_job_with_only_successful_rows_publishes_without_other_steps(
-    managed, monkeypatch
-):
-    """J02：只有 json/md（无 db/ddl）且全部 success 时 table_schema 可发布。"""
-    load = fake_loader(monkeypatch)
-    with _client() as client:
-        response = _post(client, ["table_schema"])
-    assert response.status_code == 200 and load.called
-
-
-def test_job_state_rechecked_under_source_lock_per_item(managed, monkeypatch):
-    """锁下复查：创建发布 ID 后其他步骤变为 failed，该项不执行替换，按逐项失败记录。"""
-    session = managed[0]
-    ddl_row = SimpleNamespace(
-        job_id=JOB_ID,
-        source_id=SOURCE_ID,
-        step_name="ddl",
-        last_status="success",
-        updated_at=RUN_MARKER,
-    )
-    session.steps.append(ddl_row)
-    load = fake_loader(monkeypatch)
-    original = publish_service.lock_db_source_row
-
-    def flip_after_lock(sess, source_id):
-        ddl_row.last_status = "failed"
-        return original(sess, source_id)
-
-    monkeypatch.setattr(publish_service, "lock_db_source_row", flip_after_lock)
-    with _client() as client:
-        response = _post(client, ["table_schema"])
-    assert response.status_code == 200
-    result = response.json()["results"][0]
-    assert result["status"] == "failed" and not load.called
-    assert session.publishes and not session.publishes[-1].is_current_publish
-
-
-def test_precheck_and_execution_share_one_preparation_function(managed, monkeypatch):
-    """A10：预检与加载器 prepare_input 经同一函数解析；预检不触碰 Embedding / Milvus。"""
-    from backend.profile_loading import table_schema_loader as web_loader
-    from metaweave.core.table_schema import managed_input
-
-    calls = []
-    real = managed_input.prepare_managed_table_schema_input
-
-    def spy(*args, **kwargs):
-        calls.append(args[3])  # LoaderOptions
-        return real(*args, **kwargs)
-
-    monkeypatch.setattr(web_loader, "prepare_managed_table_schema_input", spy)
-    monkeypatch.setattr(managed_input, "prepare_managed_table_schema_input", spy)
-
-    assert web_loader.check_table_schema_output_ready(
-        SOURCE_ID, JOB_ID, RUN_MARKER, "ordersdb"
-    )
-    loader = make_loader()
-    loader.prepare_input(utc_isoformat(RUN_MARKER), "ordersdb")
-
-    assert len(calls) == 2
-    assert calls[0].include_columns is True and calls[0].skip_empty_desc is True
-    assert loader._milvus_client is None and loader._embedding_service is None
-
-
-def test_precheck_rejects_input_changed_after_it(managed):
-    """A10：输入在预检后变化，执行阶段重新读取并按同一规则拒绝，不沿用旧预检结果。"""
-    from backend.profile_loading import table_schema_loader as web_loader
-
-    assert web_loader.check_table_schema_output_ready(
-        SOURCE_ID, JOB_ID, RUN_MARKER, "ordersdb"
-    )
-    md = next(managed[2].glob("*.md"))
-    md.write_text("# x\n## 字段列表\n- order_id (integer) - ID\n", encoding="utf-8")
-    assert not web_loader.check_table_schema_output_ready(
-        SOURCE_ID, JOB_ID, RUN_MARKER, "ordersdb"
-    )
-    loader = make_loader()
-    with pytest.raises(ValueError):
-        loader.prepare_input(utc_isoformat(RUN_MARKER), "ordersdb")
+    def test_md_deleted_after_precheck_is_blocked(self, monkeypatch, tmp_path):
+        write_managed(tmp_path)
+        session = install(monkeypatch, tmp_path, FakeSession(steps=("table_schema",)))
+        loader = FakeVectorLoader()
+        monkeypatch.setattr(
+            publish_service, "build_table_schema_loader", lambda *a: loader
+        )
+        monkeypatch.setattr(
+            publish_service,
+            "_milvus_collection",
+            lambda _key: "table_schema_embeddings",
+        )
+        result = create_publish_run(
+            SETTINGS,
+            PUBLISH_JOB_ID,
+            revision_no=1,
+            mode="custom",
+            steps=["table_schema"],
+            step_config=None,
+        )
+        run_id = UUID(result["publish_run_id"])
+        # 预检通过后、执行前：MD 文件被删除 → 执行期复查（同一函数）拒绝
+        next(step_dir(tmp_path, "md").glob("*.md")).unlink()
+        execute_publish_run(SETTINGS, run_id)
+        step = run_step_row(session, run_id, "table_schema")
+        assert step.status == "blocked"
+        assert step.started_at is None
+        assert "缺失或不匹配" in step.message
+        assert loader.load_calls == 0

@@ -1,7 +1,9 @@
 import asyncio
 
 
-def _make_service_without_init(retry_times: int, retry_delay: float, async_concurrency: int = 1):
+def _make_service_without_init(
+    retry_times: int, retry_delay: float, async_concurrency: int = 1
+):
     from metaweave.services.llm_service import LLMService
 
     service = object.__new__(LLMService)
@@ -62,4 +64,3 @@ def test_batch_call_llm_async_retries_then_gives_empty(monkeypatch):
     assert results == [(0, "")]
     assert call_count["p1"] == 3  # 1 次调用 + 2 次重试
     assert sleep_calls == [2, 2]
-

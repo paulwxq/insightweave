@@ -63,7 +63,6 @@ def _resolve_registration_and_apply(cfg, source_id: str, *, json_mode: bool = Fa
 
 def _validate_source_id_arg(raw: str | None) -> str:
     """校验 --source-id 为合法 UUID（doc 4 §3.2：不自动选源、不回退）。"""
-    import uuid as _uuid
 
     if not raw:
         print(
@@ -73,9 +72,13 @@ def _validate_source_id_arg(raw: str | None) -> str:
         )
         raise SystemExit(2)
     try:
-        return str(_uuid.UUID(raw.strip()))
+        from src.modules.db_deepagent.source_registry import (
+            normalize_short_source_id,
+        )
+
+        return normalize_short_source_id(raw)
     except ValueError:
-        print(f"--source-id 不是合法 UUID: {raw!r}", file=sys.stderr)
+        print(f"--source-id 不是合法短 ID（形如 db_src_1）: {raw!r}", file=sys.stderr)
         raise SystemExit(2) from None
 
 
@@ -262,9 +265,12 @@ def _check_source_scoped(source_id: str) -> tuple[bool, str]:
     完整就绪验收。来源登记核验（db_source_info 存在性）由 doc 2 装配层
     承接，此处仅做 UUID 格式校验（差异见交付说明）。
     """
-    import uuid as _uuid
 
-    sid = str(_uuid.UUID(source_id))
+    from src.modules.db_deepagent.source_registry import (
+        normalize_short_source_id,
+    )
+
+    sid = normalize_short_source_id(source_id)
     parts: list[str] = []
 
     cfg, _profile, _embedding, milvus = _build_embedding_and_milvus(sid)

@@ -28,7 +28,11 @@ class FakeNameSimilarityService:
     comment_channel = FakeCommentChannel()
 
     def compare_columns(self, source_cols, target_cols):
-        return 1.0 if [c.lower() for c in source_cols] == [c.lower() for c in target_cols] else 0.0
+        return (
+            1.0
+            if [c.lower() for c in source_cols] == [c.lower() for c in target_cols]
+            else 0.0
+        )
 
 
 class TestRelationshipScorer:
@@ -41,7 +45,7 @@ class TestRelationshipScorer:
         connector.execute_query.return_value = [
             {"col1": "value1"},
             {"col1": "value2"},
-            {"col1": "value3"}
+            {"col1": "value3"},
         ]
         return connector
 
@@ -63,8 +67,7 @@ class TestRelationshipScorer:
         assert score == 1.0
 
         score = scorer._calculate_name_similarity(
-            ["store_id", "date_day"],
-            ["store_id", "date_day"]
+            ["store_id", "date_day"], ["store_id", "date_day"]
         )
         assert score == 1.0
 
@@ -74,13 +77,18 @@ class TestRelationshipScorer:
 
         assert scorer._score_comment_pair("store_id", None, "store_id", None) == 0.3
         assert scorer._score_comment_pair("user_id", None, "company_id", None) == 0.3
-        assert scorer._score_comment_pair("store_id", "门店编号", "store_id", "门店标识") == 0.3
+        assert (
+            scorer._score_comment_pair("store_id", "门店编号", "store_id", "门店标识")
+            == 0.3
+        )
 
     def test_calculate_comment_similarity_degraded_mode_uses_fallback(self, scorer):
         """整列 comment_similarity 在降级模式下同样用 fallback。"""
         score = scorer._calculate_comment_similarity(
-            ["store_id"], {"store_id": {"comment": None}},
-            ["store_id"], {"store_id": {"comment": None}},
+            ["store_id"],
+            {"store_id": {"comment": None}},
+            ["store_id"],
+            {"store_id": {"comment": None}},
         )
         assert score == 0.3
 
@@ -99,6 +107,7 @@ class TestRelationshipScorer:
 
     def test_comment_similarity_disabled_channel_uses_fallback(self, mock_connector):
         """comment_channel.enabled: false 时 comment 用 fallback，名称仍独立计分。"""
+
         class DisabledCommentChannel:
             enabled = False
 
@@ -112,14 +121,24 @@ class TestRelationshipScorer:
             comment_channel = DisabledCommentChannel()
 
             def compare_columns(self, source_cols, target_cols):
-                return 1.0 if [c.lower() for c in source_cols] == [c.lower() for c in target_cols] else 0.0
+                return (
+                    1.0
+                    if [c.lower() for c in source_cols]
+                    == [c.lower() for c in target_cols]
+                    else 0.0
+                )
 
         config = {"weights": dict(FIVE_DIM_WEIGHTS)}
         scorer = RelationshipScorer(config, mock_connector, FakeService())
 
-        assert scorer._score_comment_pair("store_id", "门店编号", "store_id", "门店标识") == 0.3
+        assert (
+            scorer._score_comment_pair("store_id", "门店编号", "store_id", "门店标识")
+            == 0.3
+        )
         assert scorer._score_comment_pair("store_id", None, "store_id", None) == 0.3
-        assert scorer._score_comment_pair("user_id", "用户", "company_id", "公司") == 0.3
+        assert (
+            scorer._score_comment_pair("user_id", "用户", "company_id", "公司") == 0.3
+        )
         assert scorer._calculate_name_similarity(["store_id"], ["store_id"]) == 1.0
         assert scorer._calculate_name_similarity(["user_id"], ["company_id"]) == 0.0
 
@@ -159,12 +178,14 @@ class TestRelationshipScorer:
 
     def test_old_four_dim_weights_rejected(self, mock_connector):
         """旧四维 weights 与五维 score_details 不一致时该候选不计分。"""
-        config = {"weights": {
-            "inclusion_rate": 0.50,
-            "comment_similarity": 0.20,
-            "type_compatibility": 0.20,
-            "jaccard_index": 0.10,
-        }}
+        config = {
+            "weights": {
+                "inclusion_rate": 0.50,
+                "comment_similarity": 0.20,
+                "type_compatibility": 0.20,
+                "jaccard_index": 0.10,
+            }
+        }
         scorer = RelationshipScorer(config, mock_connector)
         scorer._sample_and_calculate_inclusion = Mock(
             return_value=(1.0, 1.0, 0.5, 1.0, 1.0, 1.0)
@@ -190,17 +211,12 @@ class TestRelationshipScorer:
         source_columns = ["store_id"]
         target_columns = ["store_id"]
 
-        source_profiles = {
-            "store_id": {"data_type": "integer"}
-        }
+        source_profiles = {"store_id": {"data_type": "integer"}}
 
-        target_profiles = {
-            "store_id": {"data_type": "integer"}
-        }
+        target_profiles = {"store_id": {"data_type": "integer"}}
 
         score = scorer._calculate_type_compatibility(
-            source_columns, source_profiles,
-            target_columns, target_profiles
+            source_columns, source_profiles, target_columns, target_profiles
         )
         assert score == 1.0  # 完全相同类型
 
@@ -210,7 +226,7 @@ class TestRelationshipScorer:
             {"col1": "value1"},
             {"col1": "value2"},
             {"col1": "value1"},  # 重复
-            {"col1": None}        # NULL值
+            {"col1": None},  # NULL值
         ]
         columns = ["col1"]
 
@@ -229,7 +245,7 @@ class TestRelationshipScorer:
             {"col1": "val1", "col2": "val2"},
             {"col1": "val3", "col2": "val4"},
             {"col1": "val1", "col2": "val2"},  # 重复
-            {"col1": None, "col2": "val5"},    # 包含None
+            {"col1": None, "col2": "val5"},  # 包含None
         ]
         columns = ["col1", "col2"]
 
@@ -241,7 +257,6 @@ class TestRelationshipScorer:
         assert ("val3", "val4") in value_set
         # valid_count 应该是排除含 None 行后的有效行数（3行有效，含1行重复）
         assert valid_count == 3
-
 
 
 class TestSampleFailurePaths:
@@ -272,7 +287,8 @@ class TestSampleFailurePaths:
     def test_all_null_rows_returns_conservative_tuple(self):
         connector = Mock()
         connector.execute_query.return_value = [
-            {"id": None}, {"id": None},
+            {"id": None},
+            {"id": None},
         ]
         scorer = self._make_scorer(connector)
         result = scorer._sample_and_calculate_inclusion(

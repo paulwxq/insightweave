@@ -1,112 +1,185 @@
-"""doc 22.2 任务 3+4：dim_value 预检、三态拦截与发布执行的单元测试。
+"""dim_value 发布（doc 22.2、6.2 §8）：三态拦截、预检载荷与执行链。
 
-覆盖 §11 分配到 publish 层的验收：A09（预检）、A10/A11/A17（拦截三态与放行）、
-A12（执行成功与 close）、A13（run_marker 复查）、A14（替换中途/未开始失败）、
-A20（同一份配置内容传递）、A21（枚举与显式分支）、A22（错误出口经 TestClient）、
-A23（登记库名与版本）、A25（拦截顺序）、A28（文案分派六行表）。
+三态拦截（配置无效/零表/未配置 embedding_col）落在集中预检：整单
+PublishPrecheckError、不创建运行；`classify_dim_tables_yaml` 的归一配置
+经 `check_step` payload 传给执行链（同一份配置，不经文件重读）。
 """
 
-from contextlib import contextmanager
-from datetime import datetime, timezone
-from types import SimpleNamespace
-from uuid import uuid4
+from uuid import UUID
 
 import pytest
 import yaml
-from fastapi.testclient import TestClient
 
-import backend.publishing.publish_service as publish_service
-from backend.profile_loading.dim_value_config_api import (
-    DimValueConfigInvalidError,
-    DimValueEmptyTablesError,
-    DimValueNotConfiguredError,
-)
-from backend.publishing.errors import (
-    JobNotPublishableError,
-    PublicationStepNotReadyError,
-)
+from backend.profile_loading.db_loader import MetaLoadConfigError
+from backend.publishing import publish_service
+from backend.publishing.precheck import PublishPrecheckError, check_step
 from backend.publishing.publish_service import (
-    RegistrationChangedError,
-    _publish_dim_value,
-    check_publication,
-    normalize_publish_steps,
-    publish_steps,
+    _dim_value_failure_summary,
+    create_publish_run,
+    execute_publish_run,
+)
+from tests.unit.test_publish_service import (
+    DB_NAME,
+    FakeSession,
+    PUBLISH_JOB_ID,
+    RUN,
+    SETTINGS,
+    SOURCE_ID,
+    WORKSPACE_ID,
+    install,
+    make_ready_db,
+    run_step_row,
+    step_dir,
+    write_marker,
 )
 
-SOURCE_ID = uuid4()
-JOB_ID = uuid4()
-DB_NAME = "orders"
-STEP_AT = datetime(2026, 10, 9, 1, 0, 0, tzinfo=timezone.utc)
-SETTINGS = SimpleNamespace(database_url="fake")
 
-YAML_DIR = SimpleNamespace(path=None)  # install 时指向 tmp 产物目录
-
-
-# ---- 公共假件 ----
+def write_dim_yaml(tmp_path, content):
+    dim_dir = step_dir(tmp_path, "dim")
+    dim_dir.mkdir(parents=True, exist_ok=True)
+    if content is not None:
+        (dim_dir / "dim_tables.yaml").write_text(content, encoding="utf-8")
+    return dim_dir
 
 
-class FakeSession:
-    def __init__(self, step_rows=None, source_row=None):
-        self.step_rows = step_rows or {}
-        self.source_row = source_row
-        self.added = []
-        self.executed = []
-
-    def get(self, model, key):
-        from backend.persistence.models import DbSourceInfo, JobInfo
-
-        if model is JobInfo:
-            step_name = key["step_name"] if isinstance(key, dict) else key
-            return self.step_rows.get(step_name)
-        if model is DbSourceInfo:
-            return self.source_row
-        raise AssertionError(f"unexpected model {model}")  # pragma: no cover
-
-    def commit(self):
-        return None
-
-    def rollback(self):
-        return None
+def dim_yaml(tables):
+    return yaml.safe_dump({"databases": {DB_NAME: {"tables": tables}}})
 
 
-def _source_row(updated_at=STEP_AT):
-    return SimpleNamespace(
-        source_id=SOURCE_ID,
-        db_name=DB_NAME,
-        is_active=True,
-        updated_at=updated_at,
-        host="h",
-        port=5432,
-        username="u",
-        password_ciphertext="cipher",
-        sslmode=None,
-    )
+CONFIGURED_YAML = dim_yaml({"public.t1": {"embedding_col": "name"}})
 
 
-def _step_row(status="success", updated_at=STEP_AT, step="dim_config"):
-    return SimpleNamespace(
-        job_id=JOB_ID, step_name=step, last_status=status, updated_at=updated_at
-    )
+def dim_ready(tmp_path, content=CONFIGURED_YAML):
+    write_marker(tmp_path, "dim")
+    return write_dim_yaml(tmp_path, content)
 
 
-@contextmanager
-def _fake_session_ctx(session):
-    yield session
+# ---- check_step 三态与载荷 ----
+
+
+class TestCheckStepDimValue:
+    def test_ready_returns_normalized_config_payload(self, monkeypatch, tmp_path):
+        install(monkeypatch, tmp_path)
+        dim_ready(tmp_path)
+        result = check_step(None, SOURCE_ID, WORKSPACE_ID, "dim_value", db_name=DB_NAME)
+        assert result.ready is True and result.reason is None
+        assert result.input_files == (("dim/dim_tables.yaml", str(RUN)),)
+        payload = result.payload
+        assert payload.database == DB_NAME
+        assert payload.tables["public.t1"].embedding_col == "name"
+
+    def test_missing_yaml(self, monkeypatch, tmp_path):
+        install(monkeypatch, tmp_path)
+        write_marker(tmp_path, "dim")
+        write_dim_yaml(tmp_path, None)
+        result = check_step(None, SOURCE_ID, WORKSPACE_ID, "dim_value", db_name=DB_NAME)
+        assert result.ready is False
+        assert result.reason == "dim/dim_tables.yaml 缺失或不可读"
+
+    def test_invalid_yaml(self, monkeypatch, tmp_path):
+        install(monkeypatch, tmp_path)
+        dim_ready(tmp_path, "not: [valid\n")
+        result = check_step(None, SOURCE_ID, WORKSPACE_ID, "dim_value", db_name=DB_NAME)
+        assert result.ready is False
+        assert "配置文件无效" in result.reason
+
+    def test_zero_tables(self, monkeypatch, tmp_path):
+        install(monkeypatch, tmp_path)
+        dim_ready(tmp_path, "databases: {}\n")
+        result = check_step(None, SOURCE_ID, WORKSPACE_ID, "dim_value", db_name=DB_NAME)
+        assert result.ready is False
+        assert result.reason == "dim_tables.yaml 没有任何维度表"
+
+    def test_unconfigured_embedding_col_lists_tables(self, monkeypatch, tmp_path):
+        install(monkeypatch, tmp_path)
+        content = dim_yaml(
+            {
+                "public.t1": {"embedding_col": "name"},
+                "public.t2": {"embedding_col": None},
+            }
+        )
+        dim_ready(tmp_path, content)
+        result = check_step(None, SOURCE_ID, WORKSPACE_ID, "dim_value", db_name=DB_NAME)
+        assert result.ready is False
+        assert "未配置有效 embedding_col" in result.reason
+        assert "public.t2" in result.reason and "public.t1" not in result.reason
+
+    def test_marker_missing_beats_file_check(self, monkeypatch, tmp_path):
+        install(monkeypatch, tmp_path)
+        write_dim_yaml(tmp_path, CONFIGURED_YAML)  # 有文件无 marker
+        result = check_step(None, SOURCE_ID, WORKSPACE_ID, "dim_value", db_name=DB_NAME)
+        assert result.ready is False
+        assert result.reason == "dim/ 目录没有采集 marker，产物不可用"
+
+
+# ---- 集中预检整单拦截（A24/A15） ----
+
+
+class TestPrecheckInterception:
+    def test_dim_not_configured_rejects_whole_request(self, monkeypatch, tmp_path):
+        """同选 db/dim_value/sql：db、sql 就绪，dim 未配置 → 整单 400、无业务记录。"""
+        from tests.unit.test_sql_publication import sql_ready
+
+        make_ready_db(tmp_path)
+        sql_ready(tmp_path)
+        dim_ready(tmp_path, "databases: {}\n")
+        session = install(
+            monkeypatch, tmp_path, FakeSession(steps=("db", "dim_value", "sql"))
+        )
+        with pytest.raises(PublishPrecheckError) as excinfo:
+            create_publish_run(
+                SETTINGS,
+                PUBLISH_JOB_ID,
+                revision_no=1,
+                mode="default",
+                steps=None,
+                step_config=None,
+            )
+        failures = excinfo.value.failures
+        assert [item["step"] for item in failures] == ["dim_value"]
+        assert "没有任何维度表" in failures[0]["reason"]
+        assert session.runs == [] and session.run_steps == []
+
+    def test_unselected_dim_not_ready_does_not_block(self, monkeypatch, tmp_path):
+        """只选 db/sql：dim 未就绪不阻断本次发布（预检只查所选步骤）。"""
+        from tests.unit.test_sql_publication import sql_ready
+
+        make_ready_db(tmp_path)
+        sql_ready(tmp_path)
+        dim_ready(tmp_path, "databases: {}\n")
+        session = install(
+            monkeypatch, tmp_path, FakeSession(steps=("db", "dim_value", "sql"))
+        )
+        result = create_publish_run(
+            SETTINGS,
+            PUBLISH_JOB_ID,
+            revision_no=1,
+            mode="custom",
+            steps=["db", "sql"],
+            step_config=None,
+        )
+        assert result["steps"] == ["db", "sql"]
+        assert len(session.run_steps) == 2
+
+
+# ---- 执行链（_publish_dim_value，受管 loader 注入） ----
 
 
 class FakeLoader:
-    calls: list = []
-    ctor_kwargs: dict = {}
+    """记录 build_dim_value_loader(source, password, workspace, run, dim_tables) 实参。"""
+
+    ctor_args: tuple = ()
     next_result: dict = {}
     validate_result: bool = True
+    calls: list = []
 
-    def __init__(self, **kwargs):
-        FakeLoader.ctor_kwargs = kwargs
+    def __init__(self, *args, **kwargs):
+        FakeLoader.ctor_args = args
 
     def validate(self):
         return FakeLoader.validate_result
 
-    def load(self, clean=False):
+    def load(self):
         FakeLoader.calls.append("load")
         return dict(FakeLoader.next_result)
 
@@ -115,616 +188,194 @@ class FakeLoader:
 
 
 @pytest.fixture(autouse=True)
-def _reset_fake():
-    FakeLoader.calls = []
-    FakeLoader.ctor_kwargs = {}
-    FakeLoader.next_result = {
-        "success": True,
-        "replacement_started": True,
-        "records_loaded": 3,
-    }
+def _reset_fake_loader():
+    FakeLoader.ctor_args = ()
+    FakeLoader.next_result = {"success": True, "records_loaded": 3}
     FakeLoader.validate_result = True
+    FakeLoader.calls = []
     yield
 
 
-class PublishRecorder:
-    def __init__(self):
-        self.inserted = []
-        self.cleared = []
-        self.stored_failures = []
-
-
-def install_publish(monkeypatch, tmp_path, session, recorder=None, dim_yaml=None):
-    """patch publish_service 命名空间：会话、锁、复查、登记行写、loader 构造。"""
-
-    recorder = recorder or PublishRecorder()
+def _install_loader(monkeypatch):
     monkeypatch.setattr(
-        publish_service, "platform_session", lambda s: _fake_session_ctx(session)
-    )
-    monkeypatch.setattr(
-        publish_service, "lock_db_source_row", lambda sess, sid: sess.source_row
-    )
-    monkeypatch.setattr(publish_service, "assert_workspace_owner", lambda *a, **k: None)
-    monkeypatch.setattr(
-        publish_service, "_verify_step_current_under_lock", lambda *a, **k: None
+        "backend.security.source_password.decrypt_password", lambda _c: "plain-pw"
     )
     monkeypatch.setattr(
         publish_service,
-        "insert_publish_row",
-        lambda sess, pid, sid, jid, step, status, error_summary=None, is_current=False: (
-            recorder.inserted.append(
-                {
-                    "step": step,
-                    "status": status,
-                    "summary": error_summary,
-                    "current": is_current,
-                }
-            )
-        ),
+        "build_dim_value_loader",
+        lambda *a, **kwargs: FakeLoader(*a, **kwargs),
     )
     monkeypatch.setattr(
-        publish_service,
-        "clear_current",
-        lambda sess, sid, step: recorder.cleared.append(step),
-    )
-    monkeypatch.setattr(
-        publish_service,
-        "_store_failure",
-        lambda settings, sid, jid, pid, step, summary, revoke_current=False: (
-            recorder.stored_failures.append(
-                {"step": step, "summary": summary, "revoke": revoke_current}
-            )
-            or SimpleNamespace(
-                step=step, status="failed", message=summary, finished_at="t"
-            )
-        ),
-    )
-    monkeypatch.setattr(
-        "backend.profile_loading.dim_value_loader.decrypt_password",
-        lambda _c: "plain-pw",
-    )
-    # 编辑 API 服务函数在 config_api 模块命名空间持有自己的 session/resolve 绑定
-    import backend.profile_loading.dim_value_config_api as config_api
-
-    monkeypatch.setattr(
-        config_api, "platform_session", lambda s: _fake_session_ctx(session)
-    )
-    root = tmp_path / str(SOURCE_ID) / str(JOB_ID) / "dim_config"
-    root.mkdir(parents=True, exist_ok=True)
-    monkeypatch.setattr(config_api, "resolve_dim_config_output_dir", lambda s, j: root)
-    monkeypatch.setattr(
-        config_api,
-        "resolve_json_output_dir",
-        lambda s, j: tmp_path / str(SOURCE_ID) / str(JOB_ID) / "json",
-    )
-    monkeypatch.setattr(
-        "backend.profile_loading.dim_value_loader.build_dim_value_loader",
-        lambda source, password, job_id, publish_id, dim_tables: FakeLoader(
-            source=source,
-            password=password,
-            job_id=job_id,
-            publish_id=publish_id,
-            dim_tables=dim_tables,
-        ),
-    )
-    if dim_yaml is not None:
-        (root / "dim_tables.yaml").write_text(dim_yaml, encoding="utf-8")
-        monkeypatch.setattr(
-            publish_service,
-            "resolve_dim_config_output_dir",
-            lambda s, j: root,
-        )
-    return recorder
-
-
-def _full_config_yaml(db=DB_NAME, col="name"):
-    return yaml.safe_dump(
-        {"databases": {db: {"tables": {"public.t1": {"embedding_col": col}}}}}
+        publish_service, "_milvus_collection", lambda _key: "dim_value_embeddings"
     )
 
 
-def _install_steps(monkeypatch, dim_status="success", marker=STEP_AT, admission=None):
-    """patch 预检/拦截前置：_INSPECTORS、登记快照、准入。"""
-
-    def inspector(sess, sid, jid):
-        if dim_status == "missing":
-            return None, None
-        return dim_status, marker
-
-    monkeypatch.setattr(
-        publish_service, "_INSPECTORS", {publish_service.DIM_VALUE_STEP: inspector}
-    )
-    monkeypatch.setattr(
-        publish_service,
-        "read_registration_snapshot",
-        lambda sess, sid: SimpleNamespace(updated_at=STEP_AT, db_name=DB_NAME),
-    )
-    if admission is None:
-        monkeypatch.setattr(
-            publish_service, "_assert_job_admission", lambda *a, **k: None
-        )
-    else:
-        monkeypatch.setattr(publish_service, "_assert_job_admission", admission)
-    monkeypatch.setattr(publish_service, "_job_is_publishable", lambda *a, **k: True)
-
-
-# ---- A09/A21 预检 ----
-
-
-class TestCheckPublication:
-    def _install(
-        self, monkeypatch, tmp_path, step_rows, output_ready=True, job_ok=True
-    ):
-        # 预填全套步骤行（table_schema/json 分支会读其他行的 updated_at）
-        full_rows = {
-            step: _step_row(step=step)
-            for step in ("db", "ddl", "json", "md", "domain", "dim_config")
-        }
-        full_rows.update(step_rows or {})
-        session = FakeSession(step_rows=full_rows, source_row=_source_row())
-        monkeypatch.setattr(
-            publish_service, "platform_session", lambda s: _fake_session_ctx(session)
-        )
-        monkeypatch.setattr(
-            publish_service, "_job_is_publishable", lambda *a, **k: job_ok
-        )
-        monkeypatch.setattr(
-            publish_service,
-            "check_dim_value_output_ready",
-            lambda sid, jid: output_ready,
-        )
-
-        # 其余五步的 inspector 与登记快照全部替换为最小假件（本测试只断言 dim_value 条目）
-        def make_inspector(step_col):
-            def inspector(sess, _sid, _jid):
-                row = sess.step_rows.get(step_col)
-                if row is None:
-                    return None, None
-                return row.last_status, row.updated_at
-
-            return inspector
-
-        monkeypatch.setattr(
-            publish_service,
-            "_INSPECTORS",
-            {
-                publish_service.DB_STEP: make_inspector("db"),
-                publish_service.DDL_STEP: make_inspector("ddl"),
-                publish_service.JSON_STEP: make_inspector("json"),
-                publish_service.DOMAIN_STEP: make_inspector("domain"),
-                publish_service.REL_STEP: make_inspector("rel"),
-                publish_service.TABLE_SCHEMA_STEP: make_inspector("md"),
-                publish_service.DIM_VALUE_STEP: make_inspector("dim_config"),
-                publish_service.SQL_STEP: make_inspector("sql"),
-            },
-        )
-        monkeypatch.setattr(
-            publish_service,
-            "read_registration_snapshot",
-            lambda sess, sid: SimpleNamespace(updated_at=STEP_AT, db_name=DB_NAME),
-        )
-        # db/ddl/json/domain/table_schema 的产物就绪检查：统一返回就绪，避免触碰真实路径
-        monkeypatch.setattr(
-            publish_service, "check_db_output_ready", lambda *a, **k: (True, None)
-        )
-        for name in (
-            "check_ddl_output_ready",
-            "check_json_output_ready",
-            "check_domain_output_ready",
-            "check_table_schema_output_ready",
-        ):
-            if hasattr(publish_service, name):
-                monkeypatch.setattr(publish_service, name, lambda *a, **k: True)
-        return session
-
-    def test_a09_publishable_when_success_and_file(self, monkeypatch, tmp_path):
-        self._install(monkeypatch, tmp_path, {"dim_config": _step_row()})
-        result = check_publication(SETTINGS, SOURCE_ID, JOB_ID)
-        entry = next(s for s in result["steps"] if s["step_name"] == "dim_value")
-        assert entry["publishable"] is True
-        assert entry["reason"] is None
-
-    def test_a09_reasons_three_tiers(self, monkeypatch, tmp_path):
-        def dim_entry():
-            return next(
-                s
-                for s in check_publication(SETTINGS, SOURCE_ID, JOB_ID)["steps"]
-                if s["step_name"] == "dim_value"
-            )
-
-        # 行 failed → _JOB_REASONS
-        self._install(monkeypatch, tmp_path, {"dim_config": _step_row(status="failed")})
-        entry = dim_entry()
-        assert entry["publishable"] is False
-        assert entry["reason"] and entry["reason"] != "产物缺失或不可读"
-        # 整作业不可发布
-        self._install(monkeypatch, tmp_path, {"dim_config": _step_row()}, job_ok=False)
-        entry = dim_entry()
-        assert "不能发布" in entry["reason"]
-        # 产物缺失
-        self._install(
-            monkeypatch, tmp_path, {"dim_config": _step_row()}, output_ready=False
-        )
-        entry = dim_entry()
-        assert entry["reason"] == "产物不存在或不可用"
-
-    def test_a21_step_enum_in_schemas(self):
-        import typing
-
-        from backend.api import schemas
-
-        for model, field in (
-            (schemas.PublishCheckStep, "step_name"),
-            (schemas.PublicationStepResult, "step"),
-        ):
-            literal = model.model_fields[field].annotation
-            assert "dim_value" in typing.get_args(literal)
-
-    def test_normalize_whitelist_includes_dim_value(self):
-        assert normalize_publish_steps(["dim_value"]) == ["dim_value"]
-        with pytest.raises(Exception):
-            normalize_publish_steps(["dim_value", "nope"])
-
-
-# ---- A17/A25 三态拦截与顺序（publish_steps 层）----
-
-
-class TestInterception:
-    def _run(self, monkeypatch, tmp_path, dim_yaml, **kw):
-        session = FakeSession(
-            step_rows={"dim_config": _step_row()}, source_row=_source_row()
-        )
-        recorder = install_publish(monkeypatch, tmp_path, session, dim_yaml=dim_yaml)
-        _install_steps(monkeypatch, **kw)
-        executed = []
-        monkeypatch.setattr(
-            publish_service,
-            "_publish_dim_value",
-            lambda *a, **k: executed.append(a)
-            or {
-                "step": "dim_value",
-                "status": "success",
-                "message": "ok",
-                "finished_at": "t",
-            },
-        )
-        return recorder, executed
-
-    def test_a17_zero_tables_intercepts_whole_request(self, monkeypatch, tmp_path):
-        for content in (
-            "databases: {}\n",
-            yaml.safe_dump({"databases": {DB_NAME: {"tables": {}}}}),
-        ):
-            recorder, executed = self._run(monkeypatch, tmp_path, content)
-            with pytest.raises(DimValueEmptyTablesError):
-                publish_steps(SETTINGS, SOURCE_ID, JOB_ID, ["dim_value"])
-            assert executed == []
-            assert recorder.inserted == []  # 不生成发布记录
-
-    def test_a17_invalid_file_intercepts(self, monkeypatch, tmp_path):
-        self._run(monkeypatch, tmp_path, "not: [valid\n")
-        with pytest.raises(DimValueConfigInvalidError) as excinfo:
-            publish_steps(SETTINGS, SOURCE_ID, JOB_ID, ["dim_value"])
-        assert excinfo.value.details["reason"]
-
-    def test_a17_unconfigured_tables_intercepts(self, monkeypatch, tmp_path):
-        content = yaml.safe_dump(
-            {"databases": {DB_NAME: {"tables": {"public.t1": {"embedding_col": None}}}}}
-        )
-        self._run(monkeypatch, tmp_path, content)
-        with pytest.raises(DimValueNotConfiguredError) as excinfo:
-            publish_steps(SETTINGS, SOURCE_ID, JOB_ID, ["dim_value"])
-        assert excinfo.value.details["tables"] == ["public.t1"]
-
-    def test_a11_passes_injected_config_to_publisher(self, monkeypatch, tmp_path):
-        _, executed = self._run(monkeypatch, tmp_path, _full_config_yaml())
-        result = publish_steps(SETTINGS, SOURCE_ID, JOB_ID, ["dim_value"])
-        assert result["results"][0]["status"] == "success"
-        injected = executed[0][6]  # 第 7 参 dim_tables
-        assert injected.tables["public.t1"].embedding_col == "name"
-        assert injected.database == DB_NAME
-
-    def test_a20_registration_snapshot_passed(self, monkeypatch, tmp_path):
-        _, executed = self._run(monkeypatch, tmp_path, _full_config_yaml())
-        publish_steps(SETTINGS, SOURCE_ID, JOB_ID, ["dim_value"])
-        registration = executed[0][5]
-        assert registration.db_name == DB_NAME
-
-    def test_a25_job_not_publishable_wins(self, monkeypatch, tmp_path):
-        def deny(*a, **k):
-            raise JobNotPublishableError()
-
-        self._run(monkeypatch, tmp_path, "databases: {}\n", admission=deny)
-        with pytest.raises(JobNotPublishableError):
-            publish_steps(SETTINGS, SOURCE_ID, JOB_ID, ["dim_value"])
-
-    def test_a25_missing_step_row_step_not_ready(self, monkeypatch, tmp_path):
-        self._run(monkeypatch, tmp_path, "databases: {}\n", dim_status="missing")
-        with pytest.raises(PublicationStepNotReadyError):
-            publish_steps(SETTINGS, SOURCE_ID, JOB_ID, ["dim_value"])
-
-
-# ---- A12/A13/A14/A20/A23/A28 发布执行（_publish_dim_value 层）----
-
-
-def _dim_tables_cfg():
-    from metaweave.core.dim_value.models import DimTableConfig, DimTablesConfig
-
-    return DimTablesConfig(
-        database=DB_NAME,
-        tables={
-            "public.t1": DimTableConfig(
-                schema="public", table="t1", embedding_col="name"
-            )
-        },
-    )
-
-
-def _registration(updated_at=STEP_AT):
-    return SimpleNamespace(updated_at=updated_at, db_name=DB_NAME)
-
-
-def _run_publish_dim_value(
-    monkeypatch,
-    tmp_path,
-    *,
-    load_result=None,
-    validate=True,
-    registration=None,
-    verify=None,
-    source_updated_at=STEP_AT,
-):
-    session = FakeSession(
-        step_rows={"dim_config": _step_row()},
-        source_row=_source_row(updated_at=source_updated_at),
-    )
-    recorder = install_publish(monkeypatch, tmp_path, session)
-    if verify is not None:
-        monkeypatch.setattr(publish_service, "_verify_step_current_under_lock", verify)
-    FakeLoader.validate_result = validate
-    if load_result is not None:
-        FakeLoader.next_result = load_result
-    dim_tables = _dim_tables_cfg()
-    result = _publish_dim_value(
+def _publish_dim_value(monkeypatch, tmp_path):
+    dim_ready(tmp_path)
+    session = install(monkeypatch, tmp_path, FakeSession(steps=("dim_value",)))
+    _install_loader(monkeypatch)
+    result = create_publish_run(
         SETTINGS,
-        SOURCE_ID,
-        JOB_ID,
-        uuid4(),
-        STEP_AT,
-        registration or _registration(),
-        dim_tables,
+        PUBLISH_JOB_ID,
+        revision_no=1,
+        mode="custom",
+        steps=["dim_value"],
+        step_config=None,
     )
-    return result, recorder, dim_tables
+    run_id = UUID(result["publish_run_id"])
+    execute_publish_run(SETTINGS, run_id)
+    return session, run_id
 
 
-class TestPublishDimValue:
-    def test_a12_success_writes_current_and_closes(self, monkeypatch, tmp_path):
-        result, recorder, dim_tables = _run_publish_dim_value(monkeypatch, tmp_path)
-        assert result["status"] == "success"
-        assert recorder.cleared == ["dim_value"]  # clear 先行
-        assert recorder.inserted == [
-            {"step": "dim_value", "status": "success", "summary": None, "current": True}
-        ]
-        assert "close" in FakeLoader.calls  # A12：alias 不泄漏
-        # 构造参数：登记连接、注入配置
-        assert FakeLoader.ctor_kwargs["password"] == "plain-pw"
-        assert FakeLoader.ctor_kwargs["dim_tables"] is dim_tables
-        assert FakeLoader.ctor_kwargs["source"].db_name == DB_NAME
+class TestPublishDimValueExecution:
+    def test_success_uses_precheck_payload_not_file(self, monkeypatch, tmp_path):
+        session, run_id = _publish_dim_value(monkeypatch, tmp_path)
+        step = run_step_row(session, run_id, "dim_value")
+        assert step.status == "success"
+        assert step.message == "维度值已发布到 Milvus（3 条）"
+        # 注入的是预检归一后的同一份配置 + 解密密码（doc 22.2 §7.1）
+        source, password, workspace_id, publish_run_id, dim_tables = (
+            FakeLoader.ctor_args
+        )
+        assert source.db_name == DB_NAME
+        assert password == "plain-pw"
+        assert workspace_id == WORKSPACE_ID
+        assert publish_run_id == run_id
+        assert dim_tables.database == DB_NAME
+        assert dim_tables.tables["public.t1"].embedding_col == "name"
+        assert "close" in FakeLoader.calls
+        assert step.target_manifest["targets"][0]["type"] == "milvus"
 
-    def test_a13_run_marker_changed_rejected(self, monkeypatch, tmp_path):
-        def verify(*a, **k):
-            raise PublicationStepNotReadyError()
+    def test_validate_failure_message(self, monkeypatch, tmp_path):
+        FakeLoader.validate_result = False
+        session, run_id = _publish_dim_value(monkeypatch, tmp_path)
+        step = run_step_row(session, run_id, "dim_value")
+        assert step.status == "failed"
+        assert step.message == "维度值发布失败：Milvus、源库或 Embedding 服务不可用"
+        assert "close" in FakeLoader.calls
 
-        with pytest.raises(PublicationStepNotReadyError):
-            _run_publish_dim_value(monkeypatch, tmp_path, verify=verify)
+    def test_load_failure_summary(self, monkeypatch, tmp_path):
+        FakeLoader.next_result = {
+            "success": False,
+            "error_kind": "embedding",
+            "records_loaded": 1,
+            "records_failed": 2,
+            "records_unconfirmed": 0,
+        }
+        session, run_id = _publish_dim_value(monkeypatch, tmp_path)
+        step = run_step_row(session, run_id, "dim_value")
+        assert step.status == "failed"
+        assert step.message == (
+            "维度值未全部发布到 Milvus（成功 1 条 / 失败 2 条），请重新发布"
+        )
 
-    def test_a23_registration_changed_rejected_before_any_query(
-        self, monkeypatch, tmp_path
-    ):
-        with pytest.raises(RegistrationChangedError):
-            _run_publish_dim_value(
-                monkeypatch,
-                tmp_path,
-                registration=_registration(
-                    updated_at=datetime(2020, 1, 1, tzinfo=timezone.utc)
-                ),
-                source_updated_at=STEP_AT,
-            )
-        assert FakeLoader.calls == []  # 未构造 loader、零源库查询
+    def test_loader_crash_is_generic_failure(self, monkeypatch, tmp_path):
+        class ExplodingLoader(FakeLoader):
+            def load(self):
+                raise RuntimeError("milvus down")
 
-    def test_a14_midway_failure_revokes_current(self, monkeypatch, tmp_path):
-        result, recorder, _ = _run_publish_dim_value(
-            monkeypatch,
-            tmp_path,
-            load_result={
+        monkeypatch.setattr(
+            "backend.security.source_password.decrypt_password", lambda _c: "plain-pw"
+        )
+        monkeypatch.setattr(
+            publish_service,
+            "build_dim_value_loader",
+            lambda *a, **kwargs: ExplodingLoader(**kwargs),
+        )
+        monkeypatch.setattr(
+            publish_service, "_milvus_collection", lambda _key: "dim_value_embeddings"
+        )
+        dim_ready(tmp_path)
+        session = install(monkeypatch, tmp_path, FakeSession(steps=("dim_value",)))
+        result = create_publish_run(
+            SETTINGS,
+            PUBLISH_JOB_ID,
+            revision_no=1,
+            mode="custom",
+            steps=["dim_value"],
+            step_config=None,
+        )
+        execute_publish_run(SETTINGS, UUID(result["publish_run_id"]))
+        step = run_step_row(session, UUID(result["publish_run_id"]), "dim_value")
+        assert step.status == "failed"
+        assert step.message == "发布执行失败（RuntimeError）"
+
+    def test_disabled_source_blocks_at_execution(self, monkeypatch, tmp_path):
+        dim_ready(tmp_path)
+        session = install(monkeypatch, tmp_path, FakeSession(steps=("dim_value",)))
+        _install_loader(monkeypatch)
+        result = create_publish_run(
+            SETTINGS,
+            PUBLISH_JOB_ID,
+            revision_no=1,
+            mode="custom",
+            steps=["dim_value"],
+            step_config=None,
+        )
+        run_id = UUID(result["publish_run_id"])
+        session.source.is_active = False
+        execute_publish_run(SETTINGS, run_id)
+        step = run_step_row(session, run_id, "dim_value")
+        assert step.status == "blocked"
+        assert "禁用" in step.message
+        assert FakeLoader.calls == []
+
+    def test_workspace_mismatch_fails_requirement(self, monkeypatch, tmp_path):
+        from types import SimpleNamespace
+
+        from backend.profile_loading.db_loader import require_workspace_source
+
+        session = FakeSession()
+        session.workspace = SimpleNamespace(
+            workspace_id=WORKSPACE_ID, source_id="db_src_9"
+        )
+        install(monkeypatch, tmp_path, session)
+        with pytest.raises(MetaLoadConfigError, match="工作区不属于该数据源"):
+            require_workspace_source(session, WORKSPACE_ID, SOURCE_ID)
+
+
+# ---- 失败文案分派（doc 22.2 §11 A28 六行表） ----
+
+
+class TestFailureSummary:
+    def test_schema_mismatch_hint(self):
+        message = _dim_value_failure_summary({"error_kind": "schema_mismatch"})
+        assert "手动删除该集合" in message
+
+    def test_unconfirmed_counts(self):
+        message = _dim_value_failure_summary(
+            {
                 "success": False,
-                "replacement_started": True,
                 "error_kind": "embedding",
                 "records_loaded": 1,
                 "records_failed": 2,
-                "records_unconfirmed": 0,
-            },
-        )
-        assert result["status"] == "failed"
-        assert recorder.cleared == ["dim_value"]  # 撤销旧 current
-        assert recorder.inserted[0]["status"] == "failed"
-        assert recorder.inserted[0]["current"] is False
-
-    def test_a14_not_started_failure_keeps_current(self, monkeypatch, tmp_path):
-        result, recorder, _ = _run_publish_dim_value(
-            monkeypatch,
-            tmp_path,
-            load_result={
-                "success": False,
-                "replacement_started": False,
-                "error_kind": "schema_mismatch",
-            },
-        )
-        assert result["status"] == "failed"
-        assert recorder.cleared == []  # 旧 current 保留（不 clear）
-        # 仅失败行：写入失败行但不置 current
-        assert recorder.inserted == [
-            {
-                "step": "dim_value",
-                "status": "failed",
-                "summary": "dim_value_embeddings 集合结构为旧版本，请手动删除该集合后重新发布",
-                "current": False,
+                "records_unconfirmed": 3,
             }
-        ]
-
-    def test_a28_message_dispatch(self, monkeypatch, tmp_path):
-        cases = [
-            # (load_result, expected_summary_part)
-            (
-                {
-                    "success": False,
-                    "replacement_started": True,
-                    "error_kind": "embedding",
-                    "records_loaded": 1,
-                    "records_failed": 2,
-                    "records_unconfirmed": 0,
-                },
-                "成功 1 条 / 失败 2 条",
-            ),
-            (
-                {
-                    "success": False,
-                    "replacement_started": True,
-                    "error_kind": "embedding",
-                    "records_loaded": 1,
-                    "records_failed": 2,
-                    "records_unconfirmed": 3,
-                },
-                "另有 3 条写入结果未确认",
-            ),
-            (
-                {
-                    "success": False,
-                    "replacement_started": False,
-                    "error_kind": "schema_mismatch",
-                },
-                "手动删除该集合",
-            ),
-            (
-                {
-                    "success": False,
-                    "replacement_started": False,
-                    "error_kind": "source",
-                    "failed_table": "public.t1",
-                    "error_summary": "relation 不存在",
-                },
-                "public.t1：relation 不存在",
-            ),
-            (
-                {"success": False, "replacement_started": False, "error_kind": "input"},
-                "dim_config 产物",
-            ),
-        ]
-        for load_result, part in cases:
-            _, recorder, _ = _run_publish_dim_value(
-                monkeypatch, tmp_path, load_result=load_result
-            )
-            summary = (recorder.inserted or recorder.stored_failures)[0]["summary"]
-            assert part in summary, f"文案应含 {part!r}，实际 {summary!r}"
-
-    def test_a28_validate_failure_uses_service_message(self, monkeypatch, tmp_path):
-        _, recorder, _ = _run_publish_dim_value(monkeypatch, tmp_path, validate=False)
-        summary = (recorder.inserted or recorder.stored_failures)[0]["summary"]
-        assert "Milvus、源库或 Embedding" in summary
-
-    def test_a20_injected_config_used_not_file(self, monkeypatch, tmp_path):
-        # 注入对象恒为发布输入；文件内容与本用例无关（PUT 改写由注入兜住）
-        result, _, dim_tables = _run_publish_dim_value(monkeypatch, tmp_path)
-        assert result["status"] == "success"
-        assert FakeLoader.ctor_kwargs["dim_tables"] is dim_tables
-
-
-# ---- A22 错误出口（TestClient）----
-
-
-class TestErrorOutlet:
-    def test_a22_three_codes_via_testclient(self, monkeypatch, tmp_path):
-        import backend.api.main as api_main
-
-        app = api_main.create_app()
-        client = TestClient(app, raise_server_exceptions=False)
-
-        session = FakeSession(
-            step_rows={"dim_config": _step_row()}, source_row=_source_row()
         )
-        install_publish(monkeypatch, tmp_path, session)
-        _install_steps(monkeypatch)
+        assert "成功 1 条 / 失败 2 条" in message
+        assert "另有 3 条写入结果未确认" in message
 
-        base = "/api/data-sources/{}/collection-jobs/{}".format(SOURCE_ID, JOB_ID)
-
-        # 零表
-        root = tmp_path / str(SOURCE_ID) / str(JOB_ID) / "dim_config"
-        root.mkdir(parents=True, exist_ok=True)
-        (root / "dim_tables.yaml").write_text("databases: {}\n", encoding="utf-8")
-        monkeypatch.setattr(
-            publish_service, "resolve_dim_config_output_dir", lambda s, j: root
+    def test_source_failure_names_table(self):
+        message = _dim_value_failure_summary(
+            {
+                "success": False,
+                "error_kind": "source",
+                "failed_table": "public.t1",
+                "error_summary": "relation 不存在",
+            }
         )
-        resp = client.post(base + "/publications", json={"steps": ["dim_value"]})
-        assert resp.status_code == 400
-        body = resp.json()
-        assert body["code"] == "dim_value_empty_tables"
-        assert body["details"] == {}
+        assert "public.t1" in message and "relation 不存在" in message
 
-        # 无效文件
-        (root / "dim_tables.yaml").write_text("not: [valid\n", encoding="utf-8")
-        resp = client.post(base + "/publications", json={"steps": ["dim_value"]})
-        assert resp.status_code == 400
-        assert resp.json()["code"] == "dim_value_config_invalid"
-        assert resp.json()["details"]["reason"]
-
-        # 未配置
-        (root / "dim_tables.yaml").write_text(
-            yaml.safe_dump(
-                {
-                    "databases": {
-                        DB_NAME: {"tables": {"public.t1": {"embedding_col": None}}}
-                    }
-                }
-            ),
-            encoding="utf-8",
+    def test_input_failure(self):
+        assert (
+            _dim_value_failure_summary({"success": False, "error_kind": "input"})
+            == "维度值发布输入不可用，请检查 dim 产物"
         )
-        resp = client.post(base + "/publications", json={"steps": ["dim_value"]})
-        assert resp.status_code == 400
-        body = resp.json()
-        assert body["code"] == "dim_value_not_configured"
-        assert body["details"]["tables"] == ["public.t1"]
-        assert body["message"]
 
-    def test_put_dim_config_response_has_no_version(self, monkeypatch, tmp_path):
-        """PUT 成功响应只含 tables（§5.2 第 5 步），response_model 不得要求 version。"""
-
-        import backend.api.main as api_main
-
-        app = api_main.create_app()
-        client = TestClient(app, raise_server_exceptions=False)
-
-        session = FakeSession(
-            step_rows={"dim_config": _step_row()}, source_row=_source_row()
+    def test_plain_counts(self):
+        message = _dim_value_failure_summary(
+            {"success": False, "records_loaded": 1, "records_failed": 2}
         )
-        install_publish(monkeypatch, tmp_path, session)
-        base = "/api/data-sources/{}/collection-jobs/{}".format(SOURCE_ID, JOB_ID)
-
-        resp = client.put(
-            base + "/dim-config",
-            json={
-                "tables": [
-                    {
-                        "schema_name": "public",
-                        "object_name": "t1",
-                        "embedding_col": "name",
-                    }
-                ],
-                "version": STEP_AT.isoformat(),
-            },
+        assert (
+            message == "维度值未全部发布到 Milvus（成功 1 条 / 失败 2 条），请重新发布"
         )
-        assert resp.status_code == 200, resp.text
-        body = resp.json()
-        assert body["tables"] == [
-            {"schema_name": "public", "object_name": "t1", "embedding_col": "name"}
-        ]
-        assert "version" not in body

@@ -8,7 +8,9 @@ docs/update/15_rel与rel_llm候选生成统一改造设计.md §3.7/§6.1）。
 
 import pytest
 
-from metaweave.core.relationships.llm_relationship_discovery import LLMRelationshipDiscovery
+from metaweave.core.relationships.llm_relationship_discovery import (
+    LLMRelationshipDiscovery,
+)
 
 
 @pytest.fixture
@@ -92,8 +94,12 @@ def test_canonicalization_scenario_id_consistency(empty_config):
         "to_column": "Col_2",
     }
 
-    norm_lower = discovery._canonicalize_candidate_identifiers([candidate_lower], tables)[0]
-    norm_drifted = discovery._canonicalize_candidate_identifiers([candidate_drifted.copy()], tables)[0]
+    norm_lower = discovery._canonicalize_candidate_identifiers(
+        [candidate_lower], tables
+    )[0]
+    norm_drifted = discovery._canonicalize_candidate_identifiers(
+        [candidate_drifted.copy()], tables
+    )[0]
 
     assert norm_lower == norm_drifted
 

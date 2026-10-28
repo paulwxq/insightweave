@@ -20,7 +20,9 @@ from metaweave.core.metadata.connector import DatabaseConnector
 from metaweave.core.relationships.models import RelationshipDiscoveryResult
 from metaweave.core.relationships.repository import MetadataRepository
 from metaweave.core.relationships.candidate_generator import CandidateGenerator
-from metaweave.core.relationships.llm_relationship_discovery import LLMRelationshipDiscovery
+from metaweave.core.relationships.llm_relationship_discovery import (
+    LLMRelationshipDiscovery,
+)
 from metaweave.core.relationships.scorer import RelationshipScorer
 from metaweave.core.relationships.decision_engine import DecisionEngine
 from metaweave.core.relationships.writer import RelationshipWriter
@@ -47,12 +49,12 @@ class RelationshipDiscoveryPipeline:
     """
 
     def __init__(
-            self,
-            config_path: Path,
-            domain_filter: Optional[str] = None,
-            cross_domain: bool = False,
-            domain_resolver: "Optional[Any]" = None,
-            config: Optional[Dict[str, Any]] = None,
+        self,
+        config_path: Path,
+        domain_filter: Optional[str] = None,
+        cross_domain: bool = False,
+        domain_resolver: "Optional[Any]" = None,
+        config: Optional[Dict[str, Any]] = None,
     ):
         """初始化关系发现管道
 
@@ -71,7 +73,9 @@ class RelationshipDiscoveryPipeline:
             if key in self.config and key not in self.rel_config:
                 self.rel_config[key] = self.config[key]
         # 关系评分阶段的数据库采样行数上限：统一使用 sampling.sample_size
-        self.rel_config["sample_size"] = (self.config.get("sampling") or {}).get("sample_size", 1000)
+        self.rel_config["sample_size"] = (self.config.get("sampling") or {}).get(
+            "sample_size", 1000
+        )
         self.embedding_config = self.config.get("embedding") or {}
 
         # Domain 相关（见 3.13：规则与 LLM 候选共用统一表对范围）
@@ -124,11 +128,15 @@ class RelationshipDiscoveryPipeline:
         # 必须先窄后宽地分开捕获，不能用一个 except Exception 把两种情况混在一起。
         name_sim_config = self.rel_config.get("name_similarity", {})
         try:
-            self.name_similarity_service = NameSimilarityService(name_sim_config, self.embedding_config)
+            self.name_similarity_service = NameSimilarityService(
+                name_sim_config, self.embedding_config
+            )
         except InvalidNameSimilarityConfig:
             raise
         except Exception as exc:
-            logger.warning("名称相似度服务初始化失败，按降级语义运行（同名短路/无注释闸）: %s", exc)
+            logger.warning(
+                "名称相似度服务初始化失败，按降级语义运行（同名短路/无注释闸）: %s", exc
+            )
             self.name_similarity_service = None
 
         # candidate_generator（统一规则+LLM候选生成器）
@@ -151,7 +159,9 @@ class RelationshipDiscoveryPipeline:
             )
 
         # scorer需要connector和config（传入关系配置）
-        self.scorer = RelationshipScorer(self.rel_config, self.connector, self.name_similarity_service)
+        self.scorer = RelationshipScorer(
+            self.rel_config, self.connector, self.name_similarity_service
+        )
 
         # decision_engine（传入top-level config）
         self.decision_engine = DecisionEngine(self.config)
@@ -232,7 +242,9 @@ class RelationshipDiscoveryPipeline:
             # Stage 1: JSON加载 + 外键直通
             logger.info("阶段1: 加载JSON元数据并提取外键直通关系")
             tables = self.repository.load_all_tables()
-            fk_relations, fk_relationship_ids = self.repository.collect_foreign_keys(tables)
+            fk_relations, fk_relationship_ids = self.repository.collect_foreign_keys(
+                tables
+            )
 
             if logger.isEnabledFor(logging.DEBUG):
                 logger.debug("表样例: %s", list(tables.keys())[:3])
@@ -246,17 +258,27 @@ class RelationshipDiscoveryPipeline:
 
             # 统一表对范围（见 3.13）
             table_pairs = self._resolve_table_pairs(tables)
-            logger.info(f"表对范围: {len(table_pairs)} 对（domain={self.domain_filter!r}, cross_domain={self.cross_domain}）")
+            logger.info(
+                f"表对范围: {len(table_pairs)} 对（domain={self.domain_filter!r}, cross_domain={self.cross_domain}）"
+            )
 
             # Stage 2a: （可选）LLM 候选产出
             llm_raw_candidates: List[Dict[str, Any]] = []
-            llm_stats = {"llm_total_pairs": 0, "llm_success_pairs": 0, "llm_failed_pairs": 0}
+            llm_stats = {
+                "llm_total_pairs": 0,
+                "llm_success_pairs": 0,
+                "llm_failed_pairs": 0,
+            }
             if self.llm_candidates_enabled and self.llm_producer is not None:
                 logger.info("阶段2a: LLM 候选产出（llm_candidates.enabled=true）")
                 try:
-                    llm_raw_candidates = self.llm_producer.run_discover(tables, table_pairs)
+                    llm_raw_candidates = self.llm_producer.run_discover(
+                        tables, table_pairs
+                    )
                 except Exception as exc:
-                    logger.error("LLM 候选产出整体失败，降级为纯规则管线: %s", exc, exc_info=True)
+                    logger.error(
+                        "LLM 候选产出整体失败，降级为纯规则管线: %s", exc, exc_info=True
+                    )
                     result.add_error(f"LLM 候选产出失败（已降级为纯规则管线）: {exc}")
                     llm_raw_candidates = []
                 llm_stats = {
@@ -266,16 +288,22 @@ class RelationshipDiscoveryPipeline:
                 }
                 logger.info(
                     "LLM 候选产出完成: 成功 %s/%s 个表对，失败 %s 个，原始候选 %s 个",
-                    llm_stats["llm_success_pairs"], llm_stats["llm_total_pairs"],
-                    llm_stats["llm_failed_pairs"], len(llm_raw_candidates),
+                    llm_stats["llm_success_pairs"],
+                    llm_stats["llm_total_pairs"],
+                    llm_stats["llm_failed_pairs"],
+                    len(llm_raw_candidates),
                 )
             else:
-                logger.info("阶段2a: LLM 候选已禁用（llm_candidates.enabled=false），纯规则管线")
+                logger.info(
+                    "阶段2a: LLM 候选已禁用（llm_candidates.enabled=false），纯规则管线"
+                )
 
             # Stage 2b: 规则池与 LLM 池独立生成（各自同向去重/最小键过滤/FK 排除）
             logger.info("阶段2b: 生成候选池（规则池 / LLM 池独立出口）")
             rule_pool, llm_pool = self.candidate_generator.generate_candidates(
-                tables, table_pairs, fk_relationship_ids,
+                tables,
+                table_pairs,
+                fk_relationship_ids,
                 llm_raw_candidates=llm_raw_candidates,
                 llm_top_k=self.llm_top_k,
             )
@@ -299,10 +327,14 @@ class RelationshipDiscoveryPipeline:
             logger.info("阶段3: 分开评分（规则池 / LLM 池，5维度 + 数据库采样）")
             scored_rule = self.scorer.score_candidates(rule_pool, tables)
             scored_llm = self.scorer.score_candidates(llm_pool, tables)
-            logger.info(f"评分完成: 规则 {len(scored_rule)} 个 / LLM {len(scored_llm)} 个")
+            logger.info(
+                f"评分完成: 规则 {len(scored_rule)} 个 / LLM {len(scored_llm)} 个"
+            )
 
             # Stage 3.5: 合并阶段（七步，doc 19 §3.3）
-            logger.info("阶段3.5: 合并阶段（纠偏 → 无向分组 → 基数 → 方向 → 规范重算 → 字段合并 → 生成 ID）")
+            logger.info(
+                "阶段3.5: 合并阶段（纠偏 → 无向分组 → 基数 → 方向 → 规范重算 → 字段合并 → 生成 ID）"
+            )
             merged_candidates = self._merge_scored_candidates(scored_rule, scored_llm)
             logger.info(f"合并完成: {len(merged_candidates)} 个")
             if logger.isEnabledFor(logging.DEBUG):
@@ -313,8 +345,8 @@ class RelationshipDiscoveryPipeline:
 
             # Stage 4: 决策过滤 + 抑制（输入 = 合并后的完整关系集）
             logger.info("阶段4: 决策过滤和抑制规则")
-            inferred_relations, suppressed, below_threshold = self.decision_engine.filter_and_suppress(
-                merged_candidates
+            inferred_relations, suppressed, below_threshold = (
+                self.decision_engine.filter_and_suppress(merged_candidates)
             )
 
             result.inferred_relations = len(inferred_relations)
@@ -329,7 +361,10 @@ class RelationshipDiscoveryPipeline:
             if logger.isEnabledFor(logging.DEBUG):
                 logger.debug(
                     "接受样例: %s",
-                    [self._format_relation_debug(rel) for rel in inferred_relations[:3]],
+                    [
+                        self._format_relation_debug(rel)
+                        for rel in inferred_relations[:3]
+                    ],
                 )
                 logger.debug(
                     "被抑制样例: %s",
@@ -361,8 +396,13 @@ class RelationshipDiscoveryPipeline:
                 **llm_stats,
             }
             output_files = self.writer.write_results(
-                all_relations, suppressed, self.config, tables,
-                generated_by=self.writer.generated_by_label(self.llm_candidates_enabled),
+                all_relations,
+                suppressed,
+                self.config,
+                tables,
+                generated_by=self.writer.generated_by_label(
+                    self.llm_candidates_enabled
+                ),
                 extra_statistics=extra_statistics,
             )
             for file_path in output_files:
@@ -402,8 +442,11 @@ class RelationshipDiscoveryPipeline:
 
     _EVIDENCE_RANK = {"physical": 2, "logical": 1, "llm": 0}
     _FIXED_SCORE_DIMS = (
-        "inclusion_rate", "name_similarity", "comment_similarity",
-        "type_compatibility", "jaccard_index",
+        "inclusion_rate",
+        "name_similarity",
+        "comment_similarity",
+        "type_compatibility",
+        "jaccard_index",
     )
 
     @staticmethod
@@ -430,15 +473,17 @@ class RelationshipDiscoveryPipeline:
 
         (doc 19 §3.2.2:不新增 DB 查询、不暴露样本集合)
         """
-        candidate["source"], candidate["target"] = candidate["target"], candidate["source"]
+        candidate["source"], candidate["target"] = (
+            candidate["target"],
+            candidate["source"],
+        )
         candidate["source_columns"], candidate["target_columns"] = (
-            candidate["target_columns"], candidate["source_columns"],
+            candidate["target_columns"],
+            candidate["source_columns"],
         )
         score_details = dict(candidate.get("score_details") or {})
         old_inclusion = float(score_details.get("inclusion_rate", 0.0))
-        new_inclusion = float(
-            candidate.get("_reverse_inclusion_rate", old_inclusion)
-        )
+        new_inclusion = float(candidate.get("_reverse_inclusion_rate", old_inclusion))
         score_details["inclusion_rate"] = new_inclusion
         candidate["score_details"] = score_details
         candidate["_reverse_inclusion_rate"] = old_inclusion
@@ -448,9 +493,9 @@ class RelationshipDiscoveryPipeline:
         )
 
     def _post_score_correction(
-            self,
-            scored_rule: List[Dict[str, Any]],
-            scored_llm: List[Dict[str, Any]],
+        self,
+        scored_rule: List[Dict[str, Any]],
+        scored_llm: List[Dict[str, Any]],
     ) -> List[Dict[str, Any]]:
         """① 评分后纠偏(按来源分别处理,doc 19 §3.2.2)
 
@@ -483,7 +528,8 @@ class RelationshipDiscoveryPipeline:
                 if cardinality in ("1:N", "M:N"):
                     logger.warning(
                         "逻辑键规则候选评分未复现 target 逻辑键唯一性(%s),丢弃: %s",
-                        cardinality, self._format_candidate_debug(candidate),
+                        cardinality,
+                        self._format_candidate_debug(candidate),
                     )
                     continue
                 corrected.append(candidate)
@@ -509,8 +555,8 @@ class RelationshipDiscoveryPipeline:
         return corrected
 
     def _group_by_undirected_identity(
-            self,
-            candidates: List[Dict[str, Any]],
+        self,
+        candidates: List[Dict[str, Any]],
     ) -> Dict[str, List[Dict[str, Any]]]:
         """② 无向身份分组:所有评分后候选按无向身份进组(doc 19 §3.3)。
 
@@ -553,8 +599,8 @@ class RelationshipDiscoveryPipeline:
         return min(group, key=self._tiebreak_key)
 
     def _decide_group_cardinality(
-            self,
-            group: List[Dict[str, Any]],
+        self,
+        group: List[Dict[str, Any]],
     ) -> str:
         """③ 组内 cardinality 决策(先于方向,doc 19 §3.3):
         1. 两个方向都有物理键规则证据 → 1:1;
@@ -573,8 +619,10 @@ class RelationshipDiscoveryPipeline:
             return "1:1"
         if len(physical_dirs) == 1:
             physical_candidate = next(
-                c for c in group
-                if c.get("candidate_origin") == "rule" and c.get("key_origin") == "physical"
+                c
+                for c in group
+                if c.get("candidate_origin") == "rule"
+                and c.get("key_origin") == "physical"
             )
             return physical_candidate.get("cardinality", "N:1")
 
@@ -587,8 +635,10 @@ class RelationshipDiscoveryPipeline:
             return "1:1"
         if len(logical_dirs) == 1:
             logical_candidate = next(
-                c for c in group
-                if c.get("candidate_origin") == "rule" and c.get("key_origin") == "logical"
+                c
+                for c in group
+                if c.get("candidate_origin") == "rule"
+                and c.get("key_origin") == "logical"
             )
             return logical_candidate.get("cardinality", "N:1")
 
@@ -596,13 +646,16 @@ class RelationshipDiscoveryPipeline:
         cardinality = winner.get("cardinality", "N:1")
         if cardinality == "1:N":
             # LLM 纠偏后不应出现 1:N,防御性兜底
-            logger.warning("纯 LLM 组出现 1:N 获胜候选,改写为 N:1: %s", self._format_candidate_debug(winner))
+            logger.warning(
+                "纯 LLM 组出现 1:N 获胜候选,改写为 N:1: %s",
+                self._format_candidate_debug(winner),
+            )
             cardinality = "N:1"
         return cardinality
 
     def _lexicographic_direction(
-            self,
-            group: List[Dict[str, Any]],
+        self,
+        group: List[Dict[str, Any]],
     ) -> Tuple[str, str]:
         """字典序方向(doc 19 §3.3):端点 = (schema, table, sorted(columns)),
         比较键 (casefold, 原始值) 逐级比较,较小的一端固定为 from。
@@ -626,9 +679,9 @@ class RelationshipDiscoveryPipeline:
         return tgt_full, src_full
 
     def _decide_group_direction(
-            self,
-            group: List[Dict[str, Any]],
-            final_cardinality: str,
+        self,
+        group: List[Dict[str, Any]],
+        final_cardinality: str,
     ) -> Tuple[str, str]:
         """④ 按最终 cardinality 决定唯一方向(doc 19 §3.3):
         - N:1:有规则证据时使用最高优先级规则候选方向(引用方→键端);
@@ -636,9 +689,7 @@ class RelationshipDiscoveryPipeline:
         - 1:1:规则证据优先(物理 > 逻辑),两边键类型相同或纯 LLM → 字典序;
         - M:N:字典序(对称推断关联)。
         """
-        rule_candidates = [
-            c for c in group if c.get("candidate_origin") == "rule"
-        ]
+        rule_candidates = [c for c in group if c.get("candidate_origin") == "rule"]
 
         if final_cardinality == "N:1":
             if rule_candidates:
@@ -665,9 +716,9 @@ class RelationshipDiscoveryPipeline:
         return self._lexicographic_direction(group)
 
     def _normalize_to_direction(
-            self,
-            candidate: Dict[str, Any],
-            from_full: str,
+        self,
+        candidate: Dict[str, Any],
+        from_full: str,
     ) -> None:
         """⑤ 候选规范到最终方向:方向相反时翻转并取 reverse_inclusion_rate
         重算 composite_score(复用同次采样集合,不新增 DB 查询)"""
@@ -676,11 +727,11 @@ class RelationshipDiscoveryPipeline:
             self._flip_candidate(candidate)
 
     def _merge_group_fields(
-            self,
-            group: List[Dict[str, Any]],
-            winner: Dict[str, Any],
-            final_cardinality: str,
-            from_full: str,
+        self,
+        group: List[Dict[str, Any]],
+        winner: Dict[str, Any],
+        final_cardinality: str,
+        from_full: str,
     ) -> Dict[str, Any]:
         """⑥ 字段级合并(doc 19 §3.3):合并不是整对象覆盖,按字段拆分:
         - 端点:最终方向(规范化后与 winner 一致);
@@ -727,9 +778,9 @@ class RelationshipDiscoveryPipeline:
         return merged
 
     def _merge_scored_candidates(
-            self,
-            scored_rule: List[Dict[str, Any]],
-            scored_llm: List[Dict[str, Any]],
+        self,
+        scored_rule: List[Dict[str, Any]],
+        scored_llm: List[Dict[str, Any]],
     ) -> List[Dict[str, Any]]:
         """合并阶段主流程(七步,doc 19 §3.3):
         ① 评分后纠偏(按来源) → ② 无向身份分组 → ③ 组内 cardinality 决策
@@ -772,14 +823,20 @@ class RelationshipDiscoveryPipeline:
             )
             logger.debug(
                 "合并组 %s: %s 个候选 → %s,方向 %s->%s,来源 %s",
-                uid, len(group), final_cardinality, from_full, to_full,
+                uid,
+                len(group),
+                final_cardinality,
+                from_full,
+                to_full,
                 merged.get("candidate_origin"),
             )
             merged_list.append(merged)
 
         logger.info(
             "合并阶段完成: %s 组 → %s 条(%s 条候选参与)",
-            len(groups), len(merged_list), len(corrected),
+            len(groups),
+            len(merged_list),
+            len(corrected),
         )
         return merged_list
 
@@ -795,7 +852,9 @@ class RelationshipDiscoveryPipeline:
         tgt_cols = ",".join(candidate.get("target_columns", []))
         score = candidate.get("composite_score")
         origin = candidate.get("candidate_origin")
-        return f"{src}[{src_cols}] -> {tgt}[{tgt_cols}] (origin={origin}, score={score})"
+        return (
+            f"{src}[{src_cols}] -> {tgt}[{tgt_cols}] (origin={origin}, score={score})"
+        )
 
     @staticmethod
     def _format_relation_debug(rel) -> str:

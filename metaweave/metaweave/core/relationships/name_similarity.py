@@ -12,7 +12,7 @@
 import asyncio
 import logging
 from collections import OrderedDict
-from typing import Dict, List, Optional
+from typing import List, Optional
 
 import numpy as np
 
@@ -71,7 +71,8 @@ class CommentSimilarityChannel:
         self.cache = LRUCache(cache_size)
 
         self.generic_blacklist = {
-            self._normalize(w) for w in (self.config.get("generic_comment_blacklist") or [])
+            self._normalize(w)
+            for w in (self.config.get("generic_comment_blacklist") or [])
         }
 
         self.embedding_service: Optional[EmbeddingService] = None
@@ -121,7 +122,9 @@ class CommentSimilarityChannel:
         self.cache.put(norm_text, embedding)
         return embedding
 
-    def compare(self, comment_a: Optional[str], comment_b: Optional[str]) -> Optional[float]:
+    def compare(
+        self, comment_a: Optional[str], comment_b: Optional[str]
+    ) -> Optional[float]:
         """比较两条注释的相似度。
 
         Returns:
@@ -142,7 +145,9 @@ class CommentSimilarityChannel:
             return 0.0
         return float(np.dot(vec_a, vec_b) / denom)
 
-    async def acompare(self, comment_a: Optional[str], comment_b: Optional[str]) -> Optional[float]:
+    async def acompare(
+        self, comment_a: Optional[str], comment_b: Optional[str]
+    ) -> Optional[float]:
         if not self.is_usable(comment_a) or not self.is_usable(comment_b):
             return None
 
@@ -188,7 +193,9 @@ class NameSimilarityService:
 
         # 注释通道（生成闸门与评分维度共用，见 3.5/3.11）
         comment_channel_config = self.config.get("comment_channel", {})
-        self.comment_channel = CommentSimilarityChannel(comment_channel_config, self.embedding_config)
+        self.comment_channel = CommentSimilarityChannel(
+            comment_channel_config, self.embedding_config
+        )
 
     @staticmethod
     def _normalize(name: str) -> str:
@@ -211,18 +218,24 @@ class NameSimilarityService:
         norm_a, norm_b = self._normalize(name_a), self._normalize(name_b)
         if norm_a == norm_b:
             if logger.isEnabledFor(logging.DEBUG):
-                logger.debug("Embedding name similarity: '%s' vs '%s' -> 1.0000 (exact match)", norm_a, norm_b)
+                logger.debug(
+                    "Embedding name similarity: '%s' vs '%s' -> 1.0000 (exact match)",
+                    norm_a,
+                    norm_b,
+                )
             return 1.0
 
         vec_a = self._get_embedding(norm_a)
         vec_b = self._get_embedding(norm_b)
 
-        denom = (np.linalg.norm(vec_a) * np.linalg.norm(vec_b))
+        denom = np.linalg.norm(vec_a) * np.linalg.norm(vec_b)
         if denom == 0:
             return 0.0
         sim = float(np.dot(vec_a, vec_b) / denom)
         if logger.isEnabledFor(logging.DEBUG):
-            logger.debug("Embedding name similarity: '%s' vs '%s' -> %.4f", norm_a, norm_b, sim)
+            logger.debug(
+                "Embedding name similarity: '%s' vs '%s' -> %.4f", norm_a, norm_b, sim
+            )
         return sim
 
     def compare_columns(self, source_cols: list, target_cols: list) -> float:
@@ -240,7 +253,11 @@ class NameSimilarityService:
         norm_a, norm_b = self._normalize(name_a), self._normalize(name_b)
         if norm_a == norm_b:
             if logger.isEnabledFor(logging.DEBUG):
-                logger.debug("Embedding name similarity (async): '%s' vs '%s' -> 1.0000 (exact match)", norm_a, norm_b)
+                logger.debug(
+                    "Embedding name similarity (async): '%s' vs '%s' -> 1.0000 (exact match)",
+                    norm_a,
+                    norm_b,
+                )
             return 1.0
 
         vec_a, vec_b = await asyncio.gather(
@@ -248,12 +265,17 @@ class NameSimilarityService:
             self._aget_embedding(norm_b),
         )
 
-        denom = (np.linalg.norm(vec_a) * np.linalg.norm(vec_b))
+        denom = np.linalg.norm(vec_a) * np.linalg.norm(vec_b)
         if denom == 0:
             return 0.0
         sim = float(np.dot(vec_a, vec_b) / denom)
         if logger.isEnabledFor(logging.DEBUG):
-            logger.debug("Embedding name similarity (async): '%s' vs '%s' -> %.4f", norm_a, norm_b, sim)
+            logger.debug(
+                "Embedding name similarity (async): '%s' vs '%s' -> %.4f",
+                norm_a,
+                norm_b,
+                sim,
+            )
         return sim
 
     async def acompare_columns(self, source_cols: list, target_cols: list) -> float:
@@ -275,7 +297,9 @@ class NameSimilarityService:
         return embedding
 
     # === 注释相似度（转发到 comment_channel，供闸门与评分维度共用） ===
-    def compare_comment_pair(self, comment_a: Optional[str], comment_b: Optional[str]) -> Optional[float]:
+    def compare_comment_pair(
+        self, comment_a: Optional[str], comment_b: Optional[str]
+    ) -> Optional[float]:
         """比较单对注释相似度，任一不可用返回 None"""
         return self.comment_channel.compare(comment_a, comment_b)
 

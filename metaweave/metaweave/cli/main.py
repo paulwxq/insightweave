@@ -9,7 +9,6 @@ from typing import Optional
 
 from metaweave.cli.metadata_cli import metadata_command
 from metaweave.cli.loader_cli import rag_load_command
-from metaweave.cli.meta_loader_cli import meta_load_command
 from metaweave.utils.logger import setup_metaweave_logging
 
 
@@ -60,7 +59,6 @@ def cli(debug: bool, log_config: Optional[str]):
 # 注册子命令
 cli.add_command(metadata_command)
 cli.add_command(rag_load_command)
-cli.add_command(meta_load_command)
 
 
 if __name__ == "__main__":

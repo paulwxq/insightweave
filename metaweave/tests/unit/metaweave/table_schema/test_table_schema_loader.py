@@ -46,7 +46,9 @@ def _write_metadata_config(tmp_path: Path) -> Path:
         },
         "vector_database": {
             "active": "milvus",
-            "providers": {"milvus": {"host": "localhost", "port": 19530, "database": "nl2sql"}},
+            "providers": {
+                "milvus": {"host": "localhost", "port": 19530, "database": "nl2sql"}
+            },
         },
     }
     meta_path = tmp_path / "metadata_config.yaml"

@@ -13,7 +13,6 @@ import json
 import re
 from pathlib import Path
 from typing import Any, Callable, Optional
-from uuid import UUID
 
 from fastapi import APIRouter, Query, Request
 from fastapi.responses import Response
@@ -284,16 +283,24 @@ async def health(request: Request):
 
 
 @router.get("/sources/{source_id}/readiness")
-async def source_readiness(source_id: UUID, request: Request):
+async def source_readiness(source_id: str, request: Request):
     """按源完整就绪检查（doc 2 §5.5）：不调用问答模型。
 
     兼容且完成检查时即使 ready=false（含缺知识）也返回 200、data 直接为
     readiness；仅不兼容/登记配置非法（422）、依赖读取无法完成（503）、
     源不存在/停用（404/409）按错误封装拒绝。创建/提问的未就绪拒绝仍走
     409/source_not_ready（runs._readiness_error）。"""
-    from src.api.v2.runs import _READY_503, _readiness_error
+    from fastapi import HTTPException
 
-    sid = str(source_id)
+    from src.api.v2.runs import _READY_503, _readiness_error
+    from src.modules.db_deepagent.source_registry import (
+        normalize_short_source_id,
+    )
+
+    try:
+        sid = normalize_short_source_id(source_id)
+    except ValueError:
+        raise HTTPException(status_code=422) from None
 
     def _work() -> dict:
         runtime = get_web_runtime()
@@ -324,7 +331,7 @@ async def create_session(payload: SessionCreateRequest, request: Request):
 @router.get("/sessions")
 async def list_sessions(
     request: Request,
-    source_id: Optional[UUID] = Query(None),
+    source_id: Optional[str] = Query(None),
     limit: int = Query(30, ge=1, le=100),
     offset: int = Query(0, ge=0),
 ):

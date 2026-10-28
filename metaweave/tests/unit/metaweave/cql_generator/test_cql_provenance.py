@@ -25,7 +25,7 @@ from metaweave.core.cql_generator.models import (
 from metaweave.core.cql_generator.reader import RelationshipFilterStats
 from metaweave.core.cql_generator.writer import CypherWriter
 
-SOURCE_ID = "0f0e8d64-9d3a-4d0f-8d5f-2a3b4c5d6e7f"
+SOURCE_ID = "db_src_1"
 PUBLISH_ID = "1a2b3c4d-5e6f-4a5b-8c9d-0e1f2a3b4c5d"
 TABLE_ENTITY = f"{SOURCE_ID}:orders.public.users"
 COLUMN_ENTITY = f"{SOURCE_ID}:orders.public.users.user_id"
@@ -103,11 +103,11 @@ class TestProvenanceRequired:
         with pytest.raises(ValueError, match="provenance"):
             writer.write_all([_table()], [], [], [])
 
-    def test_invalid_uuid_rejected(self, tmp_path):
+    def test_invalid_source_id_rejected(self, tmp_path):
         writer = CypherWriter(tmp_path / "cql")
         with pytest.raises(ValueError, match="provenance"):
             writer.write_all(
-                [_table()], [], [], [], provenance=("not-uuid", PUBLISH_ID)
+                [_table()], [], [], [], provenance=("not-a-short-id", PUBLISH_ID)
             )
 
 

@@ -53,7 +53,9 @@ class DimTablesConfig:
         if not database:
             raise ValueError("数据库名不能为空")
 
-        databases_cfg = yaml_data.get("databases", {}) if isinstance(yaml_data, dict) else {}
+        databases_cfg = (
+            yaml_data.get("databases", {}) if isinstance(yaml_data, dict) else {}
+        )
         if not isinstance(databases_cfg, dict):
             raise ValueError("dim_tables.yaml 顶层 'databases' 配置格式错误")
 
@@ -97,8 +99,12 @@ class LoaderOptions:
 
         return cls(
             batch_size=options.get("batch_size", cls.batch_size),
-            max_records_per_table=options.get("max_records_per_table", cls.max_records_per_table),
+            max_records_per_table=options.get(
+                "max_records_per_table", cls.max_records_per_table
+            ),
             skip_empty_values=options.get("skip_empty_values", cls.skip_empty_values),
-            truncate_long_text=options.get("truncate_long_text", cls.truncate_long_text),
+            truncate_long_text=options.get(
+                "truncate_long_text", cls.truncate_long_text
+            ),
             max_text_length=options.get("max_text_length", cls.max_text_length),
         )

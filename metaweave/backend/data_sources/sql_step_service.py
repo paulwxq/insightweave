@@ -1,4 +1,9 @@
-"""受管 SQL 样例采集：同作业输入核验、生成及状态写回。"""
+"""受管 SQL 样例步骤 worker（doc 25.1、6.2 §7.1）。
+
+上游就绪判定读取 `md/`、`domain/`、`rel/` 顶层唯一成功采集 marker
+（doc 6 §4.1）；输入指纹（md/domain/rel 文件 SHA-256）在生成前后复查，
+保留既有重跑与编辑冲突检查。产物目录由 `sql-rag/` 更名 `sql/`。
+"""
 
 from __future__ import annotations
 
@@ -8,59 +13,45 @@ import logging
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from uuid import UUID
 
 import yaml
 from psycopg.conninfo import make_conninfo
 
-from backend.data_sources.db_step_service import DbStepConfigError, SourceDisabledError
 from backend.data_sources.ddl_step_service import (
     build_managed_ddl_config,
     build_managed_output_snapshot,
 )
-from backend.data_sources.registration_service import PlatformUnavailableError
-from backend.data_sources.repository import get_db_source
-from backend.jobs.repository import (
-    STATUS_FAILED,
-    STATUS_SUCCESS,
-    SourceRegistrationMissingError,
-    StepAlreadyRunningError,
-    WorkspaceMissingError,
-    WorkspaceSourceMismatchError,
-    assert_workspace_owner,
-    finish_step,
-    get_step_row,
-    start_step,
+from backend.data_sources.step_context import (
+    DbStepConfigError,
+    StepContext,
+    StepOutcome,
 )
-from backend.persistence.platform_db import (
-    load_platform_settings_from_env,
-    platform_session,
-)
-from backend.publishing.repository import lock_db_source_row
-from backend.security.source_password import decrypt_password
+from backend.workspace_files.backups import backup_directory_before_update
+from backend.workspace_files.markers import read_collection_marker
 from metaweave.core.clean_targets import (
     resolve_domain_output_dir,
     resolve_md_output_dir,
     resolve_rel_output_dir,
-    resolve_sql_rag_output_dir,
+    resolve_sql_output_dir,
 )
 from metaweave.core.metadata.connector import DatabaseConnector
-from metaweave.core.metadata.execution import load_main_config_snapshot
 from metaweave.core.sql_rag.execution import run_sql_rag_generation
 from metaweave.core.sql_rag.validator import validate_validation_config_keys
 from metaweave.db.postgres_options import build_connect_kwargs
 from metaweave.services.llm_config_resolver import resolve_module_llm_config
 from metaweave.services.llm_service import LLMService
-from metaweave.utils.source_id import normalize_source_id
 
 logger = logging.getLogger("backend.data_sources")
 SQL_STEP_NAME = "sql"
 UPSTREAM = ("md", "domain", "rel")
-NOT_READY = "同一作业的 MD、Domain、Rel 产物未就绪；请先执行上游步骤或指定已有 job_id"
+NOT_READY = "工作区的 MD、Domain、Rel 产物未就绪；请先执行上游采集"
 
 
-class SqlPreparationError(PlatformUnavailableError):
-    """SQL 准备阶段的非受控本地故障。"""
+class SqlPreparationError(RuntimeError):
+    """SQL 准备阶段的非受控本地故障；503 载体。"""
+
+    def __init__(self, message: str):
+        super().__init__(message)
 
 
 @dataclass(frozen=True)
@@ -71,17 +62,6 @@ class SqlInputSnapshot:
     domain_path: Path
     rel_dir: Path
     output_dir: Path
-
-
-def _failure(started: float, message: str, job_id: UUID | None = None) -> dict:
-    result = {
-        "success": False,
-        "execution_time": time.perf_counter() - started,
-        "message": message,
-    }
-    if job_id is not None:
-        result["job_id"] = str(job_id)
-    return result
 
 
 def _regular_bytes(path: Path, label: str) -> bytes:
@@ -141,28 +121,31 @@ def _generation_config(config: dict) -> tuple[dict, dict]:
 
 
 def inspect_managed_sql_inputs(
-    session, source_id: UUID, job_id: UUID, db_name: str, config: dict
+    source_id: str, workspace_id: str, db_name: str, config: dict
 ) -> tuple[SqlInputSnapshot | None, list[str], str]:
-    """读取步骤行和三类受管文件；供就绪接口、启动和结束复查共用。"""
+    """读取三个上游目录的采集 marker 与受管文件指纹（不访问平台库）。
+
+    就绪条件（doc 6 §4.1）：md/domain/rel 目录各自有唯一 success marker，
+    且 md 清单、Domain YAML、Rel 报告内容均有效；指纹用于生成期变化复查。
+    """
     missing: list[str] = []
     reasons: list[str] = []
     markers: list[tuple[str, object]] = []
-    for step in UPSTREAM:
-        try:
-            row = get_step_row(session, job_id, step)
-        except Exception as exc:
-            raise PlatformUnavailableError("平台库连接或读取失败") from exc
-        if row is None or row.last_status != STATUS_SUCCESS:
-            missing.append(step)
-            reasons.append(f"{step} 步骤尚未成功")
-        else:
-            markers.append((step, row.updated_at))
 
-    md_dir = resolve_md_output_dir(source_id, job_id)
-    domain_path = resolve_domain_output_dir(source_id, job_id) / "db_domains.yaml"
-    rel_dir = resolve_rel_output_dir(source_id, job_id)
+    md_dir = resolve_md_output_dir(source_id, workspace_id)
+    domain_path = resolve_domain_output_dir(source_id, workspace_id) / "db_domains.yaml"
+    rel_dir = resolve_rel_output_dir(source_id, workspace_id)
     rel_path = rel_dir / f"{db_name}.relationships_global.md"
-    output_dir = resolve_sql_rag_output_dir(source_id, job_id)
+    output_dir = resolve_sql_output_dir(source_id, workspace_id)
+    dir_by_step = {"md": md_dir, "domain": domain_path.parent, "rel": rel_dir}
+    for step in UPSTREAM:
+        marker, error = read_collection_marker(dir_by_step[step])
+        if marker is None or marker.status != "success":
+            missing.append(step)
+            reasons.append(error or f"{step} 目录没有成功采集 marker")
+        else:
+            markers.append((step, marker.run_id))
+
     fingerprints: list[tuple[str, str]] = []
     md_names: set[str] = set()
     md_valid = True
@@ -256,61 +239,6 @@ def inspect_managed_sql_inputs(
     )
 
 
-def get_sql_readiness(settings, source_id, job_id) -> dict:
-    source_uuid = normalize_source_id(source_id)
-    job_uuid = normalize_source_id(job_id)
-    try:
-        config = load_main_config_snapshot("configs/metadata_config.yaml")
-        _generation_config(config)
-    except ValueError as exc:
-        raise DbStepConfigError(str(exc)) from None
-    except Exception as exc:
-        raise DbStepConfigError(
-            f"主配置加载或校验失败（{type(exc).__name__}）"
-        ) from None
-    try:
-        with platform_session(settings) as session:
-            source = get_db_source(session, source_uuid)
-            if source is None:
-                raise DbStepConfigError("未找到指定 source_id 的数据源")
-            if not source.is_active:
-                raise SourceDisabledError("该数据源已禁用，不能执行作业")
-            try:
-                assert_workspace_owner(session, job_uuid, source_uuid)
-            except (WorkspaceMissingError, WorkspaceSourceMismatchError) as exc:
-                raise DbStepConfigError(str(exc)) from None
-            try:
-                snapshot, missing, message = inspect_managed_sql_inputs(
-                    session, source_uuid, job_uuid, source.db_name, config
-                )
-            except ValueError as exc:
-                raise DbStepConfigError(str(exc)) from None
-            return {
-                "ready": snapshot is not None,
-                "missing": missing,
-                "message": message,
-            }
-    except DbStepConfigError:
-        raise
-    except Exception as exc:
-        logger.error("SQL 就绪查询的平台库读取故障（%s）", type(exc).__name__)
-        raise PlatformUnavailableError("平台库暂不可用") from None
-
-
-def _clean_sql_top_level_files(directory: Path) -> None:
-    directory.mkdir(parents=True, exist_ok=True)
-    children = list(directory.iterdir())
-    if any(child.is_symlink() for child in children):
-        raise ValueError("SQL-RAG 输出目录含符号链接")
-    for child in children:
-        if child.is_symlink():
-            raise ValueError("SQL-RAG 输出目录含符号链接")
-        if child.is_file():
-            child.unlink()
-        elif not child.is_dir():
-            raise ValueError(f"SQL-RAG 输出目录含非常规条目：{child.name}")
-
-
 def _verify_output(
     output_dir: Path,
     db_name: str,
@@ -356,133 +284,62 @@ def _verify_output(
     return True, "", retained
 
 
-def run_sql_step(config_path, source_id, job_id=None) -> dict:
+def run_sql_step(ctx: StepContext) -> StepOutcome:
+    """执行受管 SQL 步骤：上游 marker/指纹前置 → 备份 → 生成 → 复查 → 核验。"""
     started = time.perf_counter()
-    if job_id is None:
-        raise DbStepConfigError(NOT_READY)
     try:
-        source_uuid = normalize_source_id(source_id)
-        job_uuid = normalize_source_id(job_id)
-        config = load_main_config_snapshot(config_path)
-        settings = load_platform_settings_from_env()
-        _generation_config(config)
+        _generation_config(ctx.main_config)
     except ValueError as exc:
         raise DbStepConfigError(str(exc)) from None
-    except Exception as exc:
-        raise DbStepConfigError(
-            f"主配置加载或校验失败（{type(exc).__name__}）"
-        ) from None
-
-    stage = "平台库读取"
+    stage = "SQL 输入与配置准备"
     try:
-        with platform_session(settings) as session:
-            source = get_db_source(session, source_uuid)
-            if source is None:
-                raise DbStepConfigError("未找到指定 source_id 的数据源")
-            if source.db_type != "postgresql":
-                raise DbStepConfigError("当前仅支持 PostgreSQL 数据源")
-            if not source.username or not source.host or not source.db_name:
-                raise DbStepConfigError("数据源登记缺少必要的连接字段")
-            if not source.is_active:
-                raise SourceDisabledError("该数据源已禁用，不能执行作业")
-            try:
-                assert_workspace_owner(session, job_uuid, source_uuid)
-            except (WorkspaceMissingError, WorkspaceSourceMismatchError) as exc:
-                raise DbStepConfigError(str(exc)) from None
-            source_name = source.db_name
-            stage = "SQL 输入与配置准备"
-            input_snapshot, missing, reason = inspect_managed_sql_inputs(
-                session, source_uuid, job_uuid, source_name, config
+        source_name = ctx.source.db_name
+        input_snapshot, missing, reason = inspect_managed_sql_inputs(
+            ctx.source_id, ctx.workspace_id, source_name, ctx.main_config
+        )
+        if input_snapshot is None:
+            raise DbStepConfigError(f"SQL 输入未就绪（{','.join(missing)}）：{reason}")
+        _generation, validation_cfg = _generation_config(ctx.main_config)
+        password = (
+            ctx.decrypt_password() if validation_cfg.get("enabled", True) else None
+        )
+        managed_config = build_managed_output_snapshot(
+            ctx.main_config,
+            ctx.source_id,
+            ctx.workspace_id,
+            source_name,
+            ctx.source.selected_schemas,
+        )
+        if password is not None:
+            managed_config = build_managed_ddl_config(
+                ctx.main_config, ctx.source, password, ctx.workspace_id
             )
-            if input_snapshot is None:
-                raise DbStepConfigError(
-                    f"SQL 输入未就绪（{','.join(missing)}）：{reason}"
+            database = managed_config["database"]
+            make_conninfo(
+                **build_connect_kwargs(
+                    host=database["host"],
+                    port=database["port"],
+                    dbname=database["database"],
+                    user=database["user"],
+                    password=database["password"],
+                    sslmode=database.get("sslmode"),
                 )
-            _generation, validation_cfg = _generation_config(config)
-            password = (
-                decrypt_password(source.password_ciphertext)
-                if validation_cfg.get("enabled", True)
-                else None
             )
-            managed_config = build_managed_output_snapshot(
-                config, source_uuid, job_uuid, source_name, source.selected_schemas
-            )
-            if password is not None:
-                managed_config = build_managed_ddl_config(
-                    config, source, password, job_uuid
-                )
-                database = managed_config["database"]
-                make_conninfo(
-                    **build_connect_kwargs(
-                        host=database["host"],
-                        port=database["port"],
-                        dbname=database["database"],
-                        user=database["user"],
-                        password=database["password"],
-                        sslmode=database.get("sslmode"),
-                    )
-                )
-    except (DbStepConfigError, SourceDisabledError):
-        raise
-    except PlatformUnavailableError as exc:
-        logger.error("SQL 上游步骤行读取故障（%s）", type(exc).__name__)
-        return _failure(started, "平台库连接或读取失败")
-    except ValueError as exc:
-        raise DbStepConfigError(str(exc)) from None
-    except Exception as exc:
-        logger.error("SQL %s故障（%s）", stage, type(exc).__name__)
-        if stage != "平台库读取":
-            raise SqlPreparationError(
-                f"SQL 准备阶段故障（{type(exc).__name__}）"
-            ) from None
-        return _failure(started, f"平台库连接或读取失败（{type(exc).__name__}）")
-
-    try:
         managed_config["sql_rag"] = dict(managed_config.get("sql_rag") or {})
         managed_config["sql_rag"]["generation"] = dict(_generation)
         managed_config["sql_rag"]["validation"] = dict(validation_cfg)
         llm = LLMService(resolve_module_llm_config(managed_config, "sql_rag.llm"))
-        if input_snapshot.output_dir != resolve_sql_rag_output_dir(
-            source_uuid, job_uuid
+        if input_snapshot.output_dir != resolve_sql_output_dir(
+            ctx.source_id, ctx.workspace_id
         ):
-            raise ValueError("受管 SQL 输出目录与作业工作区不一致")
+            raise ValueError("受管 SQL 输出目录与工作区不一致")
     except ValueError as exc:
         raise DbStepConfigError(str(exc)) from None
-    except Exception as exc:
-        logger.error("SQL 准备阶段故障（%s）", type(exc).__name__)
-        raise SqlPreparationError("SQL 准备阶段故障") from None
-
-    try:
-        with platform_session(settings) as session:
-            locked_source = lock_db_source_row(session, source_uuid)
-            if locked_source is None:
-                raise DbStepConfigError("未找到指定 source_id 的数据源")
-            if not locked_source.is_active:
-                raise SourceDisabledError("该数据源已禁用，不能执行作业")
-            latest, missing, reason = inspect_managed_sql_inputs(
-                session, source_uuid, job_uuid, source_name, config
-            )
-            if (
-                latest is None
-                or latest.markers != input_snapshot.markers
-                or latest.fingerprints != input_snapshot.fingerprints
-            ):
-                raise DbStepConfigError(
-                    f"SQL 上游输入已变化或未就绪：{reason or ','.join(missing)}"
-                )
-            start_step(session, job_uuid, source_uuid, SQL_STEP_NAME)
-    except (DbStepConfigError, SourceDisabledError):
+    except DbStepConfigError:
         raise
-    except PlatformUnavailableError as exc:
-        logger.error("SQL 启动前步骤行复查故障（%s）", type(exc).__name__)
-        return _failure(started, "平台库连接或读取失败")
-    except SourceRegistrationMissingError:
-        raise DbStepConfigError("未找到指定 source_id 的数据源") from None
-    except StepAlreadyRunningError as exc:
-        return _failure(started, str(exc), job_uuid)
     except Exception as exc:
-        logger.error("SQL 步骤启动状态写入失败（%s）", type(exc).__name__)
-        return _failure(started, f"作业状态登记失败（{type(exc).__name__}）", job_uuid)
+        logger.error("SQL %s故障（%s）", stage, type(exc).__name__)
+        raise SqlPreparationError("SQL 准备阶段故障") from None
 
     run_result = None
     connector = None
@@ -492,10 +349,10 @@ def run_sql_step(config_path, source_id, job_id=None) -> dict:
     try:
         if validation_cfg.get("enabled", True):
             connector = DatabaseConnector(managed_config["database"])
-            # 建池会异步连接；实际取得连接后再清理，避免连接失败时删除旧产物。
+            # 建池会异步连接；实际取得连接后再备份，避免连接失败时动旧产物
             with connector.get_connection():
                 pass
-        _clean_sql_top_level_files(input_snapshot.output_dir)
+        backup_directory_before_update(input_snapshot.output_dir)
         run_result = run_sql_rag_generation(
             managed_config,
             domains_path=input_snapshot.domain_path,
@@ -527,40 +384,24 @@ def run_sql_step(config_path, source_id, job_id=None) -> dict:
             except Exception:
                 logger.warning("SQL 源库连接关闭失败", exc_info=True)
 
+    # 结束复查：生成期间上游文件被重跑或编辑则本次产物无效（既有冲突检查）
     try:
-        with platform_session(settings) as session:
-            if lock_db_source_row(session, source_uuid) is None:
-                raise SourceRegistrationMissingError(
-                    f"数据源登记已不存在: {source_uuid}"
-                )
-            try:
-                latest, missing, changed_reason = inspect_managed_sql_inputs(
-                    session, source_uuid, job_uuid, source_name, config
-                )
-            except Exception as exc:
-                latest, missing = None, []
-                changed_reason = f"结束复查故障（{type(exc).__name__}）"
-            if (
-                latest is None
-                or latest.markers != input_snapshot.markers
-                or latest.fingerprints != input_snapshot.fingerprints
-            ):
-                ok = False
-                input_reason = f"SQL 上游输入在生成期间发生变化：{changed_reason or ','.join(missing)}"
-                reason = f"{input_reason}；{reason}" if reason else input_reason
-            finish_step(
-                session,
-                job_uuid,
-                SQL_STEP_NAME,
-                STATUS_SUCCESS if ok else STATUS_FAILED,
-            )
-    except Exception as exc:
-        logger.error("SQL 状态写回失败（%s）", type(exc).__name__)
-        return _failure(
-            started,
-            f"SQL 产物可能已生成，但作业状态更新失败（{type(exc).__name__}）；请查看日志确认作业状态",
-            job_uuid,
+        latest, missing, changed_reason = inspect_managed_sql_inputs(
+            ctx.source_id, ctx.workspace_id, source_name, ctx.main_config
         )
+        if (
+            latest is None
+            or latest.markers != input_snapshot.markers
+            or latest.fingerprints != input_snapshot.fingerprints
+        ):
+            ok = False
+            input_reason = (
+                f"SQL 上游输入在生成期间发生变化：{changed_reason or ','.join(missing)}"
+            )
+            reason = f"{input_reason}；{reason}" if reason else input_reason
+    except Exception as exc:
+        ok = False
+        reason = f"SQL 结束复查故障（{type(exc).__name__}）；{reason}"
 
     if not ok:
         if run_result is not None:
@@ -570,18 +411,38 @@ def run_sql_step(config_path, source_id, job_id=None) -> dict:
                 f"；生成失败域：{', '.join(generation.failed_domains) or '无'}"
                 f"；零产出域：{', '.join(generation.zero_output_domains) or '无'}"
             )
-        return _failure(started, reason, job_uuid)
+        return StepOutcome(success=False, message=reason)
+
     generation = run_result.generation
     details = [
-        f"生成 {generation.total_generated} 条，保留 {retained} 条，删除 {generation.total_generated - retained} 条",
+        f"生成 {generation.total_generated} 条，保留 {retained} 条，"
+        f"删除 {generation.total_generated - retained} 条",
         "SQL 校验已跳过" if run_result.validation is None else "SQL 校验已执行",
         f"跳过域：{', '.join(generation.skipped_domains) or '无'}",
         f"生成失败域：{', '.join(generation.failed_domains) or '无'}",
         f"零产出域：{', '.join(generation.zero_output_domains) or '无'}",
     ]
-    return {
-        "success": True,
-        "execution_time": time.perf_counter() - started,
-        "job_id": str(job_uuid),
-        "message": "；".join(details),
-    }
+    input_files = [
+        (
+            path,
+            next(
+                run_id
+                for step, run_id in input_snapshot.markers
+                if path.startswith(step)
+            ),
+        )
+        for path, _ in input_snapshot.fingerprints
+    ]
+    output_files = [
+        f"sql/{path.name}"
+        for path in sorted(
+            input_snapshot.output_dir.iterdir(), key=lambda item: item.name
+        )
+        if not path.name.startswith(".") and path.is_file()
+    ]
+    return StepOutcome(
+        success=True,
+        message="；".join(details) + f"（{time.perf_counter() - started:.1f}s）",
+        input_files=input_files,
+        output_files=output_files,
+    )

@@ -19,8 +19,8 @@ pytestmark = pytest.mark.unit
 
 LOCAL = {"Host": "127.0.0.1:8008"}
 JSON_HEAD = {**LOCAL, "Content-Type": "application/json"}
-SOURCE_ID = "11111111-1111-1111-1111-111111111111"
-OTHER_SOURCE = "22222222-2222-2222-2222-222222222222"
+SOURCE_ID = "db_src_1"
+OTHER_SOURCE = "db_src_2"
 
 _COLUMNS = [
     {"name": "id", "pg_type": "integer"},

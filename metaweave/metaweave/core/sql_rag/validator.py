@@ -86,9 +86,7 @@ class SQLValidator:
         if not sql:
             raise ValueError("SQL 为空")
         if ";" in sql:
-            raise ValueError(
-                f"检测到多语句（中间含分号），拒绝校验: {sql[:80]}..."
-            )
+            raise ValueError(f"检测到多语句（中间含分号），拒绝校验: {sql[:80]}...")
         return sql
 
     def validate_sql(self, sql: str) -> ValidationResult:
@@ -164,9 +162,7 @@ class SQLValidator:
         """并发批量校验"""
         max_concurrent = self.config.get("sql_validation_max_concurrent", 5)
         pool_max = (
-            self.connector.pool.max_size
-            if self.connector.pool
-            else max_concurrent
+            self.connector.pool.max_size if self.connector.pool else max_concurrent
         )
         max_workers = min(max_concurrent, pool_max)
 
@@ -280,7 +276,10 @@ class SQLValidator:
 
                 # 加载相关关系
                 if table_names and db_name:
-                    from metaweave.core.sql_rag.context_utils import extract_relevant_relationship_sections
+                    from metaweave.core.sql_rag.context_utils import (
+                        extract_relevant_relationship_sections,
+                    )
+
                     rel_content = extract_relevant_relationship_sections(
                         self.rel_dir, table_names, db_name
                     )
@@ -410,7 +409,6 @@ class SQLValidator:
             return md_file.read_text(encoding="utf-8")
         return ""
 
-
     def _parse_repair_response(self, response: str) -> List[Dict]:
         """解析修复响应"""
         import re
@@ -504,26 +502,27 @@ class SQLValidator:
                 if repair_stats["attempted"]
                 else 0
             )
-            lines.extend([
-                "",
-                "SQL修复统计:",
-                f"  尝试修复: {repair_stats['attempted']}",
-                f"  修复成功: {repair_stats['successful']}",
-                f"  修复失败: {repair_stats['failed']}",
-                f"  修复成功率: {repair_rate:.2f}%",
-            ])
+            lines.extend(
+                [
+                    "",
+                    "SQL修复统计:",
+                    f"  尝试修复: {repair_stats['attempted']}",
+                    f"  修复成功: {repair_stats['successful']}",
+                    f"  修复失败: {repair_stats['failed']}",
+                    f"  修复成功率: {repair_rate:.2f}%",
+                ]
+            )
 
-        if (
-            repair_apply_stats["modified"] > 0
-            or repair_apply_stats["deleted"] > 0
-        ):
-            lines.extend([
-                "",
-                "修复结果回写统计:",
-                f"  替换的SQL: {repair_apply_stats['modified']}",
-                f"  删除的无效项: {repair_apply_stats['deleted']}",
-                f"  回写失败: {repair_apply_stats['failed']}",
-            ])
+        if repair_apply_stats["modified"] > 0 or repair_apply_stats["deleted"] > 0:
+            lines.extend(
+                [
+                    "",
+                    "修复结果回写统计:",
+                    f"  替换的SQL: {repair_apply_stats['modified']}",
+                    f"  删除的无效项: {repair_apply_stats['deleted']}",
+                    f"  回写失败: {repair_apply_stats['failed']}",
+                ]
+            )
 
         # 错误详情
         failed = [
@@ -535,10 +534,12 @@ class SQLValidator:
             lines.extend(["", f"错误详情（共{len(failed)}个）:", "=" * 50, ""])
             for seq, (i, r) in enumerate(failed, 1):
                 q = questions[i] if i < len(questions) else "N/A"
-                lines.extend([
-                    f"{seq}. 问题: {q}",
-                    f"   错误: {r.error_message}",
-                ])
+                lines.extend(
+                    [
+                        f"{seq}. 问题: {q}",
+                        f"   错误: {r.error_message}",
+                    ]
+                )
                 if r.repair_attempted:
                     lines.append("   LLM修复尝试: 失败")
                     if r.repair_error:
@@ -546,23 +547,21 @@ class SQLValidator:
                 lines.extend(["   完整SQL:", f"   {r.sql}", "-" * 40, ""])
 
         # 成功修复的
-        repaired = [
-            (i, r)
-            for i, r in enumerate(results)
-            if r.repair_successful
-        ]
+        repaired = [(i, r) for i, r in enumerate(results) if r.repair_successful]
         if repaired:
             lines.extend(["", f"成功修复的SQL（共{len(repaired)}个）:", "=" * 50, ""])
             for seq, (i, r) in enumerate(repaired, 1):
                 q = questions[i] if i < len(questions) else "N/A"
-                lines.extend([
-                    f"{seq}. 问题: {q}",
-                    f"   原始错误: {r.error_message}",
-                    "   修复后SQL:",
-                    f"   {r.repaired_sql}",
-                    "-" * 40,
-                    "",
-                ])
+                lines.extend(
+                    [
+                        f"{seq}. 问题: {q}",
+                        f"   原始错误: {r.error_message}",
+                        "   修复后SQL:",
+                        f"   {r.repaired_sql}",
+                        "-" * 40,
+                        "",
+                    ]
+                )
 
         return "\n".join(lines)
 

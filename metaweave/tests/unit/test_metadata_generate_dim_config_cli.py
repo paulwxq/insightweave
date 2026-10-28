@@ -92,8 +92,12 @@ def test_generate_dim_config_cli_overrides_config(tmp_path, monkeypatch):
         "loaders": {"dim_loader": {"config_file": "out2/dim_config/dim_tables.yaml"}},
     }
     result = _invoke(
-        runner, cfg, ["--dim-config", "custom/my_dim_tables.yaml"],
-        monkeypatch, tmp_path, loaded_config,
+        runner,
+        cfg,
+        ["--dim-config", "custom/my_dim_tables.yaml"],
+        monkeypatch,
+        tmp_path,
+        loaded_config,
     )
 
     assert result.exit_code == 0, result.output
@@ -110,7 +114,9 @@ def test_generate_dim_config_clean_removes_files_keeps_subdirs(tmp_path, monkeyp
     dim_dir = tmp_path / "output" / "dim_config"
     dim_dir.mkdir(parents=True)
     (dim_dir / "dim_tables.yaml").write_text("old: 1\n", encoding="utf-8")
-    (dim_dir / "dim_tables.yaml.bak_20260101_000000").write_text("bak\n", encoding="utf-8")
+    (dim_dir / "dim_tables.yaml.bak_20260101_000000").write_text(
+        "bak\n", encoding="utf-8"
+    )
     (dim_dir / "notes.txt").write_text("note\n", encoding="utf-8")
     subdir = dim_dir / "manual"
     subdir.mkdir()
@@ -156,7 +162,8 @@ def test_generate_dim_config_conflicts_with_generate_domains(tmp_path):
     result = runner.invoke(
         metadata_cli.metadata_command,
         [
-            "--config", str(cfg),
+            "--config",
+            str(cfg),
             "--generate-dim-config",
             "--generate-domains",
         ],
@@ -174,7 +181,8 @@ def test_generate_dim_config_conflicts_with_domain(tmp_path):
     result = runner.invoke(
         metadata_cli.metadata_command,
         [
-            "--config", str(cfg),
+            "--config",
+            str(cfg),
             "--generate-dim-config",
             "--domain",
         ],
@@ -192,9 +200,12 @@ def test_generate_dim_config_warns_out_of_scope_params(tmp_path, monkeypatch):
     runner = CliRunner()
     loaded_config = {"output": {"json_directory": "output/json"}}
     result = _invoke(
-        runner, cfg,
+        runner,
+        cfg,
         ["--description", "某描述", "--md-limit", "5", "--tables", "a,b"],
-        monkeypatch, tmp_path, loaded_config,
+        monkeypatch,
+        tmp_path,
+        loaded_config,
     )
 
     # 不拦截执行：生成仍完成
@@ -214,9 +225,12 @@ def test_generate_dim_config_no_warning_for_valid_params(tmp_path, monkeypatch):
     runner = CliRunner()
     loaded_config = {"output": {"json_directory": "output/json"}}
     result = _invoke(
-        runner, cfg,
+        runner,
+        cfg,
         ["--dim-config", "out2/dim_tables.yaml", "--clean"],
-        monkeypatch, tmp_path, loaded_config,
+        monkeypatch,
+        tmp_path,
+        loaded_config,
     )
 
     assert result.exit_code == 0, result.output
@@ -258,8 +272,13 @@ def test_mode_scoped_params_matrix():
     assert "md_context_dir" in m["generate-sql-rag"]
     assert "clean" in m["generate-sql-rag"]
     for p in (
-        "description", "md_context_mode", "md_limit", "dim_config_path",
-        "schemas", "tables", "max_workers",
+        "description",
+        "md_context_mode",
+        "md_limit",
+        "dim_config_path",
+        "schemas",
+        "tables",
+        "max_workers",
     ):
         assert p not in m["generate-sql-rag"]
 

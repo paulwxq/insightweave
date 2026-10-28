@@ -6,7 +6,7 @@ import {
   getDimValueObjectColumns,
   getDimValueObjects,
   putDimValueConfig,
-} from '../api/dataSources'
+} from '../api/workspaces'
 import { ApiError } from '../api/http'
 import type { DimValueColumn, DimValueObject } from '../api/types'
 
@@ -17,8 +17,7 @@ interface Row {
 }
 
 const props = defineProps<{
-  sourceId: string
-  jobId: string
+  workspaceId: string
   dbName: string
 }>()
 
@@ -88,8 +87,8 @@ async function load() {
   fatal.value = ''
   try {
     const [config, objectsResp] = await Promise.all([
-      getDimValueConfig(props.sourceId, props.jobId),
-      getDimValueObjects(props.sourceId, props.jobId),
+      getDimValueConfig(props.workspaceId),
+      getDimValueObjects(props.workspaceId),
     ])
     rows.value = config.tables.map((t) => ({ ...t }))
     version.value = config.version
@@ -113,8 +112,7 @@ async function loadColumns(row: { schema_name: string; object_name: string }) {
   columns.value = []
   try {
     const resp = await getDimValueObjectColumns(
-      props.sourceId,
-      props.jobId,
+      props.workspaceId,
       row.schema_name,
       row.object_name,
     )
@@ -175,7 +173,7 @@ async function save() {
   saving.value = true
   saveError.value = ''
   try {
-    await putDimValueConfig(props.sourceId, props.jobId, {
+    await putDimValueConfig(props.workspaceId, {
       tables: rows.value.map((r) => ({ ...r })),
       version: version.value,
     })

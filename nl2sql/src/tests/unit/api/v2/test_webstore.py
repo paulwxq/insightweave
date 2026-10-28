@@ -33,7 +33,7 @@ def store():
 def _registration(
     session_id="s_" + "a" * 32,
     *,
-    source_id="11111111-1111-1111-1111-111111111111",
+    source_id="db_src_1",
     **overrides,
 ):
     base = {
@@ -142,7 +142,7 @@ class TestOwnership:
         assert not ws.core_ownership_ok(rec, "s_" + "b" * 32)
 
     def test_bad_source_uuid(self):
-        rec = _registration(source_id="not-uuid")
+        rec = _registration(source_id="db_src_x")
         assert not ws.core_ownership_ok(rec, rec["session_id"])
 
 
@@ -167,12 +167,8 @@ class TestListSessions:
 
     def test_source_filter(self, store):
         self._put(store, "s_" + "1" * 32)
-        self._put(
-            store, "s_" + "2" * 32, source_id="22222222-2222-2222-2222-222222222222"
-        )
-        infos, _, _, _ = store.list_session_infos(
-            source_id="11111111-1111-1111-1111-111111111111"
-        )
+        self._put(store, "s_" + "2" * 32, source_id="db_src_2")
+        infos, _, _, _ = store.list_session_infos(source_id="db_src_1")
         assert [i["session_id"] for i in infos] == ["s_" + "1" * 32]
 
     def test_invalid_metadata_skipped_with_fields(self, store):

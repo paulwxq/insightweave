@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import logging
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Type
@@ -17,7 +16,7 @@ from metaweave.core.table_schema import (
     check_record_lengths,
     is_empty_description,
 )
-from metaweave.utils.source_id import normalize_source_id
+from metaweave.utils.source_id import normalize_run_uuid, normalize_source_id
 from metaweave.services.embedding_service import EmbeddingService
 from metaweave.services.vector_db.milvus_client import MilvusClient, _lazy_import_milvus
 from metaweave.utils.file_utils import resolve_project_path
@@ -45,7 +44,9 @@ class TableSchemaLoader(BaseLoader):
         self._injected_metadata_config = metadata_config
         loader_cfg = self.config.get("table_schema_loader", {})
 
-        self.md_directory = self._resolve_path(loader_cfg.get("md_directory", "output/md"))
+        self.md_directory = self._resolve_path(
+            loader_cfg.get("md_directory", "output/md")
+        )
         self.json_llm_directory = self._resolve_path(
             loader_cfg.get("json_llm_directory", "output/json")
         )
@@ -59,12 +60,12 @@ class TableSchemaLoader(BaseLoader):
         self.job_id: Optional[str] = None
         self.publish_id: Optional[str] = None
         if self.managed:
-            # doc 20.1 §10.1：同一批记录共用规范化的 source_id / publish_id。
-            # 未传 publish_id（调试 CLI）时生成仅作 Milvus 批次标记的 UUID。
+            # doc 20.1 §10.1：同一批记录共用规范化的 source_id / publish_run_id。
+            # 未传 publish_run_id（调试 CLI）时生成仅作 Milvus 批次标记的 UUID。
             self.source_id = str(normalize_source_id(loader_cfg["source_id"]))
             if loader_cfg.get("job_id"):
-                self.job_id = str(normalize_source_id(loader_cfg["job_id"]))
-            self.publish_id = str(normalize_source_id(publish_id or uuid4()))
+                self.job_id = str(loader_cfg["job_id"])
+            self.publish_id = str(normalize_run_uuid(publish_id or uuid4()))
         self._prepared = None
         self._prepared_objects = None
         self._embedding_dim: Optional[int] = None
@@ -90,7 +91,9 @@ class TableSchemaLoader(BaseLoader):
             loader = ConfigLoader(str(self.metadata_config_path))
             metadata_config = loader.load()
             if not metadata_config:
-                raise ValueError(f"无法加载 metadata_config.yaml: {self.metadata_config_path}")
+                raise ValueError(
+                    f"无法加载 metadata_config.yaml: {self.metadata_config_path}"
+                )
             return metadata_config
         except Exception as exc:  # noqa: BLE001
             raise ValueError(f"加载 metadata_config.yaml 失败: {exc}") from exc
@@ -100,7 +103,9 @@ class TableSchemaLoader(BaseLoader):
         vector_db = metadata_config.get("vector_database") or {}
         active = vector_db.get("active")
         if active != "milvus":
-            raise ValueError("当前仅支持 Milvus，请设置 vector_database.active = 'milvus'")
+            raise ValueError(
+                "当前仅支持 Milvus，请设置 vector_database.active = 'milvus'"
+            )
         milvus_cfg = (vector_db.get("providers") or {}).get("milvus")
         if not milvus_cfg:
             raise ValueError("缺少 Milvus 配置: vector_database.providers.milvus")
@@ -120,7 +125,9 @@ class TableSchemaLoader(BaseLoader):
         active_cfg = providers.get(active, {})
         dim = active_cfg.get("dimensions")
         if not dim:
-            raise ValueError("未找到 embedding 维度配置 embedding.providers.{active}.dimensions")
+            raise ValueError(
+                "未找到 embedding 维度配置 embedding.providers.{active}.dimensions"
+            )
         return int(dim)
 
     # ---- lifecycle ----
@@ -189,7 +196,9 @@ class TableSchemaLoader(BaseLoader):
             return False
 
         try:
-            self._embedding_service = self.embedding_service_cls(self._get_embedding_config())
+            self._embedding_service = self.embedding_service_cls(
+                self._get_embedding_config()
+            )
         except Exception as exc:  # noqa: BLE001
             logger.error("Embedding 服务初始化失败: %s", exc)
             return False
@@ -243,7 +252,9 @@ class TableSchemaLoader(BaseLoader):
             if not self._vector_db_config:
                 self._vector_db_config = self._get_vector_db_config()
             if not self._embedding_service:
-                self._embedding_service = self.embedding_service_cls(self._get_embedding_config())
+                self._embedding_service = self.embedding_service_cls(
+                    self._get_embedding_config()
+                )
             if not self._milvus_client:
                 self._milvus_client = self.milvus_client_cls(self._vector_db_config)
 
@@ -294,7 +305,9 @@ class TableSchemaLoader(BaseLoader):
             return list(self._prepared_objects)
 
         md_files = sorted(self.md_directory.glob("*.md"))
-        max_tables = self.options.max_tables if self.options.max_tables else len(md_files)
+        max_tables = (
+            self.options.max_tables if self.options.max_tables else len(md_files)
+        )
         groups: List[List[SchemaObject]] = []
         for idx, md_file in enumerate(md_files[:max_tables], start=1):
             logger.info("[%d/%d] 处理表 Markdown", idx, min(max_tables, len(md_files)))
@@ -465,9 +478,19 @@ class TableSchemaLoader(BaseLoader):
                     break
                 except Exception as exc:  # noqa: BLE001
                     if attempt < max_retries:
-                        logger.warning("向量化失败（尝试 %d/%d），重试中: %s", attempt + 1, max_retries + 1, exc)
+                        logger.warning(
+                            "向量化失败（尝试 %d/%d），重试中: %s",
+                            attempt + 1,
+                            max_retries + 1,
+                            exc,
+                        )
                     else:
-                        logger.error("向量化失败（已重试 %d 次），该批次 %d 条记录无向量: %s", max_retries, len(batch), exc)
+                        logger.error(
+                            "向量化失败（已重试 %d 次），该批次 %d 条记录无向量: %s",
+                            max_retries,
+                            len(batch),
+                            exc,
+                        )
             if embeddings is None:
                 skipped += len(batch)
                 continue
@@ -487,7 +510,9 @@ class TableSchemaLoader(BaseLoader):
         for vec in vectors.values():
             actual = int(vec.shape[-1]) if hasattr(vec, "shape") else len(vec)
             if actual != expected:
-                raise ValueError(f"向量维度与集合不一致: 实际 {actual}，集合 {expected}")
+                raise ValueError(
+                    f"向量维度与集合不一致: 实际 {actual}，集合 {expected}"
+                )
 
     def _write_batches(
         self,
@@ -510,7 +535,9 @@ class TableSchemaLoader(BaseLoader):
                     skipped += 1
                     continue
                 records.append(
-                    self._build_record(obj, vec.tolist() if hasattr(vec, "tolist") else vec)
+                    self._build_record(
+                        obj, vec.tolist() if hasattr(vec, "tolist") else vec
+                    )
                 )
             if not records:
                 continue
@@ -518,9 +545,13 @@ class TableSchemaLoader(BaseLoader):
             # 即使本次调用报错也不假定它完全没有写入
             result["replacement_started"] = True
             if use_insert:
-                written = self._milvus_client.insert_batch(self.collection_name, records)
+                written = self._milvus_client.insert_batch(
+                    self.collection_name, records
+                )
             else:
-                written = self._milvus_client.upsert_batch(self.collection_name, records)
+                written = self._milvus_client.upsert_batch(
+                    self.collection_name, records
+                )
             loaded += written
             if self.managed and written != len(records):
                 raise ValueError(
@@ -539,7 +570,9 @@ class TableSchemaLoader(BaseLoader):
         logger.info("已清理本源旧批次记录: %s 条", deleted)
 
     @staticmethod
-    def _iter_batches(items: List[SchemaObject], batch_size: int) -> List[List[SchemaObject]]:
+    def _iter_batches(
+        items: List[SchemaObject], batch_size: int
+    ) -> List[List[SchemaObject]]:
         for i in range(0, len(items), batch_size):
             yield items[i : i + batch_size]
 

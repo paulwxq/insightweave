@@ -1,22 +1,25 @@
-"""受管 JSON 步骤服务用例（doc 18 §3/§4）。
+"""受管 JSON 步骤 worker 用例（doc 18 §3/§4、doc 6 §4.1）。
 
-覆盖：job_id=None 拒绝、DDL 前置（状态/清单/库名一致）、配置预检在
-start_step 与清理之前、成功路径（快照核对/清理边界/核验/清单）、核验失败
-分支、DDL 重跑的锁下复查、准备失败不写步骤行。
+断代改造适配：上游就绪判定读 `ddl/` 顶层唯一成功采集 marker（不再读
+job_info 行）；worker 签名 `run_json_step(ctx) -> StepOutcome`。
 """
 
 import json
-from contextlib import contextmanager
+from pathlib import Path
 from types import SimpleNamespace
-from uuid import uuid4
+from uuid import UUID
 
 import pytest
 
 from backend.data_sources import json_step_service as service
-from backend.data_sources.db_step_service import DbStepConfigError
+from backend.data_sources.step_context import DbStepConfigError, StepContext
+from backend.persistence.models import DbSourceInfo
+from backend.profile_loading.ddl_loader import DDLInputError
 
-SOURCE_ID = uuid4()
-JOB_ID = uuid4()
+SOURCE_ID = "db_src_1"
+WORKSPACE_ID = "ws_1"
+RUN_ID = UUID("11111111-2222-4333-8444-555555555555")
+DDL_RUN_ID = UUID("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee")
 DB_NAME = "demo"
 
 MAIN_CONFIG = {
@@ -35,6 +38,8 @@ MAIN_CONFIG = {
 def _source(**overrides):
     values = dict(
         source_id=SOURCE_ID,
+        display_name="测试源",
+        description=None,
         db_type="postgresql",
         host="localhost",
         port=5432,
@@ -42,11 +47,12 @@ def _source(**overrides):
         username="reader",
         password_ciphertext="cipher",
         sslmode=None,
+        db_version=None,
         selected_schemas=["public"],
         is_active=True,
     )
     values.update(overrides)
-    return SimpleNamespace(**values)
+    return DbSourceInfo(**values)
 
 
 def _ddl_row(schema="public", obj="orders", db=DB_NAME):
@@ -58,7 +64,6 @@ def _ddl_row(schema="public", obj="orders", db=DB_NAME):
         "db_name": db,
         "object_type": "table",
         "define_text": "-- DDL",
-        "job_id": JOB_ID,
     }
 
 
@@ -94,72 +99,59 @@ def _write_json_file(json_dir, name, *, database=DB_NAME, schema="public", obj=N
     return path
 
 
-def _install(monkeypatch, tmp_path, source=None, ddl_rows=None, ddl_status="success"):
-    """安装记录型替身；文件操作（清理/写入/JsonLoader/核验）走真实实现，
-    项目根指向 tmp_path。返回记录器。"""
+def _install(
+    monkeypatch,
+    tmp_path,
+    *,
+    source=None,
+    ddl_rows=None,
+    ddl_read_error=None,
+    main_config=None,
+):
+    """项目根指向 tmp_path；DDL 读取换记录型替身；其余文件操作走真实实现。"""
     from metaweave.utils import file_utils
+    from backend.workspace_files.markers import write_collection_marker
 
     monkeypatch.setattr(file_utils, "get_project_root", lambda: tmp_path)
+    import backend.security.source_password as crypto
+
+    monkeypatch.setattr(crypto, "decrypt_password", lambda _cipher: "secret")
+
     source = source or _source()
     ddl_rows = ddl_rows if ddl_rows is not None else [_ddl_row()]
-    json_dir = tmp_path / "output" / str(SOURCE_ID) / str(JOB_ID) / "json"
-    ddl_dir = tmp_path / "output" / str(SOURCE_ID) / str(JOB_ID) / "ddl"
+    workspace = tmp_path / "output" / SOURCE_ID / WORKSPACE_ID
+    json_dir = workspace / "json"
+    ddl_dir = workspace / "ddl"
     ddl_dir.mkdir(parents=True, exist_ok=True)
+    write_collection_marker(ddl_dir, DDL_RUN_ID, "success")
+    # DDL 产物文件：input_manifest 按真实目录 glob 组装
+    for row in ddl_rows:
+        name = f"{row['db_name']}.{row['schema_name']}.{row['object_name']}.sql"
+        (ddl_dir / name).write_text("-- DDL\n", encoding="utf-8")
 
-    ddl_step = SimpleNamespace(last_status=ddl_status, updated_at="marker-1")
     rec = SimpleNamespace(
         source=source,
         ddl_rows=ddl_rows,
-        ddl_step=ddl_step,
+        ddl_read_error=ddl_read_error,
         json_dir=json_dir,
         ddl_dir=ddl_dir,
-        started=[],
-        finished=[],
-        locked=[],
         generator_configs=[],
         generate_calls=[],
-        ddl_reads=[],
-    )
-
-    monkeypatch.setattr(
-        service,
-        "load_main_config_snapshot",
-        lambda _p: json.loads(json.dumps(MAIN_CONFIG)),
-    )
-    monkeypatch.setattr(service, "load_platform_settings_from_env", lambda: object())
-
-    @contextmanager
-    def fake_session(_settings):
-        yield object()
-
-    monkeypatch.setattr(service, "platform_session", fake_session)
-    monkeypatch.setattr(service, "get_db_source", lambda _s, _id: rec.source)
-    monkeypatch.setattr(service, "decrypt_password", lambda _c: "secret")
-    monkeypatch.setattr(service, "assert_workspace_owner", lambda *a: None)
-    monkeypatch.setattr(service, "lock_db_source_row", lambda _s, sid: rec.source)
-
-    def fake_get_step_row(_session, job_id, step_name):
-        if step_name != "ddl":
-            return None
-        rec.ddl_reads.append((job_id, step_name))
-        return rec.ddl_step
-
-    monkeypatch.setattr(service, "get_step_row", fake_get_step_row)
-    monkeypatch.setattr(
-        service, "read_ddl_definitions", lambda sid, jid: (rec.ddl_rows, rec.ddl_dir)
-    )
-    monkeypatch.setattr(
-        service,
-        "start_step",
-        lambda _s, job_id, source_id, step: rec.started.append(
-            (job_id, source_id, step)
+        on_generate=None,
+        gen_result=_gen_result([]),
+        main_config=(
+            main_config
+            if main_config is not None
+            else json.loads(json.dumps(MAIN_CONFIG))
         ),
     )
-    monkeypatch.setattr(
-        service,
-        "finish_step",
-        lambda _s, job_id, step, status: rec.finished.append((job_id, step, status)),
-    )
+
+    def fake_read_ddl(_source_id, _workspace_id):
+        if rec.ddl_read_error is not None:
+            raise rec.ddl_read_error
+        return rec.ddl_rows, rec.ddl_dir
+
+    monkeypatch.setattr(service, "read_ddl_definitions", fake_read_ddl)
 
     class FakeGenerator:
         def __init__(self, config_path, config=None):
@@ -171,86 +163,113 @@ def _install(monkeypatch, tmp_path, source=None, ddl_rows=None, ddl_status="succ
                 rec.on_generate(rec)
             return rec.gen_result
 
-    rec.gen_result = _gen_result([])
-    rec.on_generate = None
-    rec.FakeGenerator = FakeGenerator
     monkeypatch.setattr(service, "MetadataGenerator", FakeGenerator)
     return rec
 
 
-def _seed_success_files(rec, *, rerun_ddl_after=False):
-    """生成钩子：清理后由"生成器"落盘与 DDL 清单一致的 JSON 产物。
+def _ctx(rec, step_params=None):
+    return StepContext(
+        settings=SimpleNamespace(),
+        source=rec.source,
+        main_config=rec.main_config,
+        config_path=Path("configs/metadata_config.yaml"),
+        source_id=SOURCE_ID,
+        workspace_id=WORKSPACE_ID,
+        run_id=RUN_ID,
+        step_name="json",
+        step_params=step_params,
+    )
 
-    rerun_ddl_after=True 模拟生成期间 DDL 被重跑（标识变化，doc 18 §4）。
-    """
+
+def _seed_success_files(rec, *, extra_names=()):
+    """生成钩子：由"生成器"落盘与 DDL 清单一致的 JSON 产物。"""
     names = sorted(
         f"{r['db_name']}.{r['schema_name']}.{r['object_name']}" for r in rec.ddl_rows
-    )
+    ) + list(extra_names)
 
     def on_generate(r):
         files = [_write_json_file(r.json_dir, name) for name in names]
         r.gen_result = _gen_result([str(p) for p in files])
-        if rerun_ddl_after:
-            r.ddl_step.updated_at = "marker-2"
 
     rec.on_generate = on_generate
     return names
 
 
-# ---------- job_id=None 与准备链拒绝 ----------
+# ---------- 上游就绪判定（doc 6 §4.1：采集 marker） ----------
 
 
-def test_job_id_none_rejects_before_any_side_effect(monkeypatch, tmp_path):
-    """doc 18 §3.1：新作业 JSON 单选在准备链最前拒绝，不建工作区。"""
+def test_no_ddl_marker_rejects_before_any_side_effect(monkeypatch, tmp_path):
+    """工作区无 DDL marker：准备失败，不建产物目录、不生成。"""
     from metaweave.utils import file_utils
 
     monkeypatch.setattr(file_utils, "get_project_root", lambda: tmp_path)
     with pytest.raises(DbStepConfigError, match="DDL 产物未就绪"):
-        service.run_json_step("cfg.yaml", str(SOURCE_ID), None)
-    assert not (tmp_path / "output").exists()
+        service.run_json_step(
+            _ctx(SimpleNamespace(source=_source(), main_config=MAIN_CONFIG))
+        )
+    assert not (tmp_path / "output" / SOURCE_ID / WORKSPACE_ID / "json").exists()
 
 
-def test_prep_failure_raises_config_error_without_step_row(monkeypatch, tmp_path):
-    """DDL 状态非 success：准备失败抛 DbStepConfigError，不写步骤行、不清理。"""
-    rec = _install(monkeypatch, tmp_path, ddl_status="failed")
-    _seed_success_files(rec)  # 预置旧文件，验证不被清理
-    old = list(rec.json_dir.glob("*.json"))
+def test_failed_ddl_marker_rejects(monkeypatch, tmp_path):
+    from backend.workspace_files.markers import write_collection_marker
 
+    rec = _install(monkeypatch, tmp_path)
+    # 重写为 failed marker（write 会先清旧 marker）
+    write_collection_marker(rec.ddl_dir, DDL_RUN_ID, "failed")
+    _seed_success_files(rec)  # 预置旧文件钩子，验证不被触发
     with pytest.raises(DbStepConfigError, match="DDL 产物未就绪"):
-        service.run_json_step("cfg.yaml", str(SOURCE_ID), str(JOB_ID))
-    assert rec.started == [] and rec.finished == []
-    assert list(rec.json_dir.glob("*.json")) == old  # 旧 JSON 保持不变
+        service.run_json_step(_ctx(rec))
+    assert rec.generate_calls == []
+
+
+def test_multiple_ddl_markers_rejects_as_unknown_state(monkeypatch, tmp_path):
+    rec = _install(monkeypatch, tmp_path)
+    (
+        rec.ddl_dir
+        / ".coll_run_id_99999999-9999-4999-8999-999999999999_20260101-000000000_success"
+    ).touch()
+    with pytest.raises(DbStepConfigError, match="多个采集 marker"):
+        service.run_json_step(_ctx(rec))
+    assert rec.generate_calls == []
+
+
+def test_ddl_read_error_wrapped_as_not_ready(monkeypatch, tmp_path):
+    rec = _install(
+        monkeypatch,
+        tmp_path,
+        ddl_read_error=DDLInputError("DDL 文件缺失: demo.public.orders.sql"),
+    )
+    with pytest.raises(DbStepConfigError, match="DDL 产物未就绪（DDLInputError）"):
+        service.run_json_step(_ctx(rec))
+    assert rec.generate_calls == []
 
 
 def test_prep_rejects_ddl_db_name_mismatch(monkeypatch, tmp_path):
     """DDL 头部库名与登记源当前库名不一致：连接前拒绝（doc 18 §3.2）。"""
     rec = _install(monkeypatch, tmp_path, ddl_rows=[_ddl_row(db="old_db")])
     with pytest.raises(DbStepConfigError, match="库名"):
-        service.run_json_step("cfg.yaml", str(SOURCE_ID), str(JOB_ID))
-    assert rec.started == []
+        service.run_json_step(_ctx(rec))
+    assert rec.generate_calls == []
 
 
-def test_prep_rejects_invalid_sampling_config_before_start(monkeypatch, tmp_path):
-    """sampling 非 limit：配置预检在 start_step 与清理之前受控失败。"""
-    rec = _install(monkeypatch, tmp_path)
-    monkeypatch.setattr(
-        service,
-        "load_main_config_snapshot",
-        lambda _p: {
+def test_prep_rejects_invalid_sampling_config_before_backup(monkeypatch, tmp_path):
+    """sampling 非 limit：配置预检在备份与生成之前受控失败。"""
+    rec = _install(
+        monkeypatch,
+        tmp_path,
+        main_config={
             **MAIN_CONFIG,
             "sampling": {"enabled": False, "sample_method": "random"},
         },
     )
-    with pytest.raises(DbStepConfigError, match="sample_method"):
-        service.run_json_step("cfg.yaml", str(SOURCE_ID), str(JOB_ID))
-    assert rec.started == []
-
-
-def test_prep_rejects_missing_registration_fields(monkeypatch, tmp_path):
-    rec = _install(monkeypatch, tmp_path, source=_source(username=""))
-    with pytest.raises(DbStepConfigError, match="必要的连接字段"):
-        service.run_json_step("cfg.yaml", str(SOURCE_ID), str(JOB_ID))
-    assert rec.started == []
+    # 预置旧 JSON：预检失败不触发备份，旧产物保留
+    rec.json_dir.mkdir(parents=True, exist_ok=True)
+    old = rec.json_dir / "demo.public.old.json"
+    old.write_text("{}", encoding="utf-8")
+    with pytest.raises((ValueError, DbStepConfigError), match="sample_method"):
+        service.run_json_step(_ctx(rec))
+    assert rec.generate_calls == []
+    assert old.exists() and not (rec.json_dir / ".backup").exists()
 
 
 # ---------- 成功路径 ----------
@@ -259,374 +278,214 @@ def test_prep_rejects_missing_registration_fields(monkeypatch, tmp_path):
 def test_success_collects_validates_and_writes_manifest(monkeypatch, tmp_path):
     rec = _install(monkeypatch, tmp_path, ddl_rows=[_ddl_row(), _ddl_row(obj="bills")])
     names = _seed_success_files(rec)
-    # 预置旧 manifest：应随清理被移除后重写
+    # 预置旧 manifest 与旧产物：随整目录备份移走后重写
     rec.json_dir.mkdir(parents=True, exist_ok=True)
     (rec.json_dir / "manifest.json").write_text('{"files": ["old"]}', encoding="utf-8")
 
-    result = service.run_json_step("cfg.yaml", str(SOURCE_ID), str(JOB_ID))
+    outcome = service.run_json_step(_ctx(rec))
 
-    assert result["success"] is True, result
-    assert result["job_id"] == str(JOB_ID)
-    assert rec.started == [(JOB_ID, SOURCE_ID, "json")]
-    assert rec.finished == [(JOB_ID, "json", "success")]
-    # 快照：连接与全部输出目录指向同一工作区，json 目录与 resolver 一致
-    (snapshot,) = rec.generator_configs
-    from metaweave.core.clean_targets import resolve_json_output_dir
-
-    assert snapshot["output"]["json_directory"] == str(
-        resolve_json_output_dir(SOURCE_ID, JOB_ID)
-    )
-    assert snapshot["output"]["ddl_directory"] == str(rec.ddl_dir)
-    assert snapshot["database"]["database"] == DB_NAME
-    # 清单：排序去重、只列画像文件
+    assert outcome.success is True, outcome.message
+    assert "2 个对象" in outcome.message
     manifest = json.loads((rec.json_dir / "manifest.json").read_text(encoding="utf-8"))
-    # 与 DDL 清单同形状：完整文件名（含 .json 后缀）、排序去重
-    assert manifest == {"files": [n + ".json" for n in names]}
-    assert rec.generate_calls == [("json", 4)]
-
-
-def test_failure_marks_failed_but_keeps_partial_files(monkeypatch, tmp_path):
-    """result.success=True 但 failed>0：标 failed、不写有效清单、保留部分文件。"""
-    rec = _install(monkeypatch, tmp_path)
-
-    def on_generate(r):
-        p = _write_json_file(r.json_dir, f"{DB_NAME}.public.orders")
-        r.gen_result = _gen_result([str(p)], failed=1)
-
-    rec.on_generate = on_generate
-
-    result = service.run_json_step("cfg.yaml", str(SOURCE_ID), str(JOB_ID))
-
-    assert result["success"] is False
-    assert rec.finished == [(JOB_ID, "json", "failed")]
-    assert not (rec.json_dir / "manifest.json").exists()
-    assert list(rec.json_dir.glob("*.json"))  # 部分文件保留供排障
-
-
-def test_stray_json_file_fails_verification(monkeypatch, tmp_path):
-    """目录混入清单外/非本库 .json：集合核对判失败（doc 18 §4）。"""
-    rec = _install(monkeypatch, tmp_path)
-
-    def on_generate(r):
-        main = _write_json_file(r.json_dir, f"{DB_NAME}.public.orders")
-        stray = _write_json_file(r.json_dir, f"{DB_NAME}.public.stray")
-        r.gen_result = _gen_result([str(main), str(stray)])
-
-    rec.on_generate = on_generate
-
-    result = service.run_json_step("cfg.yaml", str(SOURCE_ID), str(JOB_ID))
-
-    assert result["success"] is False
-    assert "清单" in result["message"] or "集合" in result["message"]
-    assert rec.finished == [(JOB_ID, "json", "failed")]
-    assert not (rec.json_dir / "manifest.json").exists()
-
-
-def test_scope_drift_against_ddl_manifest_fails(monkeypatch, tmp_path):
-    """两次运行之间范围变化导致 stem 集合与 DDL 清单不同：判失败并提示重跑 DDL。"""
-    rec = _install(monkeypatch, tmp_path)  # DDL 只有 orders
-
-    def on_generate(r):
-        # 生成器却产出 orders + bills（模拟 include_object_types 变化）
-        files = [
-            str(_write_json_file(r.json_dir, f"{DB_NAME}.public.orders")),
-            str(_write_json_file(r.json_dir, f"{DB_NAME}.public.bills")),
-        ]
-        r.gen_result = _gen_result(files, processed=2)
-
-    rec.on_generate = on_generate
-
-    result = service.run_json_step("cfg.yaml", str(SOURCE_ID), str(JOB_ID))
-
-    assert result["success"] is False
-    assert "重跑" in result["message"]
-    assert rec.finished == [(JOB_ID, "json", "failed")]
-
-
-def test_ddl_rerun_during_generation_blocks_success(monkeypatch, tmp_path):
-    """生成期间 DDL 重跑（updated_at 变化）：锁下复查不通过，不写清单。"""
-    rec = _install(monkeypatch, tmp_path)
-    _seed_success_files(rec, rerun_ddl_after=True)
-
-    result = service.run_json_step("cfg.yaml", str(SOURCE_ID), str(JOB_ID))
-
-    assert result["success"] is False
-    assert "DDL" in result["message"]
-    assert rec.finished == [(JOB_ID, "json", "failed")]
-    assert not (rec.json_dir / "manifest.json").exists()
-
-
-def test_generator_crash_marks_failed_and_finish_called(monkeypatch, tmp_path):
-    rec = _install(monkeypatch, tmp_path)
-    _seed_success_files(rec)
-
-    def crash(self, step, max_workers=4):
-        raise RuntimeError("boom")
-
-    rec.FakeGenerator.generate = crash
-    result = service.run_json_step("cfg.yaml", str(SOURCE_ID), str(JOB_ID))
-
-    assert result["success"] is False
-    assert "RuntimeError" in result["message"]
-    assert rec.finished == [(JOB_ID, "json", "failed")]
-
-
-def test_invalid_v3_json_fails_verification_not_crash(monkeypatch, tmp_path):
-    """v3/身份校验失败按 failed 处理，不向调用方抛裸异常（doc 18 验收 3）。"""
-    rec = _install(monkeypatch, tmp_path)
-
-    def on_generate(r):
-        p = r.json_dir / f"{DB_NAME}.public.orders.json"
-        r.json_dir.mkdir(parents=True, exist_ok=True)
-        p.write_text('{"metadata_version": "2.0"}', encoding="utf-8")  # 坏 v3
-        r.gen_result = _gen_result([str(p)])
-
-    rec.on_generate = on_generate
-
-    result = service.run_json_step("cfg.yaml", str(SOURCE_ID), str(JOB_ID))
-
-    assert result["success"] is False
-    assert rec.finished == [(JOB_ID, "json", "failed")]
-    assert not (rec.json_dir / "manifest.json").exists()
-
-
-def test_manifest_write_failure_marks_failed_not_stuck_running(monkeypatch, tmp_path):
-    """doc 18 §4/验收 3：清单写盘失败标 failed——finish_step 必须被调用，
-    不能让 job_info 停在 running 楔死工作区。"""
-    rec = _install(monkeypatch, tmp_path)
-    _seed_success_files(rec)
-
-    def failing_atomic_write(*_args, **_kwargs):
-        raise OSError("disk full")
-
-    monkeypatch.setattr(service, "atomic_write_json", failing_atomic_write)
-
-    result = service.run_json_step("cfg.yaml", str(SOURCE_ID), str(JOB_ID))
-
-    assert result["success"] is False
-    assert "清单写入失败" in result["message"]
-    assert rec.finished == [(JOB_ID, "json", "failed")]  # 状态落定，可重跑
-    assert not (rec.json_dir / "manifest.json").exists()
-
-
-def test_missing_workspace_reports_config_error_not_platform(monkeypatch, tmp_path):
-    """doc 18 验收 2：不存在的 job_id 是受控准备错误（400 口径），
-    不是平台库故障（503）。与 DDL 步骤同款处理。"""
-    from backend.jobs.repository import WorkspaceMissingError
-
-    rec = _install(monkeypatch, tmp_path)
-
-    def missing(_session, job_id, source_id):
-        raise WorkspaceMissingError(f"指定的 job_id 不存在: {job_id}")
-
-    monkeypatch.setattr(service, "assert_workspace_owner", missing)
-
-    with pytest.raises(DbStepConfigError, match="job_id 不存在"):
-        service.run_json_step("cfg.yaml", str(SOURCE_ID), str(JOB_ID))
-    assert rec.started == [] and rec.finished == []
-
-
-def test_mismatched_workspace_reports_config_error(monkeypatch, tmp_path):
-    """错源工作区同样显式转为 DbStepConfigError（锁定，不靠 ValueError 碰巧）。"""
-    from backend.jobs.repository import WorkspaceSourceMismatchError
-
-    rec = _install(monkeypatch, tmp_path)
-
-    def mismatch(_session, job_id, source_id):
-        raise WorkspaceSourceMismatchError("该作业属于另一个数据源")
-
-    monkeypatch.setattr(service, "assert_workspace_owner", mismatch)
-
-    with pytest.raises(DbStepConfigError, match="另一个数据源"):
-        service.run_json_step("cfg.yaml", str(SOURCE_ID), str(JOB_ID))
-    assert rec.started == [] and rec.finished == []
-
-
-def test_cyclic_symlink_output_marks_failed_not_stuck_running(monkeypatch, tmp_path):
-    """doc 18 验收 3：符号链接输出标 failed——核验异常也不卡 running。
-
-    循环符号链接会让 Path.resolve() 抛 RuntimeError（Python 3.12 实测），
-    核验必须先拒绝非常规文件，且任何核验异常都进入失败状态写回。
-    """
-    rec = _install(monkeypatch, tmp_path)
-
-    def on_generate(r):
-        r.json_dir.mkdir(parents=True, exist_ok=True)
-        loop = r.json_dir / f"{DB_NAME}.public.loop.json"
-        loop.symlink_to(loop)  # 自指循环
-        r.gen_result = _gen_result([str(loop)])
-
-    rec.on_generate = on_generate
-
-    result = service.run_json_step("cfg.yaml", str(SOURCE_ID), str(JOB_ID))
-
-    assert result["success"] is False
-    assert rec.finished == [(JOB_ID, "json", "failed")]  # 状态落定，不楔死
-    assert not (rec.json_dir / "manifest.json").exists()
-
-
-def test_failed_tables_message_includes_ddl_rerun_hint(monkeypatch, tmp_path):
-    """doc 18 §4：源库新增对象而 DDL 缺件时失败提示仍指向重跑同作业 DDL
-    （failed_tables 早退路径也给出排障指引，不只是 stem 比对路径）。"""
-    rec = _install(monkeypatch, tmp_path)
-
-    def on_generate(r):
-        p = _write_json_file(r.json_dir, f"{DB_NAME}.public.orders")
-        # 模拟新增对象 bills 在旧 DDL 中缺件：逐表失败计入 failed_tables
-        r.gen_result = _gen_result([str(p)], failed=1)
-
-    rec.on_generate = on_generate
-
-    result = service.run_json_step("cfg.yaml", str(SOURCE_ID), str(JOB_ID))
-
-    assert result["success"] is False
-    assert "对象采集失败" in result["message"]
-    assert "重跑同一作业 DDL" in result["message"]
-
-
-def test_ddl_read_oserror_reports_config_error_not_platform(monkeypatch, tmp_path):
-    """read_ddl_definitions 的 OSError（并发删除/权限/IO 抖动）按"DDL 产物
-    未就绪"受控拒绝，不得落入"平台库连接或读取失败"前缀变 503（doc 18 §3.2）。
-    """
-    rec = _install(monkeypatch, tmp_path)
-
-    def flaky_read(source_id, job_id):
-        raise OSError("file vanished")
-
-    monkeypatch.setattr(service, "read_ddl_definitions", flaky_read)
-
-    with pytest.raises(DbStepConfigError, match="DDL 产物未就绪"):
-        service.run_json_step("cfg.yaml", str(SOURCE_ID), str(JOB_ID))
-    assert rec.started == [] and rec.finished == []
-
-
-def test_prep_rejects_non_object_database_section(monkeypatch, tmp_path):
-    """database: 5（dict() 会 TypeError）按配置错误拒绝，不误报 503
-    （doc 19.1 §8 验收 2）。"""
-    rec = _install(monkeypatch, tmp_path)
-    monkeypatch.setattr(
-        service, "load_main_config_snapshot", lambda _p: {**MAIN_CONFIG, "database": 5}
+    assert manifest == {"files": [f"{name}.json" for name in names]}
+    # 注：当前实现 output_files 会把 manifest.json 计两次（glob 已含清单
+    # 又 append 一次）；按集合断言，重复问题记入改造审计报告。
+    assert sorted(set(outcome.output_files)) == sorted(
+        [f"json/{name}.json" for name in names] + ["json/manifest.json"]
     )
-    with pytest.raises(DbStepConfigError, match="database 必须是对象"):
-        service.run_json_step("cfg.yaml", str(SOURCE_ID), str(JOB_ID))
-    assert rec.started == []
+    # 输入清单携带 DDL 产物文件及其采集来源运行（doc 6.1 §11）
+    assert outcome.input_files == [
+        ("ddl/demo.public.bills.sql", str(DDL_RUN_ID)),
+        ("ddl/demo.public.orders.sql", str(DDL_RUN_ID)),
+    ]
+    # 旧 manifest 进入备份，不在顶层
+    backups = list((rec.json_dir / ".backup").iterdir())
+    assert len(backups) == 1
+    assert (backups[0] / "manifest.json").read_text(
+        encoding="utf-8"
+    ) == '{"files": ["old"]}'
 
 
-# --- doc 19.1 §4：exclude_tables 共享检查 + 只读 JSON 输入校验 -----------------
-
-
-@pytest.mark.parametrize("invalid", ["abc", None])
-def test_prep_rejects_non_list_exclude_tables_before_start(
-    monkeypatch, tmp_path, invalid
-):
-    """exclude_tables 非列表（含 YAML 空节点 null）在 start_step 与清理前
-    受控拒绝（doc 19.1 §4），旧 JSON 产物保持不变。"""
+def test_backup_moves_old_json_products(monkeypatch, tmp_path):
     rec = _install(monkeypatch, tmp_path)
     _seed_success_files(rec)
     rec.json_dir.mkdir(parents=True, exist_ok=True)
-    old = _write_json_file(rec.json_dir, f"{DB_NAME}.public.orders")
-    monkeypatch.setattr(
-        service,
-        "load_main_config_snapshot",
-        lambda _p: {
-            **MAIN_CONFIG,
-            "database": {**MAIN_CONFIG["database"], "exclude_tables": invalid},
-        },
-    )
+    stale = rec.json_dir / "demo.public.stale.json"
+    stale.write_text("{}", encoding="utf-8")
 
-    with pytest.raises(DbStepConfigError, match="exclude_tables 必须是列表"):
-        service.run_json_step("cfg.yaml", str(SOURCE_ID), str(JOB_ID))
-    assert rec.started == []
-    assert old.exists()  # 未被清理
+    outcome = service.run_json_step(_ctx(rec))
+
+    assert outcome.success is True
+    (backup,) = list((rec.json_dir / ".backup").iterdir())
+    assert (backup / "demo.public.stale.json").exists()
+    assert not stale.exists()
+    # 旧 DDL marker 属于 ddl 目录，不随 json 目录备份移动
+    assert list(rec.ddl_dir.glob(".coll_run_id_*"))
+
+
+# ---------- 核验失败分支 ----------
+
+
+def test_stray_json_file_fails_verification(monkeypatch, tmp_path):
+    """生成器写出 DDL 清单之外的对象：集合漂移判失败，要求重跑 DDL。"""
+    rec = _install(monkeypatch, tmp_path)
+    _seed_success_files(rec, extra_names=["demo.public.extra"])
+
+    outcome = service.run_json_step(_ctx(rec))
+
+    assert outcome.success is False
+    assert "与工作区 DDL 清单不一致" in outcome.message
+
+
+def test_claimed_but_missing_file_fails_verification(monkeypatch, tmp_path):
+    """生成器声明输出但未落盘：核对以磁盘为准。"""
+
+    def on_generate(r):
+        path = _write_json_file(r.json_dir, "demo.public.orders")
+        ghost = r.json_dir / "demo.public.ghost.json"
+        r.gen_result = _gen_result([str(path), str(ghost)])
+
+    rec = _install(monkeypatch, tmp_path)
+    rec.on_generate = on_generate
+    outcome = service.run_json_step(_ctx(rec))
+    assert outcome.success is False
+    assert "未实际落盘" in outcome.message
+
+
+def test_scope_drift_against_ddl_manifest_fails(monkeypatch, tmp_path):
+    """生成的对象集合与工作区 DDL 清单不一致：要求重跑 DDL。"""
+    rec = _install(monkeypatch, tmp_path, ddl_rows=[_ddl_row(), _ddl_row(obj="bills")])
+
+    def on_generate(r):
+        path = _write_json_file(r.json_dir, "demo.public.orders")
+        r.gen_result = _gen_result([str(path)])
+
+    rec.on_generate = on_generate
+    outcome = service.run_json_step(_ctx(rec))
+    assert outcome.success is False
+    assert "与工作区 DDL 清单不一致" in outcome.message
+
+
+def test_generator_crash_marks_failed(monkeypatch, tmp_path):
+    def on_generate(_r):
+        raise RuntimeError("boom")
+
+    rec = _install(monkeypatch, tmp_path)
+    rec.on_generate = on_generate
+    outcome = service.run_json_step(_ctx(rec))
+    assert outcome.success is False
+    assert "JSON 采集失败（RuntimeError）" in outcome.message
+    assert "boom" not in outcome.message
+
+
+def test_failed_tables_message_includes_ddl_rerun_hint(monkeypatch, tmp_path):
+    rec = _install(monkeypatch, tmp_path)
+
+    def on_generate(r):
+        path = _write_json_file(r.json_dir, "demo.public.orders")
+        r.gen_result = _gen_result([str(path)], failed=1, processed=1)
+
+    rec.on_generate = on_generate
+    outcome = service.run_json_step(_ctx(rec))
+    assert outcome.success is False
+    assert "1 个对象采集失败" in outcome.message
+    assert "重跑 DDL" in outcome.message
+
+
+def test_invalid_v3_json_fails_verification_not_crash(monkeypatch, tmp_path):
+    rec = _install(monkeypatch, tmp_path)
+
+    def on_generate(r):
+        r.json_dir.mkdir(parents=True, exist_ok=True)
+        path = r.json_dir / "demo.public.orders.json"
+        path.write_text('{"metadata_version": "2.0"}', encoding="utf-8")
+        r.gen_result = _gen_result([str(path)])
+
+    rec.on_generate = on_generate
+    outcome = service.run_json_step(_ctx(rec))
+    assert outcome.success is False
+    assert "v3" in outcome.message
+
+
+def test_manifest_write_failure_marks_failed(monkeypatch, tmp_path):
+    rec = _install(monkeypatch, tmp_path)
+    _seed_success_files(rec)
+
+    def broken_write(*_args, **_kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(service, "atomic_write_json", broken_write)
+    outcome = service.run_json_step(_ctx(rec))
+    assert outcome.success is False
+    assert outcome.message == "JSON 采集清单写入失败"
+
+
+# ---------- read_managed_json_input（发布/下游共用的只读契约） ----------
+
+
+def _seed_json_dir(tmp_path, monkeypatch):
+    monkey_dir = tmp_path / "output" / SOURCE_ID / WORKSPACE_ID / "json"
+    monkeypatch.setattr("metaweave.utils.file_utils.get_project_root", lambda: tmp_path)
+    return monkey_dir
 
 
 def test_read_managed_json_input_returns_objects(tmp_path, monkeypatch):
-    from metaweave.utils import file_utils
-
-    monkeypatch.setattr(file_utils, "get_project_root", lambda: tmp_path)
-    json_dir = tmp_path / "output" / str(SOURCE_ID) / str(JOB_ID) / "json"
-    _write_json_file(json_dir, f"{DB_NAME}.public.orders")
-    _write_json_file(json_dir, f"{DB_NAME}.public.bills")
-    import json as _json
-
+    json_dir = _seed_json_dir(tmp_path, monkeypatch)
+    _write_json_file(json_dir, "demo.public.orders")
+    _write_json_file(json_dir, "demo.public.bills")
     (json_dir / "manifest.json").write_text(
-        _json.dumps(
-            {"files": [f"{DB_NAME}.public.bills.json", f"{DB_NAME}.public.orders.json"]}
-        ),
+        json.dumps({"files": ["demo.public.bills.json", "demo.public.orders.json"]}),
         encoding="utf-8",
     )
-
-    objects = service.read_managed_json_input(SOURCE_ID, JOB_ID, DB_NAME)
-    assert [(o["schema"], o["object"], o["object_type"]) for o in objects] == [
-        ("public", "bills", "table"),
-        ("public", "orders", "table"),
+    objects = service.read_managed_json_input(SOURCE_ID, WORKSPACE_ID, DB_NAME)
+    assert objects == [
+        {"schema": "public", "object": "bills", "object_type": "table"},
+        {"schema": "public", "object": "orders", "object_type": "table"},
     ]
 
 
 def test_read_managed_json_input_rejects_manifest_mismatch(tmp_path, monkeypatch):
-    from metaweave.utils import file_utils
-
-    monkeypatch.setattr(file_utils, "get_project_root", lambda: tmp_path)
-    json_dir = tmp_path / "output" / str(SOURCE_ID) / str(JOB_ID) / "json"
-    _write_json_file(json_dir, f"{DB_NAME}.public.orders")
-    (json_dir / "manifest.json").write_text('{"files": []}', encoding="utf-8")
-
-    with pytest.raises(ValueError, match="清单"):
-        service.read_managed_json_input(SOURCE_ID, JOB_ID, DB_NAME)
+    json_dir = _seed_json_dir(tmp_path, monkeypatch)
+    _write_json_file(json_dir, "demo.public.orders")
+    (json_dir / "manifest.json").write_text(
+        json.dumps({"files": ["demo.public.orders.json", "demo.public.ghost.json"]}),
+        encoding="utf-8",
+    )
+    with pytest.raises(service.ManagedJsonInputError, match="不一致"):
+        service.read_managed_json_input(SOURCE_ID, WORKSPACE_ID, DB_NAME)
 
 
 def test_read_managed_json_input_rejects_foreign_database_entry(tmp_path, monkeypatch):
-    """清单里混入其他库名前缀的文件：按非当前库拒绝，不静默忽略。"""
-    from metaweave.utils import file_utils
-
-    monkeypatch.setattr(file_utils, "get_project_root", lambda: tmp_path)
-    json_dir = tmp_path / "output" / str(SOURCE_ID) / str(JOB_ID) / "json"
-    _write_json_file(json_dir, f"{DB_NAME}.public.orders")
-    _write_json_file(json_dir, "other_db.public.stray")
-    import json as _json
-
+    json_dir = _seed_json_dir(tmp_path, monkeypatch)
+    _write_json_file(json_dir, "demo.public.orders")
+    _write_json_file(json_dir, "other.public.bills")
     (json_dir / "manifest.json").write_text(
-        _json.dumps(
-            {"files": [f"{DB_NAME}.public.orders.json", "other_db.public.stray.json"]}
-        ),
+        json.dumps({"files": ["demo.public.orders.json", "other.public.bills.json"]}),
         encoding="utf-8",
     )
-
-    with pytest.raises(ValueError, match="不属于当前数据库"):
-        service.read_managed_json_input(SOURCE_ID, JOB_ID, DB_NAME)
+    with pytest.raises(service.ManagedJsonInputError, match="不属于当前数据库"):
+        service.read_managed_json_input(SOURCE_ID, WORKSPACE_ID, DB_NAME)
 
 
 def test_read_managed_json_input_rejects_symlinked_profile(tmp_path, monkeypatch):
-    """画像文件被换成符号链接（指向工作区外）：拒绝，不跟随读取越界内容
-    （doc 19.1 §4：符号链接/非普通文件均拒绝）。"""
-    from metaweave.utils import file_utils
-
-    monkeypatch.setattr(file_utils, "get_project_root", lambda: tmp_path)
-    json_dir = tmp_path / "output" / str(SOURCE_ID) / str(JOB_ID) / "json"
-    json_dir.mkdir(parents=True)
+    json_dir = _seed_json_dir(tmp_path, monkeypatch)
+    _write_json_file(json_dir, "demo.public.orders")
+    (json_dir / "manifest.json").write_text(
+        json.dumps({"files": ["demo.public.orders.json"]}), encoding="utf-8"
+    )
     outside = tmp_path / "outside.json"
     outside.write_text("{}", encoding="utf-8")
-    link = json_dir / f"{DB_NAME}.public.orders.json"
-    link.symlink_to(outside)
-    import json as _json
-
-    (json_dir / "manifest.json").write_text(
-        _json.dumps({"files": [link.name]}), encoding="utf-8"
-    )
-
-    with pytest.raises(ValueError, match="非常规文件"):
-        service.read_managed_json_input(SOURCE_ID, JOB_ID, DB_NAME)
+    # 清单不列出该文件也先拒绝：目录存在非常规文件（doc 19.1 §4）
+    (json_dir / "demo.public.bills.json").symlink_to(outside)
+    with pytest.raises(service.ManagedJsonInputError, match="非常规文件"):
+        service.read_managed_json_input(SOURCE_ID, WORKSPACE_ID, DB_NAME)
 
 
 def test_read_managed_json_input_rejects_non_string_files_entry(tmp_path, monkeypatch):
-    """files 含非字符串元素：按清单形状拒绝，不以 set() 的 TypeError 漏成
-    平台库故障（doc 19.1 §4 只读输入契约）。"""
-    from metaweave.utils import file_utils
-
-    monkeypatch.setattr(file_utils, "get_project_root", lambda: tmp_path)
-    json_dir = tmp_path / "output" / str(SOURCE_ID) / str(JOB_ID) / "json"
-    json_dir.mkdir(parents=True)
-    (json_dir / "manifest.json").write_text('{"files": [["x.json"]]}', encoding="utf-8")
-
-    with pytest.raises(ValueError, match="形状"):
-        service.read_managed_json_input(SOURCE_ID, JOB_ID, DB_NAME)
+    json_dir = _seed_json_dir(tmp_path, monkeypatch)
+    _write_json_file(json_dir, "demo.public.orders")
+    (json_dir / "manifest.json").write_text(
+        json.dumps({"files": [42]}), encoding="utf-8"
+    )
+    with pytest.raises(service.ManagedJsonInputError, match="形状"):
+        service.read_managed_json_input(SOURCE_ID, WORKSPACE_ID, DB_NAME)

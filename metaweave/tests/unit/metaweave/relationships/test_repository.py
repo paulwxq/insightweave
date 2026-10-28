@@ -14,13 +14,11 @@ class TestMetadataRepository:
         repo = MetadataRepository(Path("output/json"))
 
         rel_id1 = repo._generate_relation_id(
-            "public", "fact_sales", ["store_id"],
-            "public", "dim_store", ["store_id"]
+            "public", "fact_sales", ["store_id"], "public", "dim_store", ["store_id"]
         )
 
         rel_id2 = repo._generate_relation_id(
-            "public", "fact_sales", ["store_id"],
-            "public", "dim_store", ["store_id"]
+            "public", "fact_sales", ["store_id"], "public", "dim_store", ["store_id"]
         )
 
         # 相同输入应生成相同ID
@@ -33,13 +31,16 @@ class TestMetadataRepository:
         repo = MetadataRepository(Path("output/json"))
 
         rel_id1 = repo._generate_relation_id(
-            "public", "fact_sales", ["store_id"],
-            "public", "dim_store", ["store_id"]
+            "public", "fact_sales", ["store_id"], "public", "dim_store", ["store_id"]
         )
 
         rel_id2 = repo._generate_relation_id(
-            "public", "fact_sales", ["company_id"],
-            "public", "dim_company", ["company_id"]
+            "public",
+            "fact_sales",
+            ["company_id"],
+            "public",
+            "dim_company",
+            ["company_id"],
         )
 
         # 不同表对应生成不同ID
@@ -50,8 +51,7 @@ class TestMetadataRepository:
         repo = MetadataRepository(Path("output/json"))
 
         sig = repo._generate_fk_signature(
-            "public", "fact_sales", ["store_id"],
-            "public", "dim_store", ["store_id"]
+            "public", "fact_sales", ["store_id"], "public", "dim_store", ["store_id"]
         )
 
         expected = "public.fact_sales.[store_id]->public.dim_store.[store_id]"
@@ -62,8 +62,12 @@ class TestMetadataRepository:
         repo = MetadataRepository(Path("output/json"))
 
         sig = repo._generate_fk_signature(
-            "public", "fact_sales", ["store_id", "date_day"],
-            "public", "dim_store", ["store_id", "date_day"]
+            "public",
+            "fact_sales",
+            ["store_id", "date_day"],
+            "public",
+            "dim_store",
+            ["store_id", "date_day"],
         )
 
         # 列名应该被排序
@@ -185,15 +189,18 @@ class TestMetadataRepository:
         """测试静态方法 compute_relationship_id"""
         # 使用静态方法生成 ID（无盐值）
         rel_id1 = MetadataRepository.compute_relationship_id(
-            "public", "fact_sales", ["store_id"],
-            "public", "dim_store", ["store_id"]
+            "public", "fact_sales", ["store_id"], "public", "dim_store", ["store_id"]
         )
 
         # 使用静态方法生成 ID（有盐值）
         rel_id2 = MetadataRepository.compute_relationship_id(
-            "public", "fact_sales", ["store_id"],
-            "public", "dim_store", ["store_id"],
-            rel_id_salt="myproject"
+            "public",
+            "fact_sales",
+            ["store_id"],
+            "public",
+            "dim_store",
+            ["store_id"],
+            rel_id_salt="myproject",
         )
 
         # 无盐值和有盐值应生成不同ID
@@ -201,9 +208,13 @@ class TestMetadataRepository:
 
         # 相同盐值应生成相同ID
         rel_id3 = MetadataRepository.compute_relationship_id(
-            "public", "fact_sales", ["store_id"],
-            "public", "dim_store", ["store_id"],
-            rel_id_salt="myproject"
+            "public",
+            "fact_sales",
+            ["store_id"],
+            "public",
+            "dim_store",
+            ["store_id"],
+            rel_id_salt="myproject",
         )
         assert rel_id2 == rel_id3
 
@@ -215,20 +226,17 @@ class TestMetadataRepository:
         """
         # 顺序 A: (id, id), (code, code)
         id_a = MetadataRepository.compute_relationship_id(
-            "public", "a", ["id", "code"],
-            "public", "b", ["id", "code"]
+            "public", "a", ["id", "code"], "public", "b", ["id", "code"]
         )
         # 整体反转顺序: (code, code), (id, id) —— 同一关系
         id_a_reversed_order = MetadataRepository.compute_relationship_id(
-            "public", "a", ["code", "id"],
-            "public", "b", ["code", "id"]
+            "public", "a", ["code", "id"], "public", "b", ["code", "id"]
         )
         assert id_a == id_a_reversed_order
 
         # 不同字段指派: (id, code), (code, id) —— 不同关系
         id_b_cross = MetadataRepository.compute_relationship_id(
-            "public", "a", ["id", "code"],
-            "public", "b", ["code", "id"]
+            "public", "a", ["id", "code"], "public", "b", ["code", "id"]
         )
         assert id_a != id_b_cross
 
@@ -236,8 +244,7 @@ class TestMetadataRepository:
         """测试列数不一致时抛出异常"""
         with pytest.raises(ValueError):
             MetadataRepository.compute_relationship_id(
-                "public", "a", ["id", "code"],
-                "public", "b", ["id"]
+                "public", "a", ["id", "code"], "public", "b", ["id"]
             )
 
     def test_is_columns_unique_reads_table_level_physical_constraints(self):
@@ -250,35 +257,39 @@ class TestMetadataRepository:
                 "table_profile": {
                     "physical_constraints": {
                         "primary_key": {"columns": ["store_id"]},
-                        "unique_constraints": [{"columns": ["store_code"]}]
+                        "unique_constraints": [{"columns": ["store_code"]}],
                     }
-                }
+                },
             }
         }
 
         assert repo._is_columns_unique(tables, "public.dim_store", ["store_id"]) is True
-        assert repo._is_columns_unique(tables, "public.dim_store", ["store_code"]) is True
-        assert repo._is_columns_unique(tables, "public.dim_store", ["store_name"]) is False
+        assert (
+            repo._is_columns_unique(tables, "public.dim_store", ["store_code"]) is True
+        )
+        assert (
+            repo._is_columns_unique(tables, "public.dim_store", ["store_name"]) is False
+        )
 
     def test_relation_id_salt_consistency(self):
         """测试实例方法与静态方法的一致性"""
         # 创建带盐值的 repository
-        repo = MetadataRepository(
-            Path("output/json"),
-            rel_id_salt="myproject"
-        )
+        repo = MetadataRepository(Path("output/json"), rel_id_salt="myproject")
 
         # 使用实例方法生成 ID
         instance_id = repo._generate_relation_id(
-            "public", "fact_sales", ["store_id"],
-            "public", "dim_store", ["store_id"]
+            "public", "fact_sales", ["store_id"], "public", "dim_store", ["store_id"]
         )
 
         # 使用静态方法生成 ID（相同盐值）
         static_id = MetadataRepository.compute_relationship_id(
-            "public", "fact_sales", ["store_id"],
-            "public", "dim_store", ["store_id"],
-            rel_id_salt="myproject"
+            "public",
+            "fact_sales",
+            ["store_id"],
+            "public",
+            "dim_store",
+            ["store_id"],
+            rel_id_salt="myproject",
         )
 
         # 应该生成相同的 ID
@@ -294,13 +305,28 @@ class TestDoc19Repository:
     def test_undirected_identity_ignores_direction(self):
         """无向身份算法(doc 19 §3.3):反向对相同、不同指派不同"""
         i1 = MetadataRepository.compute_undirected_identity(
-            "s", "A", ["a", "b"], "s", "B", ["x", "y"],
+            "s",
+            "A",
+            ["a", "b"],
+            "s",
+            "B",
+            ["x", "y"],
         )
         i2 = MetadataRepository.compute_undirected_identity(
-            "s", "B", ["y", "x"], "s", "A", ["b", "a"],
+            "s",
+            "B",
+            ["y", "x"],
+            "s",
+            "A",
+            ["b", "a"],
         )
         i3 = MetadataRepository.compute_undirected_identity(
-            "s", "A", ["a", "b"], "s", "B", ["y", "x"],
+            "s",
+            "A",
+            ["a", "b"],
+            "s",
+            "B",
+            ["y", "x"],
         )
         assert i1 == i2
         assert i1 != i3
@@ -308,10 +334,20 @@ class TestDoc19Repository:
     def test_undirected_identity_casefold_then_raw_tiebreak(self):
         """比较键为 (casefold, 原始值):"Users" 与 users 仍能确定先后"""
         i1 = MetadataRepository.compute_undirected_identity(
-            "s", "Users", ["id"], "s", "users", ["uid"],
+            "s",
+            "Users",
+            ["id"],
+            "s",
+            "users",
+            ["uid"],
         )
         i2 = MetadataRepository.compute_undirected_identity(
-            "s", "users", ["uid"], "s", "Users", ["id"],
+            "s",
+            "users",
+            ["uid"],
+            "s",
+            "Users",
+            ["id"],
         )
         assert i1 == i2
 
@@ -334,14 +370,16 @@ class TestDoc19Repository:
         }
         fk = {"source_columns": ["category_id"], "target_columns": ["id"]}
         # target 表 public.categories 不在 tables 中 → 画像缺失,不影响结果
-        assert repo._infer_cardinality(
-            fk, tables, "public.orders", "public", "categories"
-        ) == "1:1"
+        assert (
+            repo._infer_cardinality(fk, tables, "public.orders", "public", "categories")
+            == "1:1"
+        )
 
         fk2 = {"source_columns": ["product_id"], "target_columns": ["id"]}
-        assert repo._infer_cardinality(
-            fk2, tables, "public.orders", "public", "products"
-        ) == "N:1"
+        assert (
+            repo._infer_cardinality(fk2, tables, "public.orders", "public", "products")
+            == "N:1"
+        )
 
     def test_is_columns_unique_non_partial_unique_index(self):
         """非部分/非表达式/键列完全匹配的唯一索引判定唯一(doc 19 §3.2.3)"""
@@ -350,16 +388,25 @@ class TestDoc19Repository:
             "public.user_profiles": {
                 "column_profiles": {"user_id": {"statistics": {}}},
                 "table_profile": {
-                    "physical_constraints": {"primary_key": None, "unique_constraints": []},
+                    "physical_constraints": {
+                        "primary_key": None,
+                        "unique_constraints": [],
+                    },
                     "indexes": [
-                        {"columns": ["user_id"], "is_unique": True, "condition": None,
-                         "key_expressions": ["user_id"]},
+                        {
+                            "columns": ["user_id"],
+                            "is_unique": True,
+                            "condition": None,
+                            "key_expressions": ["user_id"],
+                        },
                     ],
                     "unique_column_sets": [],
                 },
             },
         }
-        assert repo._is_columns_unique(tables, "public.user_profiles", ["user_id"]) is True
+        assert (
+            repo._is_columns_unique(tables, "public.user_profiles", ["user_id"]) is True
+        )
 
     def test_partial_or_expression_unique_index_not_counted(self):
         """部分唯一索引与表达式索引不算独立证据(doc 19 §3.2.3)"""
@@ -368,12 +415,23 @@ class TestDoc19Repository:
             "public.t": {
                 "column_profiles": {"email": {"statistics": {}}},
                 "table_profile": {
-                    "physical_constraints": {"primary_key": None, "unique_constraints": []},
+                    "physical_constraints": {
+                        "primary_key": None,
+                        "unique_constraints": [],
+                    },
                     "indexes": [
-                        {"columns": ["email"], "is_unique": True,
-                         "condition": "deleted_at IS NULL", "key_expressions": ["email"]},
-                        {"columns": ["email"], "is_unique": True, "condition": None,
-                         "key_expressions": ["lower(email)"]},
+                        {
+                            "columns": ["email"],
+                            "is_unique": True,
+                            "condition": "deleted_at IS NULL",
+                            "key_expressions": ["email"],
+                        },
+                        {
+                            "columns": ["email"],
+                            "is_unique": True,
+                            "condition": None,
+                            "key_expressions": ["lower(email)"],
+                        },
                     ],
                     "unique_column_sets": [],
                 },
@@ -392,7 +450,10 @@ class TestDoc19Repository:
                     "b": {"statistics": {"uniqueness": 0.5}},
                 },
                 "table_profile": {
-                    "physical_constraints": {"primary_key": None, "unique_constraints": []},
+                    "physical_constraints": {
+                        "primary_key": None,
+                        "unique_constraints": [],
+                    },
                     "indexes": [],
                     "unique_column_sets": [
                         {"columns": ["b", "a"], "confidence_score": 0.9},
@@ -414,7 +475,10 @@ class TestDoc19Repository:
             "public.fact": {
                 "column_profiles": {"a": {}, "b": {}},
                 "table_profile": {
-                    "physical_constraints": {"primary_key": None, "unique_constraints": []},
+                    "physical_constraints": {
+                        "primary_key": None,
+                        "unique_constraints": [],
+                    },
                     "indexes": [],
                     "unique_column_sets": [
                         {"columns": ["a", "b"], "confidence_score": 0.9},
@@ -432,7 +496,10 @@ class TestDoc19Repository:
             "public.orders": {
                 "column_profiles": {"category_id": {"statistics": None}},
                 "table_profile": {
-                    "physical_constraints": {"primary_key": None, "unique_constraints": []},
+                    "physical_constraints": {
+                        "primary_key": None,
+                        "unique_constraints": [],
+                    },
                     "indexes": [],
                     "unique_column_sets": [],
                 },
@@ -440,19 +507,26 @@ class TestDoc19Repository:
             "public.orders_no_stats": {
                 "column_profiles": {"category_id": {}},
                 "table_profile": {
-                    "physical_constraints": {"primary_key": None, "unique_constraints": []},
+                    "physical_constraints": {
+                        "primary_key": None,
+                        "unique_constraints": [],
+                    },
                     "indexes": [],
                     "unique_column_sets": [],
                 },
             },
         }
         fk = {"source_columns": ["category_id"], "target_columns": ["id"]}
-        assert repo._infer_cardinality(
-            fk, tables, "public.orders", "public", "categories"
-        ) == "N:1"
-        assert repo._infer_cardinality(
-            fk, tables, "public.orders_no_stats", "public", "categories"
-        ) == "N:1"
+        assert (
+            repo._infer_cardinality(fk, tables, "public.orders", "public", "categories")
+            == "N:1"
+        )
+        assert (
+            repo._infer_cardinality(
+                fk, tables, "public.orders_no_stats", "public", "categories"
+            )
+            == "N:1"
+        )
 
 
 class TestLoadAllTablesManifestExclusion:

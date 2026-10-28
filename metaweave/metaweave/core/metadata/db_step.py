@@ -6,7 +6,6 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
-from uuid import UUID
 
 import psycopg
 
@@ -54,8 +53,9 @@ class SchemaNotSelectableError(DbProfileValidationError):
 
 @dataclass(frozen=True)
 class DbExecutionRequest:
-    source_id: UUID
-    job_id: UUID
+    # 数据源短 ID（db_src_1）与工作区短 ID（ws_1）；doc 6 §1 断代改造后不再使用 UUID
+    source_id: str
+    job_id: str
     db_type: str
     host: str
     port: int

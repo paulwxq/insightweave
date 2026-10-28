@@ -3,6 +3,10 @@
 fake manager 覆盖：预检（归属/唯一所属/端点一致/实体键冲突/逻辑键归一）、
 回填事务（单事务 UNWIND + 核验）、约束替换语句、迁移后核验、main 的
 默认只读 / --apply 前置 / 失败非零退出与报告留档。
+
+断代说明（doc 6 §8）：source_id 已改 `db_src_N` 短 ID，"旧 UUID 图迁到
+新身份"场景不复存在；本文件按短 ID 语义喂任意合法身份，覆盖仍有效的
+回填/约束替换/核验逻辑，脚本仅作历史参考。
 """
 
 import importlib.util
@@ -10,14 +14,13 @@ import json
 import sys
 from contextlib import contextmanager
 from pathlib import Path
-from uuid import uuid4
 
 import pytest
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]  # metaweave 项目根
 SCRIPT_PATH = PROJECT_ROOT / "scripts" / "migrate_neo4j_source_identity.py"
 
-SOURCE = "0f0e8d64-9d3a-4d0f-8d5f-2a3b4c5d6e7f"
+SOURCE = "db_src_1"
 PUBLISH = "1a2b3c4d-5e6f-4a5b-8c9d-0e1f2a3b4c5d"
 
 
@@ -248,7 +251,7 @@ class TestPrecheck:
 
     def test_join_on_cross_source_aborts(self, mig):
         data = _base_data()
-        other = str(uuid4())
+        other = "db_src_2"
         data["tables"].append(
             {
                 "id": "orders.public.orders2",

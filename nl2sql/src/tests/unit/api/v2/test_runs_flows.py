@@ -17,7 +17,7 @@ from src.tests.unit.api.v2.fakes import make_result
 pytestmark = pytest.mark.unit
 
 SID_RE = re.compile(r"^s_[0-9a-f]{32}$")
-SOURCE_ID = "11111111-1111-1111-1111-111111111111"
+SOURCE_ID = "db_src_1"
 
 
 def _hook_runner(calls=None, *, invoke_hook=True, **result_overrides):
@@ -93,8 +93,8 @@ class TestCreateSession:
         assert record["source_fingerprint"] == source_fingerprint(
             web_env.backend.registration
         )
-        assert record["knowledge_snapshot"]["table_schema"] == ["job-1", "pub-ts-1"]
-        assert record["knowledge_snapshot"]["rel"] == ["job-1", "pub-rel-1"]
+        assert record["knowledge_snapshot"]["table_schema"] == ["ws-1", "pub-ts-1"]
+        assert record["knowledge_snapshot"]["rel"] == ["ws-1", "pub-rel-1"]
         # 通用绑定（写序第一步）存在且带 source_id
         generic = web_env.store.get(ws.GENERIC_SESSIONS_NS, sid)
         assert generic is not None and generic.value["source_id"] == SOURCE_ID
@@ -267,7 +267,7 @@ class TestExecuteQuery:
                 web_env.runtime,
                 session_id=web_session["session_id"],
                 question="问",
-                source_id="22222222-2222-2222-2222-222222222222",
+                source_id="db_src_2",
             )
         assert ei.value.error_code == codes.SOURCE_MISMATCH
 

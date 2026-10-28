@@ -29,7 +29,7 @@ class TestLLMRelationshipDiscoveryNullConfig:
             "embedding": None,
             "llm": {
                 "active": "qwen",
-                "providers": {"qwen": {"api_key": "dummy", "model": "qwen-plus"}}
+                "providers": {"qwen": {"api_key": "dummy", "model": "qwen-plus"}},
             },
             "output": {"json_directory": "output/json"},
         }
@@ -49,7 +49,7 @@ class TestLLMRelationshipDiscoveryNullConfig:
             "embedding": {},
             "llm": {
                 "active": "qwen",
-                "providers": {"qwen": {"api_key": "dummy", "model": "qwen-plus"}}
+                "providers": {"qwen": {"api_key": "dummy", "model": "qwen-plus"}},
             },
             "output": {"json_directory": "output/json"},
         }
@@ -74,9 +74,18 @@ class TestNameSimilarityInvalidConfigNotSwallowed:
     @patch(f"{_PIPELINE_MODULE}.DatabaseConnector")
     @patch(f"{_PIPELINE_MODULE}.RelationshipDiscoveryPipeline._load_config")
     def test_invalid_method_string_raises_not_degrades(
-        self, mock_load, mock_connector, mock_repo, mock_scorer, mock_engine, mock_writer, mock_llm_discovery
+        self,
+        mock_load,
+        mock_connector,
+        mock_repo,
+        mock_scorer,
+        mock_engine,
+        mock_writer,
+        mock_llm_discovery,
     ):
-        from metaweave.core.relationships.name_similarity import InvalidNameSimilarityConfig
+        from metaweave.core.relationships.name_similarity import (
+            InvalidNameSimilarityConfig,
+        )
         from metaweave.core.relationships.pipeline import RelationshipDiscoveryPipeline
 
         mock_load.return_value = {
@@ -108,7 +117,14 @@ class TestNameSimilarityInvalidConfigNotSwallowed:
     @patch(f"{_PIPELINE_MODULE}.DatabaseConnector")
     @patch(f"{_PIPELINE_MODULE}.RelationshipDiscoveryPipeline._load_config")
     def test_missing_embedding_env_still_degrades(
-        self, mock_load, mock_connector, mock_repo, mock_scorer, mock_engine, mock_writer, mock_llm_discovery
+        self,
+        mock_load,
+        mock_connector,
+        mock_repo,
+        mock_scorer,
+        mock_engine,
+        mock_writer,
+        mock_llm_discovery,
     ):
         """真正的"无 embedding 环境"（embedding 配置缺失/不完整）仍应按第5节降级，不受本次修复影响"""
         from metaweave.core.relationships.pipeline import RelationshipDiscoveryPipeline
@@ -132,7 +148,14 @@ class TestNameSimilarityInvalidConfigNotSwallowed:
     @patch(f"{_PIPELINE_MODULE}.DatabaseConnector")
     @patch(f"{_PIPELINE_MODULE}.RelationshipDiscoveryPipeline._load_config")
     def test_non_positive_llm_top_k_raises(
-        self, mock_load, mock_connector, mock_repo, mock_scorer, mock_engine, mock_writer, mock_llm_discovery
+        self,
+        mock_load,
+        mock_connector,
+        mock_repo,
+        mock_scorer,
+        mock_engine,
+        mock_writer,
+        mock_llm_discovery,
     ):
         """llm_candidates.top_k 必须是正整数；0 / 负数不得静默变成不限量或回退默认值"""
         from metaweave.core.relationships.pipeline import RelationshipDiscoveryPipeline
@@ -164,7 +187,14 @@ class TestRelationshipDiscoveryPipelineNullConfig:
     @patch(f"{_PIPELINE_MODULE}.DatabaseConnector")
     @patch(f"{_PIPELINE_MODULE}.RelationshipDiscoveryPipeline._load_config")
     def test_init_with_null_relationships(
-        self, mock_load, mock_connector, mock_repo, mock_scorer, mock_engine, mock_writer, mock_llm_discovery
+        self,
+        mock_load,
+        mock_connector,
+        mock_repo,
+        mock_scorer,
+        mock_engine,
+        mock_writer,
+        mock_llm_discovery,
     ):
         from metaweave.core.relationships.pipeline import RelationshipDiscoveryPipeline
 
@@ -189,7 +219,14 @@ class TestRelationshipDiscoveryPipelineNullConfig:
     @patch(f"{_PIPELINE_MODULE}.DatabaseConnector")
     @patch(f"{_PIPELINE_MODULE}.RelationshipDiscoveryPipeline._load_config")
     def test_init_with_empty_relationships(
-        self, mock_load, mock_connector, mock_repo, mock_scorer, mock_engine, mock_writer, mock_llm_discovery
+        self,
+        mock_load,
+        mock_connector,
+        mock_repo,
+        mock_scorer,
+        mock_engine,
+        mock_writer,
+        mock_llm_discovery,
     ):
         from metaweave.core.relationships.pipeline import RelationshipDiscoveryPipeline
 

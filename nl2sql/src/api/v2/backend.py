@@ -25,9 +25,17 @@ from src.utils.logger import get_module_logger
 
 logger = get_module_logger("nl2sql.api.v2.backend")
 
+# 源级最后成功发布（doc 6.2 §10.2）：工作区视图关联 workspace_info 按源，
+# 每步骤取最近一次成功（published_at DESC, publish_run_id DESC）；
+# 不同步骤可来自不同工作区，后续失败不替代之前成功。
 _PUBLISH_QUERY = (
-    "SELECT step_name, status, is_current_publish, publish_id, job_id, created_at "
-    "FROM public.publish_info WHERE source_id = %s"
+    "SELECT DISTINCT ON (latest.step_name) "
+    "latest.step_name, latest.publish_run_id, latest.published_at, latest.workspace_id "
+    "FROM public.vw_workspace_latest_successful_publish AS latest "
+    "JOIN public.workspace_info AS ws ON ws.workspace_id = latest.workspace_id "
+    "WHERE ws.source_id = %s "
+    "ORDER BY latest.step_name, latest.published_at DESC NULLS LAST, "
+    "latest.publish_run_id DESC"
 )
 
 
@@ -190,20 +198,17 @@ class DefaultReadinessBackend:
             with psycopg.connect(_platform_conninfo(), connect_timeout=10) as conn:
                 rows = conn.execute(_PUBLISH_QUERY, (source_id,)).fetchall()
         except Exception as exc:  # noqa: BLE001
-            raise ReadinessError(
-                f"publish_info 读取失败: {type(exc).__name__}"
-            ) from exc
+            raise ReadinessError(f"发布成功记录读取失败: {type(exc).__name__}") from exc
         records = PublishRecords()
-        for step_name, status, is_current, publish_id, job_id, created_at in rows:
+        for step_name, publish_run_id, published_at, workspace_id in rows:
             records.rows.append(
                 {
                     "step_name": _as_str(step_name),
-                    "status": _as_str(status),
-                    "is_current_publish": bool(is_current),
-                    "publish_id": _as_str(publish_id),
-                    "job_id": _as_str(job_id),
-                    "created_at": (
-                        created_at.isoformat() if created_at is not None else None
+                    "status": "success",
+                    "publish_run_id": _as_str(publish_run_id),
+                    "workspace_id": _as_str(workspace_id),
+                    "published_at": (
+                        published_at.isoformat() if published_at is not None else None
                     ),
                 }
             )

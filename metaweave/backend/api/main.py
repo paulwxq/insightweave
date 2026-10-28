@@ -11,7 +11,7 @@ from backend.api.errors import register_exception_handlers
 from backend.api.routers.assets import router as assets_router
 from backend.api.routers.asset_objects import router as asset_objects_router
 from backend.api.routers.data_sources import router as data_sources_router
-from backend.api.routers.publishing import router as publishing_router
+from backend.api.routers.workspaces import router as workspaces_router
 from backend.persistence.platform_db import (
     PlatformSettings,
     load_platform_settings_from_env,
@@ -43,7 +43,7 @@ def create_app(
     )
     register_exception_handlers(app)
     app.include_router(data_sources_router)
-    app.include_router(publishing_router)
+    app.include_router(workspaces_router)
     app.include_router(assets_router)
     app.include_router(asset_objects_router)
     return app

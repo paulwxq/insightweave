@@ -1,7 +1,5 @@
 """数据资产首页与数据库画像只读接口。"""
 
-from uuid import UUID
-
 from fastapi import APIRouter, Depends
 
 from backend.api.routers.data_sources import get_platform_settings
@@ -21,6 +19,6 @@ def get_asset_catalog(
 
 @router.get("/{source_id}/profile", response_model=AssetProfileResponse)
 def get_database_profile(
-    source_id: UUID, settings: PlatformSettings = Depends(get_platform_settings)
+    source_id: str, settings: PlatformSettings = Depends(get_platform_settings)
 ) -> dict:
     return get_asset_profile(settings, source_id)

@@ -21,6 +21,7 @@ from metaweave.core.metadata.domain_generator import DomainGenerator
 # 公共 helpers
 # ---------------------------------------------------------------------------
 
+
 def _make_config(active="qwen", model="qwen-plus", domain_llm=None):
     """构造合法的标准格式配置字典"""
     cfg = {
@@ -28,7 +29,11 @@ def _make_config(active="qwen", model="qwen-plus", domain_llm=None):
             "active": active,
             "providers": {
                 "qwen": {"model": model, "api_key": "k", "api_base": "http://q"},
-                "deepseek": {"model": "deepseek-chat", "api_key": "k", "api_base": "http://d"},
+                "deepseek": {
+                    "model": "deepseek-chat",
+                    "api_key": "k",
+                    "api_base": "http://d",
+                },
             },
             "langchain_config": {"use_async": False},
         }
@@ -42,8 +47,10 @@ def _make_config(active="qwen", model="qwen-plus", domain_llm=None):
 # Mock LLM Services
 # ---------------------------------------------------------------------------
 
+
 class _CaptureLLMService:
     """捕获初始化参数的 mock LLMService"""
+
     model = "test-model"
     captured_config: Dict = {}
     response = (
@@ -60,6 +67,7 @@ class _CaptureLLMService:
 
 class _TablesLLMService:
     """返回带 tables 的 LLM 响应"""
+
     model = "test-model"
     response = ""
     last_prompt = ""
@@ -83,6 +91,7 @@ def _write_md(md_dir: Path) -> None:
 # Task 3: 专属 LLM 配置（深合并）+ md_context_limit 配置化
 # ===========================================================================
 
+
 class TestDomainGeneratorLLMConfig:
 
     def test_falls_back_to_global_llm_when_no_dedicated(self, tmp_path, monkeypatch):
@@ -93,7 +102,10 @@ class TestDomainGeneratorLLMConfig:
         config = _make_config(active="qwen", model="qwen-plus")
         DomainGenerator(config=config, yaml_path=str(tmp_path / "d.yaml"))
         assert _CaptureLLMService.captured_config["active"] == "qwen"
-        assert _CaptureLLMService.captured_config["providers"]["qwen"]["model"] == "qwen-plus"
+        assert (
+            _CaptureLLMService.captured_config["providers"]["qwen"]["model"]
+            == "qwen-plus"
+        )
 
     def test_override_active_via_domain_llm(self, tmp_path, monkeypatch):
         """domain_generation.llm.active 覆盖全局 active"""
@@ -112,9 +124,7 @@ class TestDomainGeneratorLLMConfig:
         monkeypatch.setattr(
             "metaweave.core.metadata.domain_generator.LLMService", _CaptureLLMService
         )
-        config = _make_config(
-            domain_llm={"providers": {"qwen": {"model": "qwen-max"}}}
-        )
+        config = _make_config(domain_llm={"providers": {"qwen": {"model": "qwen-max"}}})
         DomainGenerator(config=config, yaml_path=str(tmp_path / "d.yaml"))
         qwen_cfg = _CaptureLLMService.captured_config["providers"]["qwen"]
         assert qwen_cfg["model"] == "qwen-max"
@@ -172,6 +182,7 @@ class TestDomainGeneratorLLMConfig:
 # Task 4: prompt 升级 + tables 解析/写入 + _未分类_ 合并
 # ===========================================================================
 
+
 class TestDomainGeneratorTables:
 
     def test_prompt_includes_tables_assignment_instruction(self, tmp_path, monkeypatch):
@@ -223,12 +234,18 @@ class TestDomainGeneratorTables:
         )
         yaml_path = tmp_path / "d.yaml"
         gen = DomainGenerator(config=_make_config(), yaml_path=str(yaml_path))
-        gen.write_to_yaml({
-            "database": {"name": "DB", "description": "d"},
-            "domains": [
-                {"name": "订单", "description": "订单域", "tables": ["db.public.orders"]},
-            ],
-        })
+        gen.write_to_yaml(
+            {
+                "database": {"name": "DB", "description": "d"},
+                "domains": [
+                    {
+                        "name": "订单",
+                        "description": "订单域",
+                        "tables": ["db.public.orders"],
+                    },
+                ],
+            }
+        )
         written = yaml.safe_load(yaml_path.read_text(encoding="utf-8"))
         order_domain = next(d for d in written["domains"] if d["name"] == "订单")
         assert order_domain["tables"] == ["db.public.orders"]
@@ -239,13 +256,23 @@ class TestDomainGeneratorTables:
         )
         yaml_path = tmp_path / "d.yaml"
         gen = DomainGenerator(config=_make_config(), yaml_path=str(yaml_path))
-        gen.write_to_yaml({
-            "database": {"name": "DB", "description": "d"},
-            "domains": [
-                {"name": "_未分类_", "description": "忽略", "tables": ["db.public.legacy"]},
-                {"name": "订单", "description": "订单域", "tables": ["db.public.orders"]},
-            ],
-        })
+        gen.write_to_yaml(
+            {
+                "database": {"name": "DB", "description": "d"},
+                "domains": [
+                    {
+                        "name": "_未分类_",
+                        "description": "忽略",
+                        "tables": ["db.public.legacy"],
+                    },
+                    {
+                        "name": "订单",
+                        "description": "订单域",
+                        "tables": ["db.public.orders"],
+                    },
+                ],
+            }
+        )
         written = yaml.safe_load(yaml_path.read_text(encoding="utf-8"))
         unclassified = written["domains"][0]
         assert unclassified["name"] == "_未分类_"
@@ -253,18 +280,22 @@ class TestDomainGeneratorTables:
         # description 应是系统预置的，不被 LLM 覆盖
         assert unclassified["description"] == "无法归入其他业务主题的表"
 
-    def test_unclassified_tables_empty_when_llm_returns_none(self, tmp_path, monkeypatch):
+    def test_unclassified_tables_empty_when_llm_returns_none(
+        self, tmp_path, monkeypatch
+    ):
         monkeypatch.setattr(
             "metaweave.core.metadata.domain_generator.LLMService", _CaptureLLMService
         )
         yaml_path = tmp_path / "d.yaml"
         gen = DomainGenerator(config=_make_config(), yaml_path=str(yaml_path))
-        gen.write_to_yaml({
-            "database": {"name": "DB", "description": "d"},
-            "domains": [
-                {"name": "订单", "description": "订单域", "tables": []},
-            ],
-        })
+        gen.write_to_yaml(
+            {
+                "database": {"name": "DB", "description": "d"},
+                "domains": [
+                    {"name": "订单", "description": "订单域", "tables": []},
+                ],
+            }
+        )
         written = yaml.safe_load(yaml_path.read_text(encoding="utf-8"))
         assert written["domains"][0]["name"] == "_未分类_"
         assert written["domains"][0]["tables"] == []

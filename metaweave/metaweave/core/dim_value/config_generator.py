@@ -111,19 +111,29 @@ class DimTableConfigGenerator:
                 db_name = str(database)
                 schema_name = str(schema)
                 table_name = str(table)
-                dim_tables_by_db.setdefault(db_name, set()).add((schema_name, table_name))
+                dim_tables_by_db.setdefault(db_name, set()).add(
+                    (schema_name, table_name)
+                )
                 # 实时日志：识别到维度表
-                logger.info("    ✅ 识别为维度表: %s.%s.%s", db_name, schema_name, table_name)
+                logger.info(
+                    "    ✅ 识别为维度表: %s.%s.%s", db_name, schema_name, table_name
+                )
 
         # 实时日志：扫描完成统计
         logger.info("")
         self.last_readable_count = readable
         total_tables = sum(len(items) for items in dim_tables_by_db.values())
-        logger.info("📊 扫描完成，共识别到 %d 个数据库、%d 个维度表", len(dim_tables_by_db), total_tables)
+        logger.info(
+            "📊 扫描完成，共识别到 %d 个数据库、%d 个维度表",
+            len(dim_tables_by_db),
+            total_tables,
+        )
         return dim_tables_by_db
 
     @staticmethod
-    def _extract_table_identifiers(data: Dict[str, Any], path: Path) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    def _extract_table_identifiers(
+        data: Dict[str, Any], path: Path
+    ) -> Tuple[Optional[str], Optional[str], Optional[str]]:
         object_info = data.get("object_info") or {}
         table_profile = data.get("table_profile") or {}
 
@@ -180,7 +190,9 @@ class DimTableConfigGenerator:
             "#         embedding_col: product_name, category, brand # 多列（自动拆分）\n"
             "\n"
         )
-        body = yaml.dump(config, allow_unicode=True, default_flow_style=False, sort_keys=False)
+        body = yaml.dump(
+            config, allow_unicode=True, default_flow_style=False, sort_keys=False
+        )
         self.output_path.write_text(header + body, encoding="utf-8")
 
         logger.info("✅ 写入 dim_tables.yaml: %s", self.output_path)

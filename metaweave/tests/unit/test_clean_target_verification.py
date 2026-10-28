@@ -120,7 +120,7 @@ class TestExecuteCqlVerification:
             config_path=cfg_path,
             operation="cql",
             clean=True,
-            cql_source_id="0f0e8d64-9d3a-4d0f-8d5f-2a3b4c5d6e7f",
+            cql_source_id="db_src_1",
             expected_clean_target=expected,
         )
         result = execute_cql(req)
@@ -1541,7 +1541,7 @@ class TestMilvusConfigShapeRejected:
                 },
                 "vector_database": {"active": "milvus", "providers": {"milvus": bad}},
             },
-            source_id="11111111-2222-3333-4444-555555555555",
+            source_id="db_src_1",
             publish_id="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeffff",
         )
         assert loader.validate() is False
@@ -1614,7 +1614,7 @@ class TestMilvusActiveAndProviderRequired:
             },
             milvus_client_cls=_FakeMilvus,
             embedding_service_cls=_FakeEmb,
-            source_id="11111111-2222-3333-4444-555555555555",
+            source_id="db_src_1",
             publish_id="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeffff",
         )
         with caplog.at_level(logging.ERROR):

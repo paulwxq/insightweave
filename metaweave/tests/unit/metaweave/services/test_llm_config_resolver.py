@@ -26,11 +26,16 @@ from metaweave.services.llm_config_resolver import (
 # 公共 fixture
 # ===========================================================================
 
+
 def _base_config(active="qwen", model="qwen-plus", extra_providers=None):
     """构造一个合法的完整配置字典"""
     providers = {
         "qwen": {"model": model, "api_key": "key-qwen", "api_base": "http://qwen"},
-        "deepseek": {"model": "deepseek-chat", "api_key": "key-ds", "api_base": "http://ds"},
+        "deepseek": {
+            "model": "deepseek-chat",
+            "api_key": "key-ds",
+            "api_base": "http://ds",
+        },
     }
     if extra_providers:
         providers.update(extra_providers)
@@ -52,6 +57,7 @@ def _base_config(active="qwen", model="qwen-plus", extra_providers=None):
 # ===========================================================================
 # deep_merge_dict
 # ===========================================================================
+
 
 class TestDeepMergeDict:
 
@@ -83,7 +89,11 @@ class TestDeepMergeDict:
         assert "c" not in base["a"]
 
     def test_extra_params_deep_merge(self):
-        base = {"providers": {"qwen": {"extra_params": {"enable_thinking": False, "streaming": False}}}}
+        base = {
+            "providers": {
+                "qwen": {"extra_params": {"enable_thinking": False, "streaming": False}}
+            }
+        }
         override = {"providers": {"qwen": {"extra_params": {"enable_thinking": True}}}}
         result = deep_merge_dict(base, override)
         ep = result["providers"]["qwen"]["extra_params"]
@@ -101,6 +111,7 @@ class TestDeepMergeDict:
 # ===========================================================================
 # _validate_declared_module_llm_paths
 # ===========================================================================
+
 
 class TestValidateDeclaredModuleLlmPaths:
 
@@ -141,6 +152,7 @@ class TestValidateDeclaredModuleLlmPaths:
 # _validate_nonstandard_llm_paths
 # ===========================================================================
 
+
 class TestValidateNonstandardLlmPaths:
 
     def test_clean_config_passes(self):
@@ -164,6 +176,7 @@ class TestValidateNonstandardLlmPaths:
 # _validate_override_llm_dict
 # ===========================================================================
 
+
 class TestValidateOverrideLlmDict:
 
     def test_valid_active_override_passes(self):
@@ -181,7 +194,9 @@ class TestValidateOverrideLlmDict:
 
     def test_illegal_model_name_raises(self):
         with pytest.raises(ValueError, match="model_name"):
-            _validate_override_llm_dict({"model_name": "qwen-max"}, "domain_generation.llm")
+            _validate_override_llm_dict(
+                {"model_name": "qwen-max"}, "domain_generation.llm"
+            )
 
     def test_illegal_provider_raises(self):
         with pytest.raises(ValueError, match="provider"):
@@ -213,6 +228,7 @@ class TestValidateOverrideLlmDict:
 # ===========================================================================
 # _validate_final_llm_config
 # ===========================================================================
+
 
 class TestValidateFinalLlmConfig:
 
@@ -253,6 +269,7 @@ class TestValidateFinalLlmConfig:
 # ===========================================================================
 # resolve_module_llm_config
 # ===========================================================================
+
 
 class TestResolveModuleLlmConfig:
 
@@ -358,9 +375,7 @@ class TestResolveModuleLlmConfig:
 
     def test_sql_rag_llm_deep_merge_provider_model(self):
         config = _base_config()
-        config["sql_rag"] = {
-            "llm": {"providers": {"qwen": {"model": "qwen-max"}}}
-        }
+        config["sql_rag"] = {"llm": {"providers": {"qwen": {"model": "qwen-max"}}}}
         result = resolve_module_llm_config(config, "sql_rag.llm")
         assert result["providers"]["qwen"]["model"] == "qwen-max"
         assert result["providers"]["qwen"]["api_key"] == "key-qwen"
@@ -368,9 +383,7 @@ class TestResolveModuleLlmConfig:
     def test_sql_rag_llm_deep_merge_timeout(self):
         """sql_rag.llm 覆盖 provider timeout"""
         config = _base_config()
-        config["sql_rag"] = {
-            "llm": {"providers": {"qwen": {"timeout": 120}}}
-        }
+        config["sql_rag"] = {"llm": {"providers": {"qwen": {"timeout": 120}}}}
         result = resolve_module_llm_config(config, "sql_rag.llm")
         assert result["providers"]["qwen"]["timeout"] == 120
         assert result["providers"]["qwen"]["model"] == "qwen-plus"
@@ -387,7 +400,9 @@ class TestResolveModuleLlmConfig:
         """sql_rag.llm 不影响 domain_generation"""
         config = _base_config()
         config["sql_rag"] = {"llm": {"active": "deepseek"}}
-        config["domain_generation"] = {"llm": {"providers": {"qwen": {"model": "qwen-max"}}}}
+        config["domain_generation"] = {
+            "llm": {"providers": {"qwen": {"model": "qwen-max"}}}
+        }
         sql_result = resolve_module_llm_config(config, "sql_rag.llm")
         domain_result = resolve_module_llm_config(config, "domain_generation.llm")
         assert sql_result["active"] == "deepseek"
@@ -424,6 +439,7 @@ class TestResolveModuleLlmConfig:
 # 第二阶段：非标散落字段检测
 # ===========================================================================
 
+
 class TestValidateNonstandardLlmFields:
 
     def test_sql_rag_generation_llm_timeout_raises(self):
@@ -447,6 +463,7 @@ class TestValidateNonstandardLlmFields:
 # ===========================================================================
 # 第三阶段：relationships.llm 与 json_generation.llm 白名单与深合并
 # ===========================================================================
+
 
 class TestPhase3RelationshipsLlm:
     """relationships.llm 白名单与深合并测试"""
@@ -519,7 +536,8 @@ class TestPhase3JsonLlmLlm:
         config = _base_config()
         config["llm"]["langchain_config"] = {"use_async": True, "batch_size": 50}
         result = resolve_module_llm_config(
-            config, "json_generation.llm",
+            config,
+            "json_generation.llm",
             runtime_override={"langchain_config": {"use_async": False}},
         )
         assert result["langchain_config"]["use_async"] is False
@@ -534,7 +552,8 @@ class TestPhase3JsonLlmLlm:
             "llm": {"providers": {"qwen": {"model": "qwen-max"}}}
         }
         result = resolve_module_llm_config(
-            config, "json_generation.llm",
+            config,
+            "json_generation.llm",
             runtime_override={"langchain_config": {"use_async": False}},
         )
         # 模块级覆盖生效
@@ -577,9 +596,7 @@ class TestPhase3CrossModuleIsolation:
         """四个已支持模块的覆盖完全隔离"""
         config = _base_config()
         config["domain_generation"] = {"llm": {"active": "deepseek"}}
-        config["sql_rag"] = {
-            "llm": {"providers": {"qwen": {"model": "qwen-turbo"}}}
-        }
+        config["sql_rag"] = {"llm": {"providers": {"qwen": {"model": "qwen-turbo"}}}}
         config["relationships"] = {
             "llm": {"providers": {"qwen": {"model": "qwen-max"}}}
         }
@@ -604,6 +621,7 @@ class TestPhase3CrossModuleIsolation:
 # ===========================================================================
 # P1-Fix: 非 dict 模块级 llm 配置应 ValueError
 # ===========================================================================
+
 
 class TestNonDictModuleLlmRaises:
     """非 dict 的 xxx.llm 值必须报错，不得静默回退"""
@@ -640,6 +658,7 @@ class TestNonDictModuleLlmRaises:
 # ===========================================================================
 # P2-Fix: deep_merge 返回值不与 override 共享引用
 # ===========================================================================
+
 
 class TestDeepMergeReferenceIsolation:
     """deep_merge_dict 返回值修改不应影响原始 override 或 full_config"""
@@ -773,9 +792,7 @@ class TestDeprecatedTopLevelKeyRejection:
             ("json_llm", "json_generation.llm"),
         ],
     )
-    def test_deprecated_root_error_points_to_final_path(
-        self, old_root, expected_path
-    ):
+    def test_deprecated_root_error_points_to_final_path(self, old_root, expected_path):
         config = _base_config()
         config[old_root] = {"enabled": True}
 

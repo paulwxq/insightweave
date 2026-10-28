@@ -5,7 +5,7 @@ import {
   getRelConfig,
   getRelObjectColumns,
   putRelConfig,
-} from '../api/dataSources'
+} from '../api/workspaces'
 import { ApiError } from '../api/http'
 import type {
   RelConfigRelationship,
@@ -44,8 +44,7 @@ interface DraftRow extends Substance {
 }
 
 const props = defineProps<{
-  sourceId: string
-  jobId: string
+  workspaceId: string
 }>()
 
 const emit = defineEmits<{
@@ -184,7 +183,7 @@ async function load() {
   loading.value = true
   fatal.value = ''
   try {
-    const data = await getRelConfig(props.sourceId, props.jobId)
+    const data = await getRelConfig(props.workspaceId)
     database.value = data.database
     fingerprint.value = data.fingerprint
     scoreThreshold.value = data.score_threshold
@@ -262,7 +261,7 @@ async function ensureColumns(tableKey: string): Promise<string[]> {
   const [schema, table] = tableKey.split('.', 2)
   columnsLoading.value = tableKey
   try {
-    const data = await getRelObjectColumns(props.sourceId, props.jobId, schema, table)
+    const data = await getRelObjectColumns(props.workspaceId, schema, table)
     columnsCache.value.set(tableKey, data.columns)
     return data.columns
   } catch {
@@ -492,7 +491,7 @@ async function save() {
     // §3.3 偏离表：三类计数是「本地列表对 GET 基线」的会话事实——必须在
     // 用服务端响应重建基线之前捕获（重建后 draft 与新基线一致，恒为 0）
     const counts = { ...diffCounts.value }
-    const response = await putRelConfig(props.sourceId, props.jobId, {
+    const response = await putRelConfig(props.workspaceId, {
       fingerprint: fingerprint.value,
       relationships: buildPayload(),
     })
@@ -589,7 +588,7 @@ function finishSaved() {
             {{ database }}.relationships_global.json
           </p>
         </div>
-        <button type="button" class="dialog-close" aria-label="关闭" @click="close">✕</button>
+        <button type="button" class="dialog-close" aria-label="关闭" @click="close"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg></button>
       </header>
 
       <p v-if="loading" class="rel-state">正在读取 Rel 产物…</p>

@@ -32,29 +32,36 @@ def _mk_pipeline():
 
 
 def _cand(
-        table: str,
-        cols: list,
-        target_table: str,
-        target_cols: list,
-        origin: str,
-        key_origin,
-        cardinality: str,
-        score: float,
-        reverse_inclusion: float = 0.5,
-        score_details: dict = None,
+    table: str,
+    cols: list,
+    target_table: str,
+    target_cols: list,
+    origin: str,
+    key_origin,
+    cardinality: str,
+    score: float,
+    reverse_inclusion: float = 0.5,
+    score_details: dict = None,
 ):
     """构造评分后候选（含 _reverse_inclusion_rate 内部字段）"""
     src = {"object_info": {"schema_name": "public", "object_name": table}}
     tgt = {"object_info": {"schema_name": "public", "object_name": target_table}}
     sd = score_details or {
-        "inclusion_rate": 0.5, "name_similarity": 1.0, "comment_similarity": 0.5,
-        "type_compatibility": 1.0, "jaccard_index": 0.5,
+        "inclusion_rate": 0.5,
+        "name_similarity": 1.0,
+        "comment_similarity": 0.5,
+        "type_compatibility": 1.0,
+        "jaccard_index": 0.5,
     }
     candidate = {
-        "source": src, "target": tgt,
-        "source_columns": list(cols), "target_columns": list(target_cols),
-        "candidate_origin": origin, "cardinality": cardinality,
-        "composite_score": score, "score_details": dict(sd),
+        "source": src,
+        "target": tgt,
+        "source_columns": list(cols),
+        "target_columns": list(target_cols),
+        "candidate_origin": origin,
+        "cardinality": cardinality,
+        "composite_score": score,
+        "score_details": dict(sd),
         "_reverse_inclusion_rate": reverse_inclusion,
     }
     if key_origin is not None:
@@ -79,8 +86,17 @@ class TestPostScoreCorrection:
 
     def test_llm_1n_flipped_and_rescored(self):
         pipeline = _mk_pipeline()
-        llm = _cand("products", ["id"], "orders", ["pid"], "llm", None,
-                    "1:N", score=0.6, reverse_inclusion=0.9)
+        llm = _cand(
+            "products",
+            ["id"],
+            "orders",
+            ["pid"],
+            "llm",
+            None,
+            "1:N",
+            score=0.6,
+            reverse_inclusion=0.9,
+        )
         corrected = pipeline._post_score_correction([], [llm])
         assert len(corrected) == 1
         c = corrected[0]
@@ -94,10 +110,26 @@ class TestPostScoreCorrection:
     def test_physical_rule_cardinality_fixed_without_flip(self):
         pipeline = _mk_pipeline()
         # 物理键规则候选:方向 = 关联字段表→键表(orders.category_id → categories.id)
-        phys_1n = _cand("orders", ["category_id"], "categories", ["id"], "rule",
-                        "physical", "1:N", score=0.7)
-        phys_mn = _cand("orders", ["category_id"], "categories", ["id"], "rule",
-                        "physical", "M:N", score=0.7)
+        phys_1n = _cand(
+            "orders",
+            ["category_id"],
+            "categories",
+            ["id"],
+            "rule",
+            "physical",
+            "1:N",
+            score=0.7,
+        )
+        phys_mn = _cand(
+            "orders",
+            ["category_id"],
+            "categories",
+            ["id"],
+            "rule",
+            "physical",
+            "M:N",
+            score=0.7,
+        )
         corrected = pipeline._post_score_correction([phys_1n, phys_mn], [])
         assert [c["cardinality"] for c in corrected] == ["1:1", "N:1"]
         # 不翻转:方向保持 orders->categories,分数不重算
@@ -107,18 +139,35 @@ class TestPostScoreCorrection:
 
     def test_logical_rule_invalid_dropped(self):
         pipeline = _mk_pipeline()
-        logical_1n = _cand("orders", ["category_id"], "categories", ["id"], "rule",
-                           "logical", "1:N", score=0.7)
-        logical_n1 = _cand("orders", ["category_id"], "categories", ["id"], "rule",
-                           "logical", "N:1", score=0.7)
+        logical_1n = _cand(
+            "orders",
+            ["category_id"],
+            "categories",
+            ["id"],
+            "rule",
+            "logical",
+            "1:N",
+            score=0.7,
+        )
+        logical_n1 = _cand(
+            "orders",
+            ["category_id"],
+            "categories",
+            ["id"],
+            "rule",
+            "logical",
+            "N:1",
+            score=0.7,
+        )
         corrected = pipeline._post_score_correction([logical_1n, logical_n1], [])
         assert len(corrected) == 1
         assert corrected[0]["cardinality"] == "N:1"
 
     def test_llm_mn_kept_as_symmetric(self):
         pipeline = _mk_pipeline()
-        llm_mn = _cand("products", ["id"], "orders", ["pid"], "llm", None,
-                       "M:N", score=0.5)
+        llm_mn = _cand(
+            "products", ["id"], "orders", ["pid"], "llm", None, "M:N", score=0.5
+        )
         corrected = pipeline._post_score_correction([], [llm_mn])
         assert len(corrected) == 1
         assert corrected[0]["cardinality"] == "M:N"
@@ -131,10 +180,28 @@ class TestMergeGroupCardinalityAndDirection:
         """规则 orders→categories N:1 与 LLM M:N(字典序应翻成 categories→orders)
         → 无向分组后仍合并,最终 N:1、方向 orders→categories(doc 19 §5)"""
         pipeline = _mk_pipeline()
-        rule = _cand("orders", ["category_id"], "categories", ["id"], "rule",
-                     "physical", "N:1", score=0.82, reverse_inclusion=0.1)
-        llm_mn = _cand("orders", ["category_id"], "categories", ["id"], "llm",
-                       None, "M:N", score=0.88, reverse_inclusion=0.9)
+        rule = _cand(
+            "orders",
+            ["category_id"],
+            "categories",
+            ["id"],
+            "rule",
+            "physical",
+            "N:1",
+            score=0.82,
+            reverse_inclusion=0.1,
+        )
+        llm_mn = _cand(
+            "orders",
+            ["category_id"],
+            "categories",
+            ["id"],
+            "llm",
+            None,
+            "M:N",
+            score=0.88,
+            reverse_inclusion=0.9,
+        )
         merged = pipeline._merge_scored_candidates([rule], [llm_mn])
         assert len(merged) == 1
         m = merged[0]
@@ -229,12 +296,24 @@ class TestMergeGroupCardinalityAndDirection:
         from metaweave.core.relationships.repository import MetadataRepository
 
         pipeline = _mk_pipeline()
-        rule = _cand("orders", ["category_id"], "categories", ["id"], "rule",
-                     "physical", "N:1", 0.8)
+        rule = _cand(
+            "orders",
+            ["category_id"],
+            "categories",
+            ["id"],
+            "rule",
+            "physical",
+            "N:1",
+            0.8,
+        )
         merged = pipeline._merge_scored_candidates([rule], [])
         expected = MetadataRepository.compute_relationship_id(
-            "public", "orders", ["category_id"],
-            "public", "categories", ["id"],
+            "public",
+            "orders",
+            ["category_id"],
+            "public",
+            "categories",
+            ["id"],
             rel_id_salt="",
         )
         assert merged[0]["_relationship_id"] == expected

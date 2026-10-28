@@ -152,13 +152,12 @@ def test_v3_formatter_emits_compact_schema(tmp_path):
     assert "classification_reason" not in table_profile
     assert "rule_based_classification" not in table_profile
     assert "column_statistics" not in table_profile
-    assert "is_partial" not in table_profile["physical_constraints"][
-        "unique_constraints"
-    ][0]
+    assert (
+        "is_partial"
+        not in table_profile["physical_constraints"]["unique_constraints"][0]
+    )
     assert table_profile["indexes"][0]["included_columns"] == ["order_id"]
-    assert table_profile["indexes"][0]["key_expressions"] == [
-        "lower((amount)::text)"
-    ]
+    assert table_profile["indexes"][0]["key_expressions"] == ["lower((amount)::text)"]
 
 
 def test_current_json_format_replaces_legacy_shape():

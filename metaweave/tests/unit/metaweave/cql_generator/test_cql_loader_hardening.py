@@ -30,7 +30,7 @@ from metaweave.core.loaders.cql_loader import (
     CQLScriptValidationError,
 )
 
-SOURCE_ID = "0f0e8d64-9d3a-4d0f-8d5f-2a3b4c5d6e7f"
+SOURCE_ID = "db_src_1"
 PUBLISH_ID = "1a2b3c4d-5e6f-4a5b-8c9d-0e1f2a3b4c5d"
 
 
@@ -101,9 +101,7 @@ class _FakeTx:
         self.state["deleted_relationship_ids"] = sorted(deleted_relationships)
         self.state["remaining_node_ids"] = sorted(set(nodes) - deleted)
         self.state["remaining_relationship_ids"] = sorted(
-            rel["id"]
-            for rel in relationships
-            if rel["id"] not in deleted_relationships
+            rel["id"] for rel in relationships if rel["id"] not in deleted_relationships
         )
 
     def run(self, query, **params):
@@ -286,7 +284,7 @@ def test_happy_path_single_transaction(tmp_path):
 
 
 def test_source_mismatch_rejected_before_delete(tmp_path):
-    other = "99999999-9999-4999-8999-999999999999"
+    other = "db_src_2"
     loader = _loader(tmp_path, _write_script(tmp_path), source_id=other)
     with pytest.raises(CQLScriptValidationError, match="不一致"):
         loader.load()

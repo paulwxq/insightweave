@@ -15,7 +15,7 @@ from metaweave.core.cql_generator.models import (
     JOINOnRelation,
 )
 
-SOURCE_ID = "0f0e8d64-9d3a-4d0f-8d5f-2a3b4c5d6e7f"
+SOURCE_ID = "db_src_1"
 PUBLISH_ID = "1a2b3c4d-5e6f-4a5b-8c9d-0e1f2a3b4c5d"
 
 

@@ -89,12 +89,12 @@ class TestFullCheck:
 
     def test_ready_outcome_snapshot(self):
         svc = self._service(FakeBackend())
-        outcome = svc.full_check("11111111-1111-1111-1111-111111111111")
+        outcome = svc.full_check("db_src_1")
         assert outcome.ready and outcome.compatible is True
         assert outcome.fingerprint
         snap = outcome.knowledge_snapshot
-        assert snap["table_schema"] == ["job-1", "pub-ts-1"]
-        assert snap["rel"] == ["job-1", "pub-rel-1"]
+        assert snap["table_schema"] == ["ws-1", "pub-ts-1"]
+        assert snap["rel"] == ["ws-1", "pub-rel-1"]
         names = [c["name"] for c in outcome.checks]
         assert {
             "registry",
@@ -117,8 +117,8 @@ class TestFullCheck:
 
         backend.load_milvus_facts = counting
         svc = self._service(backend)
-        svc.full_check("11111111-1111-1111-1111-111111111111")
-        svc.full_check("11111111-1111-1111-1111-111111111111")
+        svc.full_check("db_src_1")
+        svc.full_check("db_src_1")
         # 命中缓存：Milvus/Neo4j/embedding 等重检查不重跑；键复核只读
         # 登记与发布记录两条轻查询（doc 2 §5.5.2）
         assert milvus_calls["n"] == 1
@@ -126,30 +126,30 @@ class TestFullCheck:
     def test_cache_hit_rechecked_against_registration(self):
         backend = FakeBackend()
         svc = self._service(backend)
-        first = svc.full_check("11111111-1111-1111-1111-111111111111")
+        first = svc.full_check("db_src_1")
         assert first.ready
         backend.lookup_status = "inactive"  # 登记变化 = 缓存键变化
-        second = svc.full_check("11111111-1111-1111-1111-111111111111")
+        second = svc.full_check("db_src_1")
         assert second is not first and not second.ready
 
     def test_cache_hit_rechecked_against_publish_version(self):
         backend = FakeBackend()
         svc = self._service(backend)
-        first = svc.full_check("11111111-1111-1111-1111-111111111111")
+        first = svc.full_check("db_src_1")
         assert first.ready
-        backend.job_id = "job-new"  # current 发布版本变化 = 缓存键变化
-        second = svc.full_check("11111111-1111-1111-1111-111111111111")
+        backend.workspace_id = "ws-new"  # current 发布版本变化 = 缓存键变化
+        second = svc.full_check("db_src_1")
         assert second is not first and second.ready
-        assert svc.full_check("11111111-1111-1111-1111-111111111111") is second
+        assert svc.full_check("db_src_1") is second
 
     def test_failure_not_cached(self):
         backend = FakeBackend()
         backend.business_fail = True
         svc = self._service(backend)
-        o1 = svc.full_check("11111111-1111-1111-1111-111111111111")
+        o1 = svc.full_check("db_src_1")
         assert not o1.ready
         backend.business_fail = False
-        o2 = svc.full_check("11111111-1111-1111-1111-111111111111")
+        o2 = svc.full_check("db_src_1")
         assert o2.ready
 
     def test_not_found(self):
@@ -175,9 +175,7 @@ class TestFullCheck:
     def test_business_fail_blocks_ready(self):
         backend = FakeBackend()
         backend.business_fail = True
-        outcome = self._service(backend).full_check(
-            "11111111-1111-1111-1111-111111111111"
-        )
+        outcome = self._service(backend).full_check("db_src_1")
         assert not outcome.ready
         assert outcome.terminal_error_code == "business_target_mismatch"
 
@@ -186,34 +184,27 @@ class TestFullCheck:
         backend.publish_id_rel = None
         rows = [r for r in backend._rows() if r["step_name"] != "rel"]
         backend._rows = lambda: rows
-        outcome = self._service(backend).full_check(
-            "11111111-1111-1111-1111-111111111111"
-        )
+        outcome = self._service(backend).full_check("db_src_1")
         assert outcome.terminal_error_code == "knowledge_missing"
 
-    def test_job_id_mismatch(self):
+    def test_duplicate_step_rows_inconsistent(self):
+        """源级视图下不同步骤来自不同工作区是合法的（doc 6.2 §10.2）；
+        同一步骤出现重复行才判不一致。"""
         backend = FakeBackend()
-        backend.job_id = "job-2"
-        rows = []
-        for r in backend._rows():
-            r = dict(r)
-            if r["step_name"] == "rel":
-                r["job_id"] = "job-1"
-            rows.append(r)
+        rows = list(backend._rows())
+        duplicated = dict(rows[0])
+        rows.append(duplicated)
         backend._rows = lambda: rows
-        outcome = self._service(backend).full_check(
-            "11111111-1111-1111-1111-111111111111"
-        )
-        assert outcome.terminal_error_code == "knowledge_inconsistent"
+        outcome = self._service(backend).full_check("db_src_1")
+        # 重复行使该步骤解析为无有效记录：不得判就绪
+        assert outcome.ready is False
 
     def test_milvus_empty_tables(self):
         backend = FakeBackend()
         backend.milvus.table_keys = set()
         backend.milvus.column_keys = set()
         backend.milvus.table_publish_ids = set()
-        outcome = self._service(backend).full_check(
-            "11111111-1111-1111-1111-111111111111"
-        )
+        outcome = self._service(backend).full_check("db_src_1")
         assert outcome.terminal_error_code == "knowledge_missing"
 
     def test_cross_store_table_mismatch(self):
@@ -222,9 +213,7 @@ class TestFullCheck:
             "ordersdb.public.orders",
             "ordersdb.public.users",
         }
-        outcome = self._service(backend).full_check(
-            "11111111-1111-1111-1111-111111111111"
-        )
+        outcome = self._service(backend).full_check("db_src_1")
         assert outcome.terminal_error_code == "knowledge_inconsistent"
 
     def test_milvus_column_not_in_graph(self):
@@ -233,34 +222,26 @@ class TestFullCheck:
             ("ordersdb.public.orders", "id"),
             ("ordersdb.public.orders", "extra"),
         }
-        outcome = self._service(backend).full_check(
-            "11111111-1111-1111-1111-111111111111"
-        )
+        outcome = self._service(backend).full_check("db_src_1")
         assert outcome.terminal_error_code == "knowledge_inconsistent"
 
     def test_publish_id_residual_rejected(self):
         backend = FakeBackend()
         backend.milvus.table_publish_ids = {"pub-ts-1", "pub-old"}
-        outcome = self._service(backend).full_check(
-            "11111111-1111-1111-1111-111111111111"
-        )
+        outcome = self._service(backend).full_check("db_src_1")
         assert outcome.terminal_error_code == "knowledge_inconsistent"
 
     def test_neo4j_legacy_two_segment(self):
         backend = FakeBackend()
         backend.neo4j.legacy_two_segment = 3
-        outcome = self._service(backend).full_check(
-            "11111111-1111-1111-1111-111111111111"
-        )
+        outcome = self._service(backend).full_check("db_src_1")
         assert outcome.terminal_error_code == "knowledge_inconsistent"
 
     def test_registration_scope_change_blocks_ready(self):
         # 登记范围改为 sales 而知识仍是 public.orders：不得就绪
         backend = FakeBackend()
         object.__setattr__(backend.registration, "selected_schemas", ("sales",))
-        outcome = self._service(backend).full_check(
-            "11111111-1111-1111-1111-111111111111"
-        )
+        outcome = self._service(backend).full_check("db_src_1")
         assert not outcome.ready
         # error_code 用闭集内 knowledge_inconsistent；检查名承载范围语义
         assert outcome.terminal_error_code == "knowledge_inconsistent"
@@ -272,9 +253,7 @@ class TestFullCheck:
     def test_milvus_parent_mismatch_blocks_ready(self):
         backend = FakeBackend()
         backend.milvus.column_parent_mismatch = 1
-        outcome = self._service(backend).full_check(
-            "11111111-1111-1111-1111-111111111111"
-        )
+        outcome = self._service(backend).full_check("db_src_1")
         assert not outcome.ready
         assert outcome.terminal_error_code == "knowledge_inconsistent"
 
@@ -283,9 +262,7 @@ class TestFullCheck:
         backend = FakeBackend()
         backend.neo4j.has_column_pairs = set()
         backend.neo4j.has_column_count = 0
-        outcome = self._service(backend).full_check(
-            "11111111-1111-1111-1111-111111111111"
-        )
+        outcome = self._service(backend).full_check("db_src_1")
         assert not outcome.ready
         assert outcome.terminal_error_code == "knowledge_inconsistent"
         failed = [
@@ -300,17 +277,13 @@ class TestFullCheck:
         backend = FakeBackend()
         backend.neo4j.has_column_invalid = 2
         backend.neo4j.has_column_count = 3
-        outcome = self._service(backend).full_check(
-            "11111111-1111-1111-1111-111111111111"
-        )
+        outcome = self._service(backend).full_check("db_src_1")
         assert not outcome.ready
         assert outcome.terminal_error_code == "knowledge_inconsistent"
 
     def test_optional_empty_warn_not_fail(self):
         backend = FakeBackend()
-        outcome = self._service(backend).full_check(
-            "11111111-1111-1111-1111-111111111111"
-        )
+        outcome = self._service(backend).full_check("db_src_1")
         dims = [c for c in outcome.checks if c["name"] == "dim_value"]
         assert dims and dims[0]["state"] == "warn"
         assert dims[0]["error_code"] == "optional_knowledge_empty"
@@ -319,9 +292,7 @@ class TestFullCheck:
         backend = FakeBackend()
         backend.milvus.dim_value_count = 2
         backend.milvus.dim_value_publish_ids = {"pub-dim-old"}
-        outcome = self._service(backend).full_check(
-            "11111111-1111-1111-1111-111111111111"
-        )
+        outcome = self._service(backend).full_check("db_src_1")
         dims = [c for c in outcome.checks if c["name"] == "dim_value"]
         assert dims and dims[0]["state"] == "fail"
         assert dims[0]["required"] is False
@@ -331,9 +302,7 @@ class TestFullCheck:
         backend = FakeBackend()
         backend.milvus.dim_value_count = 2
         backend.milvus.dim_value_publish_ids = set()  # 有数据但缺 publish_id
-        outcome = self._service(backend).full_check(
-            "11111111-1111-1111-1111-111111111111"
-        )
+        outcome = self._service(backend).full_check("db_src_1")
         dims = [c for c in outcome.checks if c["name"] == "dim_value"]
         assert dims and dims[0]["state"] == "fail"
         assert dims[0]["error_code"] == "knowledge_inconsistent"
@@ -342,9 +311,7 @@ class TestFullCheck:
     def test_embedding_failure_dependency(self):
         backend = FakeBackend()
         backend.embedding_fail = True
-        outcome = self._service(backend).full_check(
-            "11111111-1111-1111-1111-111111111111"
-        )
+        outcome = self._service(backend).full_check("db_src_1")
         assert not outcome.ready
         assert outcome.terminal_error_code == "dependency_unavailable"
 
@@ -360,18 +327,18 @@ class TestFullCheck:
         backend.embedding_probe = counting
         # full_ttl=0 让两次完整检查都重跑，探针缓存仍应把后端调用压到一次
         svc = ReadinessService(backend, full_ttl=0.0)
-        svc.full_check("11111111-1111-1111-1111-111111111111")
-        svc.full_check("11111111-1111-1111-1111-111111111111")
+        svc.full_check("db_src_1")
+        svc.full_check("db_src_1")
         assert calls["n"] == 1
 
     def test_probe_cache_invalidated_by_publish_change(self):
         # 发布版本变化后探针键随之变化：300 秒窗口内的旧通过结果不沿用
         backend = FakeBackend()
         svc = self._service(backend)
-        assert svc.full_check("11111111-1111-1111-1111-111111111111").ready
+        assert svc.full_check("db_src_1").ready
         backend.embedding_fail = True
-        backend.job_id = "job-new"  # current 发布版本变化
-        outcome = svc.full_check("11111111-1111-1111-1111-111111111111")
+        backend.workspace_id = "ws-new"  # current 发布版本变化
+        outcome = svc.full_check("db_src_1")
         assert not outcome.ready
         assert outcome.terminal_error_code == "dependency_unavailable"
 
@@ -380,8 +347,8 @@ class TestEdgeEndpointKeys:
     """HAS_COLUMN 端点键解析（backend._edge_endpoint_keys）：跨源端点
     不回退业务 id，守住源隔离边界（doc 2 §5.5）。"""
 
-    SRC = "11111111-1111-1111-1111-111111111111"
-    OTHER = "22222222-2222-2222-2222-222222222222"
+    SRC = "db_src_1"
+    OTHER = "db_src_2"
 
     def _resolve(self, *, tsid=SRC, csid=SRC, te=None, ti=None, ce=None, ci=None):
         from src.api.v2.backend import _edge_endpoint_keys
@@ -427,11 +394,11 @@ class TestLightRecheck:
     def test_ok_returns_fingerprint_snapshot(self):
         backend = FakeBackend()
         lookup, fingerprint, snapshot = ReadinessService(backend).light_recheck(
-            "11111111-1111-1111-1111-111111111111"
+            "db_src_1"
         )
         assert lookup.status == "ok"
         assert fingerprint == source_fingerprint(backend.registration)
-        assert snapshot["rel"] == ["job-1", "pub-rel-1"]
+        assert snapshot["rel"] == ["ws-1", "pub-rel-1"]
         assert "backend_summary" not in snapshot  # 快照对只含版本对
 
     def test_not_ok_empty_values(self):

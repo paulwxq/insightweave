@@ -125,7 +125,7 @@ watch(sourceId, () => void load(), { immediate: true })
           <span class="ds-kicker">DATA SOURCE</span>
           <h1>{{ source.display_name }}</h1>
           <p class="ds-source-id">Source ID: {{ source.source_id }}</p>
-          <p class="ds-lead">已登记的连接信息，只可查看。</p>
+          <p class="ds-lead">已登记的连接信息，只可查看；采集与发布作业在工作区内管理。</p>
         </div>
         <div class="ds-detail-actions">
           <button
@@ -207,10 +207,30 @@ watch(sourceId, () => void load(), { immediate: true })
         <p class="ds-note">{{ source.description || '未填写' }}</p>
       </section>
 
+      <section class="ds-panel">
+        <div class="ds-panel-head">
+          <span class="ds-step">5</span>
+          <div>
+            <h2>工作区</h2>
+            <p>工作区隔离文件产物；同一数据源可有多个工作区，采集与发布作业都保存在工作区内</p>
+          </div>
+        </div>
+        <div class="ws-entry-actions">
+          <RouterLink class="ws-entry-link" :to="`/workspaces?source_id=${source.source_id}`">
+            <strong>查看该数据源的工作区</strong>
+            <small>进入工作区管理列表（按本数据源过滤）</small>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14" /><path d="m12 5 7 7-7 7" /></svg>
+          </RouterLink>
+          <RouterLink class="ws-entry-link" :to="`/workspaces/new?source_id=${source.source_id}`">
+            <strong>新建工作区</strong>
+            <small>为本数据源创建新的工作区</small>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14" /><path d="M5 12h14" /></svg>
+          </RouterLink>
+        </div>
+      </section>
+
       <div class="ds-job-links">
         <RouterLink :to="`/data-assets/${source.source_id}/objects`">JSON 对象画像 <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14" /><path d="m12 5 7 7-7 7" /></svg></RouterLink>
-        <RouterLink :to="`/data-sources/${source.source_id}/collection-jobs`">相关数据采集作业 <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14" /><path d="m12 5 7 7-7 7" /></svg></RouterLink>
-        <RouterLink :to="`/data-sources/${source.source_id}/publish-jobs`">相关画像发布作业 <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14" /><path d="m12 5 7 7-7 7" /></svg></RouterLink>
       </div>
     </template>
     <DeactivateSourceDialog
@@ -231,3 +251,49 @@ watch(sourceId, () => void load(), { immediate: true })
     />
   </div>
 </template>
+
+<style scoped>
+.ws-entry-actions {
+  display: flex;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+.ws-entry-link {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  border: 1px solid #e1e9f4;
+  border-radius: 12px;
+  background: #fcfdff;
+  padding: 14px 18px;
+  min-width: 240px;
+  color: inherit;
+}
+.ws-entry-link:hover {
+  border-color: #2e7cd6;
+}
+.ws-entry-link strong {
+  color: #17293f;
+  font-size: 14px;
+}
+.ws-entry-link small {
+  color: #66788f;
+  font-size: 11px;
+}
+.ws-entry-link svg {
+  width: 14px;
+  height: 14px;
+  margin-top: 6px;
+  align-self: flex-end;
+  fill: none;
+  stroke: #2e7cd6;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+@media (max-width: 800px) {
+  .ws-entry-actions {
+    flex-direction: column;
+  }
+}
+</style>

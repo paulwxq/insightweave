@@ -226,14 +226,11 @@ class ReadinessOutcome:
 
 
 def _current_publish(rows: list[dict[str, Any]], step: str) -> Optional[dict[str, Any]]:
-    """某步骤唯一 success + is_current_publish 记录；多于一条视为不一致。"""
-    matched = [
-        r
-        for r in rows
-        if r.get("step_name") == step
-        and r.get("status") == "success"
-        and r.get("is_current_publish")
-    ]
+    """某步骤的源级最近成功发布（doc 6.2 §10.2）。
+
+    rows 来自源级视图查询（每步骤至多一行）；重复行视为不一致返回 None。
+    """
+    matched = [r for r in rows if r.get("step_name") == step]
     if len(matched) == 1:
         return matched[0]
     return None
@@ -660,9 +657,9 @@ class ReadinessService:
                 )
             )
             return self._outcome(source_id, compatible, False, checks)
-        # 实际 publish_id 与对应 current 记录一致（残留/混批拒绝）
-        expected_ts = str(ts_current.get("publish_id"))
-        expected_rel = str(rel_current.get("publish_id"))
+        # 实际发布运行标识与源级最近成功记录一致（残留/混批拒绝）
+        expected_ts = str(ts_current.get("publish_run_id"))
+        expected_rel = str(rel_current.get("publish_run_id"))
         if milvus.table_publish_ids != {expected_ts}:
             checks.append(
                 _check(
@@ -739,7 +736,7 @@ class ReadinessService:
                         name,
                         False,
                         "fail",
-                        f"存在{name}数据但记录缺少 publish_id，无法核对批次",
+                        f"存在{name}数据但记录缺少发布运行标识，无法核对批次",
                         "knowledge_inconsistent",
                         counts={name: count},
                     )
@@ -757,7 +754,7 @@ class ReadinessService:
                     )
                 )
                 continue
-            if facts_ids != {str(current.get("publish_id"))}:
+            if facts_ids != {str(current.get("publish_run_id"))}:
                 checks.append(
                     _check(
                         name,
@@ -830,14 +827,17 @@ class ReadinessService:
 
 
 def _snapshot_from_records(rows: list[dict[str, Any]]) -> dict[str, Any]:
-    """knowledge_snapshot（doc 2 §5.5.1）：必需步骤 (job_id,publish_id)，
-    可选步骤 current 或 null。"""
+    """knowledge_snapshot（doc 2 §5.5.1、6.2 §10.2）：必需与可选步骤为
+    (workspace_id, publish_run_id) 或 null（源级最近成功发布）。"""
 
     def pair(step: str) -> Optional[list[str]]:
         current = _current_publish(rows, step)
         if current is None:
             return None
-        return [str(current.get("job_id")), str(current.get("publish_id"))]
+        return [
+            str(current.get("workspace_id")),
+            str(current.get("publish_run_id")),
+        ]
 
     return {
         "table_schema": pair("table_schema"),

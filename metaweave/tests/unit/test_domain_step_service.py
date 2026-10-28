@@ -1,156 +1,105 @@
-"""domain 步骤服务：错误类型、准备链判定与生成核验（doc 21.1 §5）。
+"""受管 Domain 步骤 worker 用例（doc 21.1 §5、6.2 §7.2）。
 
-覆盖批次 2：入口/平台库/本地三段失败分类、描述解析四组合与锁下 strip、
-会话 2 的固定顺序、生成与核验各分支、状态写回失败；错误映射按 MRO 先命中。
+断代改造适配：上游就绪判定读 `md/` 顶层唯一成功采集 marker；描述来源
+改为 `step_params.domain.description`（显式空白=无补充描述）→ 数据源描述；
+不再有 sync_domain_description/job_info.db_desc。
 """
 
 import json
-import logging
-from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
-from uuid import uuid4
+from uuid import UUID
 
 import pytest
 import yaml
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from sqlalchemy.exc import OperationalError
 
 from backend.api.errors import register_exception_handlers
 from backend.data_sources import domain_step_service as service
-from backend.data_sources.db_step_service import DbStepConfigError, SourceDisabledError
 from backend.data_sources.domain_step_service import DomainPreparationError
 from backend.data_sources.registration_service import PlatformUnavailableError
-from backend.jobs.repository import (
-    StepAlreadyRunningError,
-    WorkspaceMissingError,
-    WorkspaceSourceMismatchError,
-)
+from backend.data_sources.step_context import DbStepConfigError, StepContext
+from backend.persistence.models import DbSourceInfo
 
-SOURCE_ID = uuid4()
-JOB_ID = uuid4()
-
-MD_READY = "同一作业的 MD 产物未就绪；请先执行 MD 或指定已有 job_id"
+SOURCE_ID = "db_src_1"
+WORKSPACE_ID = "ws_1"
+RUN_ID = UUID("11111111-2222-4333-8444-555555555555")
+MD_RUN_ID = UUID("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee")
+DB_NAME = "demo"
 
 MAIN_CONFIG = {
     "database": {"database": "cfgdb"},
     "output": {"output_dir": "output"},
-    "domain_generation": {"md_context_limit": 100},
-    "llm": {"active": "qwen", "providers": {"qwen": {"model": "m"}}},
 }
 
 
 def _source(**overrides):
     values = dict(
         source_id=SOURCE_ID,
+        display_name="测试源",
+        description="源描述",
         db_type="postgresql",
         host="localhost",
         port=5432,
-        db_name="demo",
+        db_name=DB_NAME,
         username="reader",
         password_ciphertext="cipher",
         sslmode=None,
+        db_version=None,
         selected_schemas=["public"],
         is_active=True,
-        description="源描述",
-        updated_at=None,
     )
     values.update(overrides)
-    return SimpleNamespace(**values)
+    return DbSourceInfo(**values)
 
 
 def _install(
     monkeypatch,
     tmp_path,
     *,
-    md_status="success",
-    md_file_count=1,
-    domain_row=None,
+    md_files=("demo.public.t0.md",),
+    existing_yaml=None,
     source=None,
 ):
-    """记录型替身；文件操作走真实实现，项目根指向 tmp_path。"""
+    """项目根指向 tmp_path；LLM/生成器换替身；备份走真实实现。"""
     from metaweave.utils import file_utils
+    from backend.workspace_files.markers import write_collection_marker
 
     monkeypatch.setattr(file_utils, "get_project_root", lambda: tmp_path)
+    import backend.security.source_password as crypto
+
+    monkeypatch.setattr(crypto, "decrypt_password", lambda _cipher: "secret")
+
     source = source if source is not None else _source()
-    workspace = tmp_path / "output" / str(SOURCE_ID) / str(JOB_ID)
+    workspace = tmp_path / "output" / SOURCE_ID / WORKSPACE_ID
     md_dir = workspace / "md"
     domain_dir = workspace / "domain"
-    if md_file_count:
+    if md_files:
         md_dir.mkdir(parents=True, exist_ok=True)
-        for index in range(md_file_count):
-            (md_dir / f"demo.public.t{index}.md").write_text("# t\n", encoding="utf-8")
+        for name in md_files:
+            (md_dir / name).write_text("# t\n", encoding="utf-8")
+        write_collection_marker(md_dir, MD_RUN_ID, "success")
+    if existing_yaml is not None:
+        domain_dir.mkdir(parents=True, exist_ok=True)
+        (domain_dir / "db_domains.yaml").write_text(existing_yaml, encoding="utf-8")
 
     rec = SimpleNamespace(
         source=source,
         md_dir=md_dir,
         domain_dir=domain_dir,
-        md_status=md_status,
-        domain_row=domain_row,
-        md_step_error=None,
-        session1_error=None,
         events=[],
-        started=[],
-        finished=[],
-        locked=[],
         generator_kwargs=[],
         generate_calls=[],
-        clean_calls=[],
+        backups=[],
         write_payload=None,
         raw_output=None,
-        on_write=None,
         on_generate=None,
+        on_write=None,
     )
-
     monkeypatch.setattr(
-        service,
-        "load_main_config_snapshot",
-        lambda _p: json.loads(json.dumps(MAIN_CONFIG)),
+        service, "resolve_module_llm_config", lambda _c, _p: {"active": "qwen"}
     )
-    monkeypatch.setattr(service, "load_platform_settings_from_env", lambda: object())
-
-    @contextmanager
-    def fake_session(_settings):
-        if rec.session1_error is not None:
-            raise rec.session1_error
-        yield object()
-
-    monkeypatch.setattr(service, "platform_session", fake_session)
-    monkeypatch.setattr(service, "get_db_source", lambda _s, _id: rec.source)
-    monkeypatch.setattr(service, "assert_workspace_owner", lambda *a: None)
-
-    def fake_lock(_session, source_id):
-        rec.locked.append(source_id)
-        return rec.source
-
-    monkeypatch.setattr(service, "lock_db_source_row", fake_lock)
-
-    def fake_get_step_row(_session, job_id, step_name):
-        if step_name == "md":
-            if rec.md_step_error is not None:
-                raise rec.md_step_error
-            if rec.md_status is None:
-                return None
-            return SimpleNamespace(last_status=rec.md_status, updated_at=None)
-        if step_name == "domain":
-            return rec.domain_row
-        return None
-
-    monkeypatch.setattr(service, "get_step_row", fake_get_step_row)
-
-    def fake_start(_session, job_id, source_id, step, **kwargs):
-        rec.events.append(("start", step))
-        rec.started.append((job_id, source_id, step, kwargs.get("db_desc", "<未传>")))
-
-    monkeypatch.setattr(service, "start_step", fake_start)
-
-    def fake_finish(_session, job_id, step, status):
-        rec.events.append(("finish", status))
-        rec.finished.append((job_id, step, status))
-
-    monkeypatch.setattr(service, "finish_step", fake_finish)
-    monkeypatch.setattr(service, "resolve_module_llm_config", lambda _c, _p: {"active": "qwen"})
 
     class FakeLLMService:
         def __init__(self, _config):
@@ -158,23 +107,20 @@ def _install(
 
     monkeypatch.setattr(service, "LLMService", FakeLLMService)
 
-    def clean_with_record(path):
-        rec.events.append(("clean", Path(path)))
-        rec.clean_calls.append(Path(path))
-        file_utils.clean_top_level_files(path)
+    real_backup = service.backup_directory_before_update
 
-    monkeypatch.setattr(service, "clean_top_level_files", clean_with_record)
+    def recorded_backup(directory, **kwargs):
+        rec.events.append(("backup", Path(directory)))
+        rec.backups.append(Path(directory))
+        return real_backup(directory, **kwargs)
+
+    monkeypatch.setattr(service, "backup_directory_before_update", recorded_backup)
 
     class FakeDomainGenerator:
-        def __init__(self, config=None, yaml_path=None, md_context_dir=None, **kwargs):
+        def __init__(self, config=None, yaml_path=None, md_context_dir=None):
             rec.events.append(("init", Path(yaml_path)))
             rec.generator_kwargs.append(
-                {
-                    "config": config,
-                    "yaml_path": yaml_path,
-                    "md_context_dir": md_context_dir,
-                    "extra": kwargs,
-                }
+                {"yaml_path": yaml_path, "md_context_dir": md_context_dir}
             )
             self.yaml_path = Path(yaml_path)
 
@@ -207,568 +153,326 @@ def _install(
     return rec
 
 
-def _run(**overrides):
-    return service.run_domain_step(
-        "cfg.yaml", str(SOURCE_ID), str(JOB_ID), **overrides
+def _ctx(rec, step_params=None):
+    return StepContext(
+        settings=SimpleNamespace(),
+        source=rec.source,
+        main_config=json.loads(json.dumps(MAIN_CONFIG)),
+        config_path=Path("configs/metadata_config.yaml"),
+        source_id=SOURCE_ID,
+        workspace_id=WORKSPACE_ID,
+        run_id=RUN_ID,
+        step_name="domain",
+        step_params=step_params,
     )
 
 
-# ---- 错误类型与 API 映射（子步 2d） ----
+def _run(monkeypatch, tmp_path, *, step_params=None, **kwargs):
+    rec = _install(monkeypatch, tmp_path, **kwargs)
+    return rec, service.run_domain_step(_ctx(rec, step_params=step_params))
 
 
-def test_domain_preparation_error_is_platform_unavailable_subclass():
-    """编排层复用既有 except PlatformUnavailableError 分支的前提（doc 21.1 §5.2）。"""
-    assert issubclass(DomainPreparationError, PlatformUnavailableError)
+# ---- 错误类型与 API 映射 ----
 
 
-def test_domain_preparation_error_handler_maps_before_parent():
-    """子类 handler 按 MRO 先于 platform_unavailable 命中（doc 21.1 §9）。"""
+def test_domain_preparation_error_maps_to_dedicated_503():
+    """准备阶段非受控故障映射 503 domain_preparation_error，不回显原文。"""
     app = FastAPI()
     register_exception_handlers(app)
 
-    @app.get("/child")
-    def _child():
+    @app.get("/boom")
+    def _boom():
         raise DomainPreparationError("Domain 准备阶段故障（LLM 预检：ImportError）")
 
-    @app.get("/parent")
-    def _parent():
+    @app.get("/platform")
+    def _platform():
         raise PlatformUnavailableError("平台库暂不可用")
 
     client = TestClient(app, raise_server_exceptions=False)
-    child = client.get("/child")
+    child = client.get("/boom")
     assert child.status_code == 503
     assert child.json()["code"] == "domain_preparation_error"
     assert child.json()["message"] == "Domain 准备阶段故障，请查看日志"
     assert "ImportError" not in child.text  # 不回显异常原文
-
-    parent = client.get("/parent")
+    parent = client.get("/platform")
     assert parent.status_code == 503
     assert parent.json()["code"] == "platform_unavailable"
 
 
-# ---- a) 入口与平台库段的受控拒绝 ----
+# ---- 上游就绪判定（md marker 与目录内容） ----
 
 
-def test_job_id_none_rejects_without_side_effect(monkeypatch, tmp_path):
+def test_no_md_marker_rejects_without_side_effect(monkeypatch, tmp_path):
     from metaweave.utils import file_utils
 
     monkeypatch.setattr(file_utils, "get_project_root", lambda: tmp_path)
     with pytest.raises(DbStepConfigError, match="MD 产物未就绪"):
-        service.run_domain_step("cfg.yaml", str(SOURCE_ID), None)
-    assert not (tmp_path / "output").exists()
+        service.run_domain_step(
+            StepContext(
+                settings=SimpleNamespace(),
+                source=_source(),
+                main_config=dict(MAIN_CONFIG),
+                config_path=Path("cfg.yaml"),
+                source_id=SOURCE_ID,
+                workspace_id=WORKSPACE_ID,
+                run_id=RUN_ID,
+                step_name="domain",
+                step_params=None,
+            )
+        )
+    assert not (tmp_path / "output" / SOURCE_ID / WORKSPACE_ID / "domain").exists()
 
 
-def test_sync_without_description_rejected_at_entry(monkeypatch, tmp_path):
+def test_failed_md_marker_rejects(monkeypatch, tmp_path):
+    from backend.workspace_files.markers import write_collection_marker
+
     rec = _install(monkeypatch, tmp_path)
-    with pytest.raises(DbStepConfigError, match="同步数据源描述"):
-        _run(sync_domain_description=True)
-    assert rec.started == [] and rec.locked == []
-
-
-def test_invalid_uuid_rejected(monkeypatch, tmp_path):
-    _install(monkeypatch, tmp_path)
-    with pytest.raises(DbStepConfigError):
-        service.run_domain_step("cfg.yaml", "not-a-uuid", str(JOB_ID))
-
-
-def test_main_config_value_error_maps_to_config_error(monkeypatch, tmp_path):
-    _install(monkeypatch, tmp_path)
-
-    def boom(_p):
-        raise ValueError("配置非法")
-
-    monkeypatch.setattr(service, "load_main_config_snapshot", boom)
-    with pytest.raises(DbStepConfigError, match="配置非法"):
-        _run()
-
-
-def test_main_config_other_error_maps_to_config_error(monkeypatch, tmp_path):
-    _install(monkeypatch, tmp_path)
-
-    def boom(_p):
-        raise FileNotFoundError("missing")
-
-    monkeypatch.setattr(service, "load_main_config_snapshot", boom)
-    with pytest.raises(DbStepConfigError, match="主配置加载或校验失败（FileNotFoundError）"):
-        _run()
-
-
-def test_platform_settings_value_error_maps_to_config_error(monkeypatch, tmp_path):
-    _install(monkeypatch, tmp_path)
-
-    def boom():
-        raise ValueError("缺少平台库环境变量: PLATFORM_DB_HOST")
-
-    monkeypatch.setattr(service, "load_platform_settings_from_env", boom)
-    with pytest.raises(DbStepConfigError, match="缺少平台库环境变量"):
-        _run()
-
-
-def test_source_not_found_rejected(monkeypatch, tmp_path):
-    rec = _install(monkeypatch, tmp_path, source=None)
-    rec.source = None
-    with pytest.raises(DbStepConfigError, match="未找到指定 source_id 的数据源"):
-        _run()
-
-
-def test_source_disabled_raises_source_disabled_error(monkeypatch, tmp_path):
-    _install(monkeypatch, tmp_path, source=_source(is_active=False))
-    with pytest.raises(SourceDisabledError):
-        _run()
-
-
-def test_workspace_missing_maps_to_config_error(monkeypatch, tmp_path):
-    """WorkspaceMissingError 是 LookupError：不得落入平台库故障兜底（§5.2）。"""
-    rec = _install(monkeypatch, tmp_path)
-
-    def boom(*_a):
-        raise WorkspaceMissingError(f"指定的 job_id 不存在: {JOB_ID}")
-
-    monkeypatch.setattr(service, "assert_workspace_owner", boom)
-    with pytest.raises(DbStepConfigError, match="指定的 job_id 不存在"):
-        _run()
-    assert rec.started == []
-
-
-def test_workspace_mismatch_maps_to_config_error(monkeypatch, tmp_path):
-    rec = _install(monkeypatch, tmp_path)
-
-    def boom(*_a):
-        raise WorkspaceSourceMismatchError(f"指定的 job_id 不属于该数据源: {JOB_ID}")
-
-    monkeypatch.setattr(service, "assert_workspace_owner", boom)
-    with pytest.raises(DbStepConfigError, match="不属于该数据源"):
-        _run()
-    assert rec.started == []
-
-
-def test_platform_read_error_returns_unregistered_result(monkeypatch, tmp_path):
-    """会话 1 平台库异常：返回不带 job_id 的失败字典，由编排层分流 503（§9）。"""
-    rec = _install(monkeypatch, tmp_path)
-    rec.session1_error = OperationalError("SELECT 1", {}, Exception("down"))
-
-    result = _run()
-
-    assert result["success"] is False
-    assert result["message"] == "平台库连接或读取失败（OperationalError）"
-    assert "job_id" not in result
-    assert rec.started == []
-
-
-def test_md_row_read_error_returns_platform_result(monkeypatch, tmp_path):
-    """md 步骤行读取属平台库段：查询异常同样按平台库故障返回（§5.2）。"""
-    rec = _install(monkeypatch, tmp_path)
-    rec.md_step_error = OperationalError("SELECT", {}, Exception("down"))
-
-    result = _run()
-
-    assert result["success"] is False
-    assert result["message"].startswith("平台库连接或读取失败（")
-
-
-# ---- b) 依赖判定与本地段的受控/故障分类 ----
-
-
-def test_md_not_success_rejected(monkeypatch, tmp_path):
-    rec = _install(monkeypatch, tmp_path, md_status="failed")
+    write_collection_marker(rec.md_dir, MD_RUN_ID, "failed")
     with pytest.raises(DbStepConfigError, match="MD 产物未就绪"):
-        _run()
-    assert rec.started == []
+        service.run_domain_step(_ctx(rec))
+    assert rec.generate_calls == []
 
 
-def test_md_row_missing_rejected(monkeypatch, tmp_path):
-    _install(monkeypatch, tmp_path, md_status=None)
-    with pytest.raises(DbStepConfigError, match="MD 产物未就绪"):
-        _run()
+def test_md_dir_without_regular_files_rejected(monkeypatch, tmp_path, caplog):
+    """目录无常规 md 文件（仅符号链接）视为未就绪（doc 21.1 §5.2）。"""
+    from backend.workspace_files.markers import write_collection_marker
 
-
-def test_md_dir_empty_rejected(monkeypatch, tmp_path):
-    rec = _install(monkeypatch, tmp_path, md_file_count=0)
-    with pytest.raises(DbStepConfigError, match="MD 产物未就绪"):
-        _run()
-    assert rec.started == []
-
-
-def test_md_dir_symlink_rejected_as_config_error(monkeypatch, tmp_path):
-    rec = _install(monkeypatch, tmp_path, md_file_count=0)
-    outside = tmp_path / "outside-md"
-    outside.mkdir()
-    rec.md_dir.parent.mkdir(parents=True, exist_ok=True)
-    rec.md_dir.symlink_to(outside, target_is_directory=True)
-    with pytest.raises(DbStepConfigError, match="符号链接"):
-        _run()
-
-
-def test_md_dir_with_symlink_among_regular_files_continues(monkeypatch, tmp_path, caplog):
-    """混合目录按 §5.2 最简口径继续：跳过非常规文件，普通 .md 仍可生成。
-
-    读取侧另有 O_NOFOLLOW 加固（§13.2）保证被跳过文件的内容不进入提示词。"""
-    rec = _install(monkeypatch, tmp_path, md_file_count=1)
-    outside = tmp_path / "outside.txt"
-    outside.write_text("外部文件内容\n", encoding="utf-8")
-    (rec.md_dir / "linked.md").symlink_to(outside)
-
-    with caplog.at_level(logging.WARNING):
-        result = _run()
-
-    assert result["success"] is True
-    assert rec.started != [] and rec.generate_calls == ["源描述"]
-    assert "跳过非常规 md 文件" in caplog.text
-
-
-def test_md_dir_with_only_symlink_rejected(monkeypatch, tmp_path):
-    """全部候选都非常规（无普通 .md）：按「MD 产物未就绪」拒绝。"""
-    rec = _install(monkeypatch, tmp_path, md_file_count=0)
+    rec = _install(monkeypatch, tmp_path, md_files=())
     rec.md_dir.mkdir(parents=True, exist_ok=True)
-    outside = tmp_path / "outside.txt"
-    outside.write_text("外部内容\n", encoding="utf-8")
-    (rec.md_dir / "linked.md").symlink_to(outside)
+    write_collection_marker(rec.md_dir, MD_RUN_ID, "success")
+    outside = tmp_path / "outside.md"
+    outside.write_text("# x", encoding="utf-8")
+    (rec.md_dir / "demo.public.link.md").symlink_to(outside)
+    with caplog.at_level("WARNING"):
+        with pytest.raises(DbStepConfigError, match="MD 产物未就绪"):
+            service.run_domain_step(_ctx(rec))
+    assert any("跳过非常规" in record.message for record in caplog.records)
 
-    with pytest.raises(DbStepConfigError, match="MD 产物未就绪"):
-        _run()
-    assert rec.started == []
 
-
-def test_md_dir_fifo_only_rejected_as_not_ready(monkeypatch, tmp_path):
-    import os
-
-    rec = _install(monkeypatch, tmp_path, md_file_count=0)
-    rec.md_dir.mkdir(parents=True, exist_ok=True)
-    os.mkfifo(rec.md_dir / "pipe.md")
-    with pytest.raises(DbStepConfigError, match="MD 产物未就绪"):
-        _run()
+def test_md_dir_with_symlink_among_regular_files_continues(
+    monkeypatch, tmp_path, caplog
+):
+    rec = _install(monkeypatch, tmp_path)
+    outside = tmp_path / "outside.md"
+    outside.write_text("# x", encoding="utf-8")
+    (rec.md_dir / "demo.public.link.md").symlink_to(outside)
+    with caplog.at_level("WARNING"):
+        outcome = service.run_domain_step(_ctx(rec))
+    assert outcome.success is True
+    assert any("跳过非常规" in record.message for record in caplog.records)
+    # 符号链接不进入输入清单
+    assert all("link" not in path for path, _ in outcome.input_files)
 
 
 def test_domain_dir_symlink_rejected_without_side_effects(monkeypatch, tmp_path):
     rec = _install(monkeypatch, tmp_path)
+    rec.domain_dir.parent.mkdir(parents=True, exist_ok=True)
     outside = tmp_path / "outside-domain"
     outside.mkdir()
-    rec.domain_dir.symlink_to(outside, target_is_directory=True)
-    with pytest.raises(DbStepConfigError, match="符号链接"):
-        _run()
-    assert rec.started == []
-    assert rec.generator_kwargs == [] and rec.clean_calls == []
+    (rec.domain_dir.parent / "domain").symlink_to(outside, target_is_directory=True)
+    with pytest.raises(ValueError, match="符号链接"):
+        service.run_domain_step(_ctx(rec))
+    assert rec.generate_calls == []
+
+
+# ---- 描述生命周期（doc 6.2 §7.2） ----
+
+
+def test_first_generation_uses_explicit_step_param(monkeypatch, tmp_path):
+    rec, outcome = _run(
+        monkeypatch,
+        tmp_path,
+        step_params={"domain": {"description": "  订单库  "}},
+    )
+    assert outcome.success is True
+    assert rec.generate_calls == ["订单库"]  # 明确输入剥除首尾空白
+
+
+def test_explicit_blank_description_means_no_description(monkeypatch, tmp_path):
+    """显式空白 = 无补充描述首次生成，不落回数据源描述（doc 6.2 §7.2）。"""
+    rec, outcome = _run(
+        monkeypatch,
+        tmp_path,
+        step_params={"domain": {"description": "   "}},
+    )
+    assert outcome.success is True
+    assert rec.generate_calls == [None]
+
+
+def test_first_generation_falls_back_to_source_description(monkeypatch, tmp_path):
+    rec, outcome = _run(monkeypatch, tmp_path)
+    assert outcome.success is True
+    assert rec.generate_calls == ["源描述"]
+
+
+def test_blank_source_description_generates_without_description(monkeypatch, tmp_path):
+    rec, outcome = _run(monkeypatch, tmp_path, source=_source(description="   "))
+    assert outcome.success is True
+    assert rec.generate_calls == [None]
+
+
+def test_existing_yaml_description_preserved_on_rerun(monkeypatch, tmp_path):
+    """已有 YAML：重跑保留 database.description，不写回数据源描述。"""
+    rec, outcome = _run(
+        monkeypatch,
+        tmp_path,
+        existing_yaml=yaml.safe_dump(
+            {
+                "database": {"name": DB_NAME, "description": "  历史描述  "},
+                "domains": [{"name": "旧域", "tables": []}],
+            },
+            allow_unicode=True,
+        ),
+        step_params={"domain": {"description": "本次输入不覆盖"}},
+    )
+    assert outcome.success is True
+    # 先读需保留的描述，再以 None（保留值传给 LLM 之外的写入路径）生成
+    assert rec.generate_calls == ["历史描述"]  # _strip_or_none 归一
+    written = yaml.safe_load(
+        (rec.domain_dir / "db_domains.yaml").read_text(encoding="utf-8")
+    )
+    assert written["database"]["description"] == "历史描述"
+
+
+def test_corrupt_existing_yaml_rejected_not_overwritten(monkeypatch, tmp_path):
+    """已有 YAML 损坏：明确报文件无效，不得当作未生成过而覆盖。"""
+    rec = _install(monkeypatch, tmp_path, existing_yaml="{ not: valid: yaml:")
+    with pytest.raises(DbStepConfigError, match="无法解析"):
+        service.run_domain_step(_ctx(rec))
+    # 原文件保持原状，未被备份移动、未被覆盖
+    assert (rec.domain_dir / "db_domains.yaml").read_text(encoding="utf-8") == (
+        "{ not: valid: yaml:"
+    )
+    assert not (rec.domain_dir / ".backup").exists()
+
+
+def test_existing_yaml_missing_domains_rejected(monkeypatch, tmp_path):
+    rec = _install(
+        monkeypatch, tmp_path, existing_yaml=yaml.safe_dump({"database": {}})
+    )
+    with pytest.raises(DbStepConfigError, match="结构无效"):
+        service.run_domain_step(_ctx(rec))
+
+
+def test_existing_yaml_symlink_rejected(monkeypatch, tmp_path):
+    rec = _install(monkeypatch, tmp_path)
+    rec.domain_dir.mkdir(parents=True, exist_ok=True)
+    outside = tmp_path / "outside.yaml"
+    outside.write_text("database: {}\n", encoding="utf-8")
+    (rec.domain_dir / "db_domains.yaml").symlink_to(outside)
+    with pytest.raises(DbStepConfigError, match="不是普通文件"):
+        service.run_domain_step(_ctx(rec))
+
+
+# ---- 准备阶段故障分类 ----
 
 
 def test_llm_precheck_value_error_maps_to_config_error(monkeypatch, tmp_path):
     rec = _install(monkeypatch, tmp_path)
 
-    class Boom:
-        def __init__(self, _config):
-            raise ValueError("LLM API Key 未配置: qwen")
+    def boom(_config, _path):
+        raise ValueError("llm 配置非法")
 
-    monkeypatch.setattr(service, "LLMService", Boom)
-    with pytest.raises(DbStepConfigError, match="API Key"):
-        _run()
-    assert rec.started == []
-
-
-def test_llm_precheck_unexpected_error_is_preparation_error(
-    monkeypatch, tmp_path, caplog
-):
-    """非 ValueError 的 LLM 预检故障：DomainPreparationError，
-    日志只记阶段+类型、不写异常原文（§5.2、doc 15 §8）。"""
-    rec = _install(monkeypatch, tmp_path)
-
-    class Boom:
-        def __init__(self, _config):
-            raise ImportError("cannot import name 'ChatOpenAI'")
-
-    monkeypatch.setattr(service, "LLMService", Boom)
-    with caplog.at_level(logging.ERROR):
-        with pytest.raises(DomainPreparationError) as excinfo:
-            _run()
-
-    assert "LLM 预检" in str(excinfo.value)
-    assert "ImportError" in str(excinfo.value)
-    assert rec.started == []
-    assert "LLM 预检" in caplog.text and "ImportError" in caplog.text
-    assert "cannot import name" not in caplog.text
-
-
-def test_md_glob_permission_error_is_preparation_error(monkeypatch, tmp_path):
-    rec = _install(monkeypatch, tmp_path, md_file_count=0)
-
-    def boom(_sid, _jid):
-        raise PermissionError("denied")
-
-    monkeypatch.setattr(service, "resolve_md_output_dir", boom)
-    with pytest.raises(DomainPreparationError) as excinfo:
-        _run()
-    assert "md 目录枚举" in str(excinfo.value)
-    assert "PermissionError" in str(excinfo.value)
-    assert rec.started == []
-
-
-def test_snapshot_failure_is_preparation_error(monkeypatch, tmp_path):
-    rec = _install(monkeypatch, tmp_path)
-
-    def boom(*_a, **_k):
-        raise RuntimeError("snapshot broke")
-
-    monkeypatch.setattr(service, "build_managed_output_snapshot", boom)
-    with pytest.raises(DomainPreparationError) as excinfo:
-        _run()
-    assert "快照构造" in str(excinfo.value)
-
-
-# ---- c) 描述解析四组合与锁下 strip ----
-
-
-def test_carried_description_used_and_synced(monkeypatch, tmp_path):
-    rec = _install(monkeypatch, tmp_path)
-
-    result = _run(domain_description="新描述", sync_domain_description=True)
-
-    assert result["success"] is True
-    assert rec.started and rec.started[0][3] == "新描述"
-    assert rec.generate_calls == ["新描述"]
-    assert rec.source.description == "新描述"
-    assert rec.source.updated_at is not None
-
-
-def test_carried_description_without_sync_keeps_source(monkeypatch, tmp_path):
-    rec = _install(monkeypatch, tmp_path)
-
-    _run(domain_description="新描述")
-
-    assert rec.started[0][3] == "新描述"
-    assert rec.generate_calls == ["新描述"]
-    assert rec.source.description == "源描述"
-
-
-def test_not_carried_reuses_existing_db_desc(monkeypatch, tmp_path):
-    rec = _install(
-        monkeypatch, tmp_path, domain_row=SimpleNamespace(db_desc="旧定制")
-    )
-
-    _run()
-
-    assert rec.started[0][3] == "旧定制"
-    assert rec.generate_calls == ["旧定制"]
-    assert rec.source.description == "源描述"
-
-
-def test_not_carried_falls_back_to_source_description(monkeypatch, tmp_path):
-    rec = _install(monkeypatch, tmp_path)
-
-    _run()
-
-    assert rec.started[0][3] == "源描述"
-    assert rec.generate_calls == ["源描述"]
-    assert rec.source.description == "源描述"
-
-
-def test_not_carried_both_null_uses_no_description(monkeypatch, tmp_path):
-    rec = _install(
-        monkeypatch, tmp_path, source=_source(description=None), domain_row=None
-    )
-
-    result = _run()
-
-    assert result["success"] is True
-    assert rec.started[0][3] is None
-    assert rec.generate_calls == [None]
-
-
-def test_locked_db_desc_stripped(monkeypatch, tmp_path):
-    rec = _install(
-        monkeypatch, tmp_path, domain_row=SimpleNamespace(db_desc="  旧定制  ")
-    )
-    _run()
-    assert rec.started[0][3] == "旧定制"
-
-
-def test_locked_source_description_stripped(monkeypatch, tmp_path):
-    rec = _install(
-        monkeypatch, tmp_path, source=_source(description="  源描述  ")
-    )
-    _run()
-    assert rec.started[0][3] == "源描述"
-
-
-# ---- d) 会话 2 固定顺序与失败语义 ----
-
-
-def test_session2_lock_missing_maps_to_not_found(monkeypatch, tmp_path):
-    rec = _install(monkeypatch, tmp_path)
-    calls = {"n": 0}
-
-    def flaky_lock(_session, source_id):
-        calls["n"] += 1
-        return None if calls["n"] == 1 else rec.source
-
-    monkeypatch.setattr(service, "lock_db_source_row", flaky_lock)
-    with pytest.raises(DbStepConfigError, match="未找到指定 source_id 的数据源"):
-        _run()
-    assert rec.started == []
-
-
-def test_session2_md_recheck_failure_rejected(monkeypatch, tmp_path):
-    """会话 2 锁下复查 md 不再是 success：抛配置错误、不调用 start_step（§5.2）。"""
-    rec = _install(monkeypatch, tmp_path)
-    calls = {"n": 0}
-
-    def flaky_get_step_row(_session, job_id, step_name):
-        if step_name == "md":
-            calls["n"] += 1
-            status = "success" if calls["n"] == 1 else "failed"
-            return SimpleNamespace(last_status=status, updated_at=None)
-        return None
-
-    monkeypatch.setattr(service, "get_step_row", flaky_get_step_row)
-    with pytest.raises(DbStepConfigError, match="MD 产物未就绪"):
-        _run()
-    assert rec.started == []
-
-
-def test_generation_runs_after_start_step(monkeypatch, tmp_path):
-    """⑤ 离开锁会话后才调用 LLM：start 事件先于 generate 事件（§5.2）。"""
-    rec = _install(monkeypatch, tmp_path)
-    _run()
-    assert rec.events.index(("start", "domain")) < next(
-        i for i, event in enumerate(rec.events) if event[0] == "generate"
-    )
-
-
-def test_step_already_running_returns_failure_with_job_id(monkeypatch, tmp_path):
-    rec = _install(monkeypatch, tmp_path)
-
-    def boom(*_a, **_k):
-        raise StepAlreadyRunningError("当前步骤可能已有作业正在执行")
-
-    monkeypatch.setattr(service, "start_step", boom)
-    result = _run()
-
-    assert result["success"] is False
-    assert result["job_id"] == str(JOB_ID)
-    assert result["message"] == "当前步骤可能已有作业正在执行"
+    monkeypatch.setattr(service, "resolve_module_llm_config", boom)
+    with pytest.raises(DbStepConfigError, match="配置非法"):
+        service.run_domain_step(_ctx(rec))
     assert rec.generate_calls == []
 
 
-# ---- e) 生成、核验与状态写回 ----
-
-
-def test_success_path_cleans_before_construct_and_writes_yaml(monkeypatch, tmp_path):
-    rec = _install(monkeypatch, tmp_path)
-    rec.domain_dir.mkdir(parents=True, exist_ok=True)
-    (rec.domain_dir / "old-artifact.yaml").write_text("old", encoding="utf-8")
-
-    result = _run()
-
-    assert result["success"] is True
-    assert result["job_id"] == str(JOB_ID)
-    assert rec.events.index(("clean", rec.domain_dir)) < rec.events.index(
-        ("init", rec.domain_dir / "db_domains.yaml")
-    )
-    assert not (rec.domain_dir / "old-artifact.yaml").exists()
-    final = yaml.safe_load(
-        (rec.domain_dir / "db_domains.yaml").read_text(encoding="utf-8")
-    )
-    assert final["domains"]
-    assert not (rec.domain_dir / "manifest.json").exists()
-    assert rec.finished == [(JOB_ID, "domain", "success")]
-    kwargs = rec.generator_kwargs[0]
-    assert kwargs["config"]["database"]["database"] == "demo"
-    assert kwargs["md_context_dir"] == str(rec.md_dir)
-    assert kwargs["yaml_path"] == str(rec.domain_dir / "db_domains.yaml")
-
-
-def test_clean_failure_marks_generation_failed(monkeypatch, tmp_path):
+def test_llm_precheck_unexpected_error_is_preparation_error(monkeypatch, tmp_path):
     rec = _install(monkeypatch, tmp_path)
 
-    def boom(_path):
-        raise OSError("denied")
+    class _Boom(Exception):
+        pass
 
-    monkeypatch.setattr(service, "clean_top_level_files", boom)
-    result = _run()
+    def boom(_config):
+        raise _Boom("unexpected")
 
-    assert result["success"] is False
-    assert result["message"] == "Domain 生成失败（OSError）"
-    assert rec.finished == [(JOB_ID, "domain", "failed")]
-    assert rec.generator_kwargs == []
+    monkeypatch.setattr(service, "LLMService", boom)
+    with pytest.raises(DomainPreparationError, match="LLM 预检"):
+        service.run_domain_step(_ctx(rec))
+    assert rec.generate_calls == []
 
 
-def test_generation_failure_marks_failed_and_keeps_db_desc(monkeypatch, tmp_path):
-    rec = _install(monkeypatch, tmp_path, domain_row=SimpleNamespace(db_desc="旧定制"))
+def test_md_glob_permission_error_is_preparation_error(monkeypatch, tmp_path):
+    rec = _install(monkeypatch, tmp_path)
+    real_glob = Path.glob
 
-    def boom(_self):
-        raise RuntimeError("llm down")
+    def broken_glob(self, pattern):
+        if self == rec.md_dir and pattern == "*.md":
+            raise PermissionError("denied")
+        return real_glob(self, pattern)
 
-    rec.on_generate = boom
-    result = _run()
+    monkeypatch.setattr(Path, "glob", broken_glob)
+    with pytest.raises(DomainPreparationError, match="md 目录枚举"):
+        service.run_domain_step(_ctx(rec))
 
-    assert result["success"] is False
-    assert result["message"] == "Domain 生成失败（RuntimeError）"
-    assert rec.finished == [(JOB_ID, "domain", "failed")]
-    assert rec.started[0][3] == "旧定制"  # db_desc 已随 start_step 提交
+
+# ---- 备份、生成与核验 ----
+
+
+def test_success_backs_up_before_generation_and_reports_inputs(monkeypatch, tmp_path):
+    """旧 domain 产物（含 marker）在生成前整目录备份；输入携带 md 来源运行。"""
+    from backend.workspace_files.markers import write_collection_marker
+
+    rec = _install(monkeypatch, tmp_path, existing_yaml="database: {}\ndomains: []\n")
+    write_collection_marker(
+        rec.domain_dir, UUID("99999999-9999-4999-8999-999999999999"), "success"
+    )
+    outcome = service.run_domain_step(_ctx(rec))
+
+    assert outcome.success is True, outcome.message
+    # 备份先于生成器构造（doc 6 §6：一次目录更新一个备份单元）
+    backup_index = next(i for i, e in enumerate(rec.events) if e[0] == "backup")
+    init_index = next(i for i, e in enumerate(rec.events) if e[0] == "init")
+    assert backup_index < init_index
+    (backup,) = list((rec.domain_dir / ".backup").iterdir())
+    assert (backup / "db_domains.yaml").exists()
+    assert list(backup.glob(".coll_run_id_*"))
+    assert outcome.input_files == [("md/demo.public.t0.md", str(MD_RUN_ID))]
+    assert outcome.output_files == ["domain/db_domains.yaml"]
+
+
+def test_generation_failure_marks_failed(monkeypatch, tmp_path):
+    rec = _install(monkeypatch, tmp_path)
+
+    def on_generate(_self):
+        raise RuntimeError("boom")
+
+    rec.on_generate = on_generate
+    outcome = service.run_domain_step(_ctx(rec))
+    assert outcome.success is False
+    assert "Domain 生成失败（RuntimeError）" in outcome.message
+    assert "boom" not in outcome.message
 
 
 def test_verify_bad_yaml_fails(monkeypatch, tmp_path):
     rec = _install(monkeypatch, tmp_path)
-    rec.raw_output = "domains: [not: valid"
-    result = _run()
-
-    assert result["success"] is False
-    assert "无法解析" in result["message"]
-    assert rec.finished == [(JOB_ID, "domain", "failed")]
+    rec.raw_output = "{ not: valid"
+    outcome = service.run_domain_step(_ctx(rec))
+    assert outcome.success is False
+    assert "YAML 无法解析" in outcome.message
 
 
 def test_verify_empty_domains_fails(monkeypatch, tmp_path):
-    """空 domains 不能靠成功写盘复现（write_to_yaml 恒注入 _未分类_），
-    这里直接交给写钩子构造（doc 21.1 A08）。"""
     rec = _install(monkeypatch, tmp_path)
-    rec.write_payload = {"database": {}, "domains": []}
-    result = _run()
-
-    assert result["success"] is False
-    assert "domains 为空" in result["message"]
+    rec.write_payload = {"database": {"description": "d"}, "domains": []}
+    outcome = service.run_domain_step(_ctx(rec))
+    assert outcome.success is False
+    assert "domains 为空" in outcome.message
 
 
 def test_verify_symlink_output_fails(monkeypatch, tmp_path):
+    """生成后 YAML 被换成符号链接：核验判失败（doc 21.1 §5.4）。"""
     rec = _install(monkeypatch, tmp_path)
-    outside = tmp_path / "outside.yaml"
-    outside.write_text(
-        yaml.safe_dump({"domains": [{"name": "x"}]}, allow_unicode=True),
-        encoding="utf-8",
-    )
 
     def on_write(r, _generated):
         r.domain_dir.mkdir(parents=True, exist_ok=True)
+        outside = r.domain_dir.parent / "outside-domains.yaml"
+        outside.write_text("database: {}\ndomains: [x]\n", encoding="utf-8")
         (r.domain_dir / "db_domains.yaml").symlink_to(outside)
 
     rec.on_write = on_write
-    result = _run()
-
-    assert result["success"] is False
-    assert "普通文件" in result["message"]
-
-
-def test_finish_step_failure_reported(monkeypatch, tmp_path):
-    _install(monkeypatch, tmp_path)
-
-    def boom(*_a):
-        raise RuntimeError("db down")
-
-    monkeypatch.setattr(service, "finish_step", boom)
-    result = _run()
-
-    assert result["success"] is False
-    assert "作业状态更新失败" in result["message"]
-    assert str(JOB_ID) in result["message"]
-
-
-def test_finish_lock_missing_reports_registration_gone(monkeypatch, tmp_path):
-    rec = _install(monkeypatch, tmp_path)
-    calls = {"n": 0}
-
-    def flaky_lock(_session, source_id):
-        calls["n"] += 1
-        return rec.source if calls["n"] == 1 else None
-
-    monkeypatch.setattr(service, "lock_db_source_row", flaky_lock)
-    result = _run()
-
-    assert result["success"] is False
-    assert "数据源登记已不存在" in result["message"]
-    assert str(JOB_ID) in result["message"]
+    outcome = service.run_domain_step(_ctx(rec))
+    assert outcome.success is False
+    assert "不是普通文件" in outcome.message

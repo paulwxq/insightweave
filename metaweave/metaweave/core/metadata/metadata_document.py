@@ -178,29 +178,27 @@ class MetadataDocument:
         return self.column_statistics(column_name).get("uniqueness")
 
     def is_single_column_primary_key(self, column_name: str) -> bool:
-        primary_key = (
-            self.table_profile.get("physical_constraints") or {}
-        ).get("primary_key") or {}
+        primary_key = (self.table_profile.get("physical_constraints") or {}).get(
+            "primary_key"
+        ) or {}
         columns = primary_key.get("columns", [])
         return len(columns) == 1 and column_name in columns
 
     def is_composite_primary_key_member(self, column_name: str) -> bool:
-        primary_key = (
-            self.table_profile.get("physical_constraints") or {}
-        ).get("primary_key") or {}
+        primary_key = (self.table_profile.get("physical_constraints") or {}).get(
+            "primary_key"
+        ) or {}
         columns = primary_key.get("columns", [])
         return len(columns) > 1 and column_name in columns
 
     def has_single_column_unique_constraint(self, column_name: str) -> bool:
         return any(
-            item.get("columns") == [column_name]
-            for item in self._unique_constraints()
+            item.get("columns") == [column_name] for item in self._unique_constraints()
         )
 
     def is_composite_unique_constraint_member(self, column_name: str) -> bool:
         return any(
-            len(item.get("columns", [])) > 1
-            and column_name in item.get("columns", [])
+            len(item.get("columns", [])) > 1 and column_name in item.get("columns", [])
             for item in self._unique_constraints()
         )
 
@@ -253,18 +251,21 @@ class MetadataDocument:
         value = self.table_profile.get("indexes", [])
         return value if isinstance(value, list) else []
 
-    def build_json_llm_input(self, *, value_distribution_top_k: int = 10) -> Dict[str, Any]:
+    def build_json_llm_input(
+        self, *, value_distribution_top_k: int = 10
+    ) -> Dict[str, Any]:
         """构造字段级白名单的 json_llm 提示词输入。"""
         object_info = self.object_info
         columns = {}
         for column_name, raw_column in self.column_profiles.items():
             if not isinstance(raw_column, dict):
-                raise MetadataDocumentError(
-                    f"column_profiles.{column_name} 必须是对象"
-                )
+                raise MetadataDocumentError(f"column_profiles.{column_name} 必须是对象")
             statistics = self.column_statistics(column_name)
             distribution = statistics.get("value_distribution")
-            if isinstance(distribution, dict) and len(distribution) > value_distribution_top_k:
+            if (
+                isinstance(distribution, dict)
+                and len(distribution) > value_distribution_top_k
+            ):
                 statistics["value_distribution"] = dict(
                     sorted(
                         distribution.items(),
@@ -387,9 +388,7 @@ class MetadataDocument:
         }
         for column_name, column in self.column_profiles.items():
             if not isinstance(column, dict):
-                raise MetadataDocumentError(
-                    f"column_profiles.{column_name} 必须是对象"
-                )
+                raise MetadataDocumentError(f"column_profiles.{column_name} 必须是对象")
             mixed_keys = forbidden_column_keys.intersection(column)
             if mixed_keys:
                 raise MetadataDocumentError(
@@ -402,9 +401,7 @@ class MetadataDocument:
                     raise MetadataDocumentError(
                         f"column_profiles.{column_name}.statistics 必须是对象"
                     )
-                mixed_statistics = forbidden_statistic_keys.intersection(
-                    statistics
-                )
+                mixed_statistics = forbidden_statistic_keys.intersection(statistics)
                 if mixed_statistics:
                     raise MetadataDocumentError(
                         f"JSON v3 字段 {column_name}.statistics 混入可派生属性: "
@@ -426,9 +423,7 @@ class MetadataDocument:
                 f"{', '.join(sorted(mixed_profile_keys))}"
             )
         sample_records = self.sample_records
-        mixed_sample_keys = {"sample_size", "total_rows"}.intersection(
-            sample_records
-        )
+        mixed_sample_keys = {"sample_size", "total_rows"}.intersection(sample_records)
         if mixed_sample_keys:
             raise MetadataDocumentError(
                 "JSON v3 sample_records 混入可派生属性: "

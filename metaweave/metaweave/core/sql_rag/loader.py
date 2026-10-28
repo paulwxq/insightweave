@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Optional, Type
 from uuid import UUID
 
 from metaweave.utils.file_utils import resolve_project_path
+from metaweave.utils.source_id import normalize_source_id
 from metaweave.core.loaders.base import BaseLoader
 from services.config_loader import ConfigLoader
 from metaweave.services.embedding_service import EmbeddingService
@@ -98,14 +99,14 @@ class SQLExampleLoader(BaseLoader):
         self.options = self.loader_cfg.get("options", {})
         self.batch_size = self.options.get("batch_size", 50)
 
-        # source_id/publish_id：UUID 对象或合法 UUID 字符串，统一规范化为字符串；
+        # source_id 为 db_src_N 短 ID（doc 6 §1）；publish_id 为发布运行 UUID。
         # 非法值记录标记，由 validate() 拒绝（构造不抛错）
         self._source_id: Optional[str] = None
         self._publish_id: Optional[str] = None
         self._uuid_error: Optional[str] = None
         try:
             if source_id is not None:
-                self._source_id = _normalize_uuid_value(source_id, "source_id")
+                self._source_id = normalize_source_id(source_id)
             if publish_id is not None:
                 self._publish_id = _normalize_uuid_value(publish_id, "publish_id")
         except ValueError as exc:
@@ -535,12 +536,11 @@ class SQLExampleLoader(BaseLoader):
 
     @staticmethod
     def compute_example_id(source_id: Any, question: str, sql: str) -> str:
-        """计算 example_id：`source_id:sha256(question+sql)[:8]`（唯一拼接路径）"""
-        prefix = (
-            str(source_id)
-            if isinstance(source_id, UUID)
-            else _normalize_uuid_value(source_id, "source_id")
-        )
+        """计算 example_id：`source_id:sha256(question+sql)[:8]`（唯一拼接路径）。
+
+        source_id 为 db_src_N 短 ID（doc 6 §1，与 __init__ 同一口径）。
+        """
+        prefix = str(normalize_source_id(source_id))
         content = question + sql
         content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()[:8]
         return f"{prefix}:{content_hash}"

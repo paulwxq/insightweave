@@ -1,11 +1,13 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { listDataSources } from '../api/dataSources'
 import { displayDate } from '../api/format'
 import type { DataSourceListItem } from '../api/types'
+import EmptyState from '../components/EmptyState.vue'
 
 const route = useRoute()
+const router = useRouter()
 const sources = ref<DataSourceListItem[]>([])
 const loading = ref(true)
 const error = ref('')
@@ -18,8 +20,101 @@ const disabledCount = computed(() =>
   countsReady.value ? String(sources.value.filter((item) => !item.is_active).length) : '—',
 )
 
-function activityTime(value: string | null | undefined): string {
-  return value ? displayDate(value) : '—'
+// ---- 筛选（列表接口返回全部数据源，客户端过滤；状态写入 query 可恢复） ----
+
+type StatusFilter = 'all' | 'active' | 'disabled'
+
+const statusFilter = computed<StatusFilter>(() => {
+  const value = Array.isArray(route.query.status) ? route.query.status[0] : route.query.status
+  return value === 'active' || value === 'disabled' ? value : 'all'
+})
+const keywordQuery = computed(() => {
+  const value = Array.isArray(route.query.q) ? route.query.q[0] : route.query.q
+  return typeof value === 'string' ? value.trim() : ''
+})
+const keywordDraft = ref(keywordQuery.value)
+
+const DB_TYPE_LABELS: Record<string, string> = {
+  postgresql: 'PostgreSQL',
+  mysql: 'MySQL',
+  sqlite: 'SQLite',
+  csv: 'CSV',
+  excel: 'Excel',
+}
+
+function dbTypeLabel(value: string): string {
+  return DB_TYPE_LABELS[value.toLowerCase()] ?? value
+}
+
+/** 选项只来自当前已登记数据源的 db_type，不预置未出现的类型。 */
+const dbTypes = computed(() => {
+  const seen = new Map<string, string>()
+  for (const item of sources.value) {
+    const raw = item.db_type.trim()
+    if (raw === '') continue
+    const key = raw.toLowerCase()
+    if (!seen.has(key)) seen.set(key, raw)
+  }
+  return [...seen.values()].sort((left, right) =>
+    dbTypeLabel(left).localeCompare(dbTypeLabel(right), 'zh'),
+  )
+})
+
+const dbTypeFilter = computed(() => {
+  const value = Array.isArray(route.query.db_type) ? route.query.db_type[0] : route.query.db_type
+  if (typeof value !== 'string' || value.trim() === '') return ''
+  return dbTypes.value.find((item) => item.toLowerCase() === value.trim().toLowerCase()) ?? ''
+})
+
+const filteredSources = computed(() => {
+  const keyword = keywordQuery.value.toLowerCase()
+  const dbType = dbTypeFilter.value.toLowerCase()
+  return sources.value.filter((item) => {
+    if (statusFilter.value === 'active' && !item.is_active) return false
+    if (statusFilter.value === 'disabled' && item.is_active) return false
+    if (dbType !== '' && item.db_type.toLowerCase() !== dbType) return false
+    if (keyword === '') return true
+    return [item.display_name, item.source_id, item.db_name, item.host]
+      .filter(Boolean)
+      .some((field) => field.toLowerCase().includes(keyword))
+  })
+})
+
+const hasFilter = computed(
+  () => statusFilter.value !== 'all' || keywordQuery.value !== '' || dbTypeFilter.value !== '',
+)
+
+function writeFilterQuery(next: { status?: StatusFilter; q?: string; db_type?: string }) {
+  const query: Record<string, string> = {}
+  const status = next.status !== undefined ? next.status : statusFilter.value
+  const keyword = (next.q !== undefined ? next.q : keywordQuery.value).trim()
+  const dbType = next.db_type !== undefined ? next.db_type : dbTypeFilter.value
+  if (status !== 'all') query.status = status
+  if (dbType) query.db_type = dbType
+  if (keyword) query.q = keyword
+  void router.replace({ path: '/data-sources', query })
+}
+
+function onStatusChange(value: string) {
+  const next = value === 'active' || value === 'disabled' ? value : 'all'
+  if (next === statusFilter.value) return
+  writeFilterQuery({ status: next })
+}
+
+function onDbTypeChange(value: string) {
+  const next = dbTypes.value.find((item) => item === value) ?? ''
+  if (next === dbTypeFilter.value) return
+  writeFilterQuery({ db_type: next })
+}
+
+function applyKeyword() {
+  if (keywordDraft.value.trim() === keywordQuery.value) return
+  writeFilterQuery({ q: keywordDraft.value })
+}
+
+function clearFilter() {
+  keywordDraft.value = ''
+  writeFilterQuery({ status: 'all', q: '', db_type: '' })
 }
 
 async function reload() {
@@ -124,19 +219,62 @@ onMounted(reload)
         </button>
       </div>
 
+      <!-- 筛选：数据库类型、状态、关键字（写入 query，刷新/返回可恢复） -->
+      <form v-if="sources.length > 0" class="ds-filter-bar" @submit.prevent="applyKeyword">
+        <label class="field ds-filter-type">
+          <span>数据库类型</span>
+          <select :value="dbTypeFilter" @change="onDbTypeChange(($event.target as HTMLSelectElement).value)">
+            <option value="">全部类型</option>
+            <option v-for="type in dbTypes" :key="type" :value="type">{{ dbTypeLabel(type) }}</option>
+          </select>
+        </label>
+        <label class="field ds-filter-status">
+          <span>状态筛选</span>
+          <select :value="statusFilter" @change="onStatusChange(($event.target as HTMLSelectElement).value)">
+            <option value="all">全部状态</option>
+            <option value="active">启用</option>
+            <option value="disabled">禁用</option>
+          </select>
+        </label>
+        <label class="field ds-filter-keyword">
+          <span>关键字搜索</span>
+          <input
+            v-model="keywordDraft"
+            type="search"
+            placeholder="名称 / source_id / 库名 / 主机"
+          />
+        </label>
+        <button type="submit" class="button button-outline">搜索</button>
+        <button v-if="hasFilter" type="button" class="button button-outline" @click="clearFilter">
+          清除筛选
+        </button>
+      </form>
+
       <div v-if="loading" class="state-block" role="status">正在读取已登记的数据源…</div>
       <div v-else-if="error" class="state-block error-state" role="alert">
         <p>{{ error }}</p>
         <button class="button button-outline" @click="reload">重试</button>
       </div>
-      <div v-else-if="sources.length === 0" class="state-block empty-state">
-        <span class="empty-icon">▤</span>
-        <h3>还没有登记数据源</h3>
-        <p>创建一个 PostgreSQL 连接，测试通过后选择 Schema，即可完成登记。</p>
-        <RouterLink to="/data-sources/new" class="button button-primary">创建数据源</RouterLink>
-      </div>
+      <EmptyState
+        v-else-if="sources.length === 0"
+        title="还没有登记数据源"
+        description="创建一个 PostgreSQL 连接，测试通过后选择 Schema，即可完成登记。"
+      >
+        <template #action>
+          <RouterLink to="/data-sources/new" class="button button-primary">创建数据源</RouterLink>
+        </template>
+      </EmptyState>
+      <EmptyState
+        v-else-if="filteredSources.length === 0"
+        title="没有符合条件的数据源"
+        description="换个关键字、状态或数据库类型试试。"
+      >
+        <template #action>
+          <button type="button" class="button button-outline" @click="clearFilter">清除筛选</button>
+        </template>
+      </EmptyState>
       <div v-else class="ds-source-grid">
-        <article v-for="source in sources" :key="source.source_id" class="ds-source-card">
+        <article v-for="source in filteredSources" :key="source.source_id" class="ds-source-card">
           <div class="ds-source-top">
             <span class="ds-source-icon">
               <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -169,12 +307,14 @@ onMounted(reload)
               <RouterLink :to="`/data-sources/${source.source_id}`">管理数据源连接 <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14" /><path d="m12 5 7 7-7 7" /></svg></RouterLink>
             </div>
             <div class="ds-source-meta">
-              <p>最近采集 {{ activityTime(source.last_collected_at) }}</p>
-              <RouterLink :to="`/data-sources/${source.source_id}/collection-jobs`">相关数据采集作业 <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14" /><path d="m12 5 7 7-7 7" /></svg></RouterLink>
-            </div>
-            <div class="ds-source-meta">
-              <p>最近发布 {{ activityTime(source.last_published_at) }}</p>
-              <RouterLink :to="`/data-sources/${source.source_id}/publish-jobs`">相关画像发布作业 <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14" /><path d="m12 5 7 7-7 7" /></svg></RouterLink>
+              <p v-if="source.last_collected_at">{{ displayDate(source.last_collected_at) }}</p>
+              <span v-else></span>
+              <RouterLink
+                :to="{
+                  path: '/workspaces',
+                  query: { source_id: source.source_id, db_type: source.db_type },
+                }"
+              >相关工作区 <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14" /><path d="m12 5 7 7-7 7" /></svg></RouterLink>
             </div>
           </div>
         </article>
@@ -182,3 +322,47 @@ onMounted(reload)
     </section>
   </div>
 </template>
+
+<style scoped>
+.ds-filter-bar {
+  display: flex;
+  align-items: end;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin: 14px 0 4px;
+}
+.ds-filter-bar .field {
+  margin: 0;
+}
+.ds-filter-status {
+  width: 104px;
+}
+.ds-filter-type {
+  width: 128px;
+}
+.ds-filter-keyword {
+  width: 200px;
+  max-width: 100%;
+}
+.ds-filter-bar .field input,
+.ds-filter-bar .field select {
+  width: 100%;
+  height: 32px;
+  padding: 0 10px;
+  font-size: 12px;
+  line-height: 32px;
+}
+.ds-filter-bar .field > span:first-child {
+  display: block;
+  color: #66788f;
+  font-size: 11px;
+  font-weight: 700;
+  margin-bottom: 5px;
+}
+.ds-filter-bar .button {
+  min-height: 32px;
+  height: 32px;
+  padding: 0 12px;
+  font-size: 12px;
+}
+</style>

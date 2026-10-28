@@ -1,6 +1,9 @@
-"""数据资产首页：按每个数据源当前 db 发布读取 db_profile。"""
+"""数据资产首页：按每个数据源当前 db_profile 行展示（doc 6.1 §14）。
 
-from uuid import UUID
+新模型下 db_profile 每源一行即是当前内容；发布来源取行上的
+`publish_run_id`（该行最后一次成功写入的发布运行），不再有 current
+标记或一致性核对（doc 6.1 §10.1）。
+"""
 
 from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
@@ -12,8 +15,9 @@ from backend.data_sources.registration_service import (
     SourceNotFoundError,
 )
 from backend.data_sources.repository import get_db_source
-from backend.persistence.models import DbProfile, DbSourceInfo, PublishInfo
+from backend.persistence.models import DbProfile, DbSourceInfo, PublishRunInfo
 from backend.persistence.platform_db import PlatformSettings, platform_session
+from metaweave.utils.source_id import normalize_source_id
 
 _TYPE_LABELS = {
     "postgresql": "PostgreSQL",
@@ -35,55 +39,82 @@ def _connection(profile: DbProfile) -> str:
     return f"{profile.host}:{profile.port}/{profile.db_name}"
 
 
-def assemble_asset_catalog(publishes, profiles, sources) -> dict:
-    """只展示每个数据源 db 步骤 current 且成功的画像。
+def _item(profile: DbProfile, display_name: str, publish_run_id) -> dict:
+    return {
+        "publish_run_id": str(profile.publish_run_id),
+        "source_id": profile.source_id,
+        "display_name": display_name or profile.db_name,
+        "db_type": profile.db_type,
+        "db_type_label": _type_label(profile.db_type),
+        "server_version": profile.server_version,
+        "connection": _connection(profile),
+        "table_count": (
+            profile.ordinary_table_count
+            + profile.partitioned_table_count
+            + profile.view_count
+            + profile.materialized_view_count
+        ),
+        "object_count": profile.object_count,
+        "size_bytes": profile.size_bytes,
+        "collected_at": utc_isoformat(profile.collected_at),
+        "published_at": (
+            utc_isoformat(publish_run_id.created_at) if publish_run_id else None
+        ),
+    }
 
-    画像每源一行（doc 16 §3.1），按 source_id 对位；画像行的 publish_id
-    必须与该源 db current 成功发布一致，否则计为一致性问题，不换用其他版本。
-    """
-    current: dict = {}
-    for row in publishes:
-        if row.step_name == "db" and row.is_current_publish:
-            current[row.source_id] = row
-    profile_by_source = {profile.source_id: profile for profile in profiles}
-    names = {source.source_id: source.display_name for source in sources}
-    items = []
-    inconsistent_count = 0
-    for source_id, publish in current.items():
-        if publish.status != "success":
-            continue
-        profile = profile_by_source.get(source_id)
-        if profile is None or profile.publish_id != publish.publish_id:
-            inconsistent_count += 1
-            continue
-        items.append(
-            {
-                "publish_id": str(publish.publish_id),
-                "source_id": str(source_id),
-                "display_name": names.get(source_id) or profile.db_name,
-                "db_type": profile.db_type,
-                "db_type_label": _type_label(profile.db_type),
-                "server_version": profile.server_version,
-                "connection": _connection(profile),
-                "table_count": (
-                    profile.ordinary_table_count
-                    + profile.partitioned_table_count
-                    + profile.view_count
-                    + profile.materialized_view_count
-                ),
-                "object_count": profile.object_count,
-                "size_bytes": profile.size_bytes,
-                "collected_at": utc_isoformat(profile.collected_at),
-            }
+
+def assemble_asset_catalog(profiles, names, runs_by_id) -> dict:
+    """每个有当前画像的源一行；发布来源取画像行的 publish_run_id。"""
+    items = [
+        _item(
+            profile,
+            names.get(profile.source_id, ""),
+            runs_by_id.get(profile.publish_run_id),
         )
+        for profile in profiles
+    ]
     items.sort(key=lambda item: item["collected_at"], reverse=True)
     return {
         "source_count": len(items),
         "object_count": sum(item["object_count"] for item in items),
         "project_count": 0,
-        "inconsistent_count": inconsistent_count,
         "items": items,
     }
+
+
+def list_asset_catalog(settings: PlatformSettings) -> dict:
+    try:
+        with platform_session(settings) as session:
+            profiles = list(session.scalars(select(DbProfile)))
+            source_ids = sorted({profile.source_id for profile in profiles})
+            names = (
+                {
+                    row.source_id: row.display_name
+                    for row in session.scalars(
+                        select(DbSourceInfo).where(
+                            DbSourceInfo.source_id.in_(source_ids)
+                        )
+                    )
+                }
+                if source_ids
+                else {}
+            )
+            run_ids = sorted({profile.publish_run_id for profile in profiles})
+            runs_by_id = (
+                {
+                    row.publish_run_id: row
+                    for row in session.scalars(
+                        select(PublishRunInfo).where(
+                            PublishRunInfo.publish_run_id.in_(run_ids)
+                        )
+                    )
+                }
+                if run_ids
+                else {}
+            )
+            return assemble_asset_catalog(profiles, names, runs_by_id)
+    except SQLAlchemyError:
+        raise PlatformUnavailableError("平台库暂不可用") from None
 
 
 def _source_block(source, profile) -> dict:
@@ -91,18 +122,17 @@ def _source_block(source, profile) -> dict:
     if not display_name and profile is not None:
         display_name = profile.db_name
     return {
-        "source_id": str(source.source_id),
+        "source_id": source.source_id,
         "display_name": display_name or "",
         "username": source.username or "",
     }
 
 
-def _publish_block(publish) -> dict:
+def _publish_block(run) -> dict:
     return {
-        "publish_id": str(publish.publish_id),
-        "status": publish.status,
-        "error_summary": publish.error_summary,
-        "published_at": utc_isoformat(publish.created_at),
+        "publish_run_id": str(run.publish_run_id),
+        "status": run.status,
+        "published_at": utc_isoformat(run.created_at),
     }
 
 
@@ -133,117 +163,36 @@ def _profile_block(profile) -> dict:
     }
 
 
-def assemble_asset_profile(source, publishes, profiles) -> dict:
-    """按 db 步骤的 current 发布组装画像页。失败的 current 不回退旧画像。
-
-    画像按 source_id 对位（每源一行）；画像行 publish_id 与 current 发布
-    不一致时计为 inconsistent，不换用其他版本。
-    """
-    current = next(
-        (
-            row
-            for row in publishes
-            if row.step_name == "db"
-            and row.is_current_publish
-            and row.source_id == source.source_id
-        ),
-        None,
-    )
-    if current is None:
+def assemble_asset_profile(source, profile, run) -> dict:
+    """画像页：无 db_profile 行 → not_published；有则 ready（doc 6.1 §14）。"""
+    if profile is None:
         return {
             "state": "not_published",
             "source": _source_block(source, None),
             "publish": None,
             "profile": None,
         }
-    publish_block = _publish_block(current)
-    if current.status != "success":
-        return {
-            "state": "failed",
-            "source": _source_block(source, None),
-            "publish": publish_block,
-            "profile": None,
-        }
-    profile = next(
-        (item for item in profiles if item.source_id == source.source_id), None
-    )
-    if profile is None or profile.publish_id != current.publish_id:
-        return {
-            "state": "inconsistent",
-            "source": _source_block(source, None),
-            "publish": publish_block,
-            "profile": None,
-        }
     return {
         "state": "ready",
         "source": _source_block(source, profile),
-        "publish": publish_block,
+        "publish": _publish_block(run) if run is not None else None,
         "profile": _profile_block(profile),
     }
 
 
-def get_asset_profile(settings: PlatformSettings, source_id: UUID) -> dict:
+def get_asset_profile(settings: PlatformSettings, source_id: str) -> dict:
+    source_id = normalize_source_id(source_id)
     try:
         with platform_session(settings) as session:
             source = get_db_source(session, source_id)
             if source is None:
                 raise SourceNotFoundError("数据源不存在")
-            publishes = list(
-                session.scalars(
-                    select(PublishInfo).where(
-                        PublishInfo.source_id == source_id,
-                        PublishInfo.step_name == "db",
-                        PublishInfo.is_current_publish.is_(True),
-                    )
-                )
+            profile = session.get(DbProfile, source_id)
+            run = (
+                session.get(PublishRunInfo, profile.publish_run_id)
+                if profile is not None
+                else None
             )
-            profiles = (
-                list(
-                    session.scalars(
-                        select(DbProfile).where(DbProfile.source_id == source_id)
-                    )
-                )
-                if any(row.status == "success" for row in publishes)
-                else []
-            )
-            return assemble_asset_profile(source, publishes, profiles)
-    except SQLAlchemyError:
-        raise PlatformUnavailableError("平台库暂不可用") from None
-
-
-def list_asset_catalog(settings: PlatformSettings) -> dict:
-    try:
-        with platform_session(settings) as session:
-            publishes = list(
-                session.scalars(
-                    select(PublishInfo).where(
-                        PublishInfo.step_name == "db",
-                        PublishInfo.is_current_publish.is_(True),
-                    )
-                )
-            )
-            source_ids = [row.source_id for row in publishes if row.status == "success"]
-            profiles = (
-                list(
-                    session.scalars(
-                        select(DbProfile).where(DbProfile.source_id.in_(source_ids))
-                    )
-                )
-                if source_ids
-                else []
-            )
-            source_ids = list({profile.source_id for profile in profiles})
-            sources = (
-                list(
-                    session.scalars(
-                        select(DbSourceInfo).where(
-                            DbSourceInfo.source_id.in_(source_ids)
-                        )
-                    )
-                )
-                if source_ids
-                else []
-            )
-            return assemble_asset_catalog(publishes, profiles, sources)
+            return assemble_asset_profile(source, profile, run)
     except SQLAlchemyError:
         raise PlatformUnavailableError("平台库暂不可用") from None

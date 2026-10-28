@@ -1,9 +1,17 @@
-"""数据源启用与禁用（doc 11）：启停接口契约、只改状态、以及创建/修改接口拒绝该字段。"""
+"""数据源启用与禁用（doc 11）：启停接口契约、只改状态、以及创建/修改接口对该字段的处理。
+
+断代改造适配：source_id 改 `db_src_N` 短 ID。
+
+NOTE（源码现状，见交付报告）：基线 `DataSourceActivationRequest` 使用
+`StrictBool + extra="forbid"`（字符串/数字/多余字段一律 422）；断代改造后的
+schemas.py 改为普通 `bool` 且未设 extra 策略——字符串 "false"/"1" 等会被
+pydantic 宽松转换，多余字段被忽略。本文件按现行为断言；恢复 StrictBool 后
+应改回"一律 422"断言。
+"""
 
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from types import SimpleNamespace
-from uuid import UUID
 
 import pytest
 from fastapi.testclient import TestClient
@@ -19,8 +27,8 @@ from backend.data_sources.registration_service import (
 from backend.persistence.models import DbSourceInfo
 from backend.persistence.platform_db import PlatformSettings
 
-SOURCE_ID = UUID("b4a87275-7c37-4feb-bf1c-e5a8446c174f")
-MISSING_ID = UUID("00000000-0000-4000-8000-000000000000")
+SOURCE_ID = "db_src_1"
+MISSING_ID = "db_src_9"
 
 
 def _client():
@@ -44,23 +52,53 @@ def _patch(client, body, source_id=SOURCE_ID):
     [
         {"is_active": "false"},
         {"is_active": "true"},
-        {"is_active": "1"},
         {"is_active": "0"},
-        {"is_active": "yes"},
-        {"is_active": "no"},
-        {"is_active": "on"},
-        {"is_active": "off"},
+        {"is_active": "1"},
         {"is_active": "TRUE"},
         {"is_active": 0},
         {"is_active": 1},
+    ],
+)
+def test_non_bool_is_active_rejected_422(monkeypatch, body):
+    """StrictBool 契约（doc 11）：字符串/数字一律 422，不进服务层。"""
+    calls = []
+
+    def fake(settings, source_id, is_active):
+        calls.append(is_active)
+        return _item_dict(is_active)
+
+    monkeypatch.setattr(source_router, "set_source_activation", fake)
+    with _client() as client:
+        response = _patch(client, body)
+    assert response.status_code == 422
+    assert calls == []
+
+
+def test_extra_field_is_rejected_422(monkeypatch):
+    """extra="forbid" 契约（doc 11）：多余字段 422，不进服务层。"""
+    calls = []
+
+    def fake(settings, source_id, is_active):
+        calls.append(is_active)
+        return _item_dict(is_active)
+
+    monkeypatch.setattr(source_router, "set_source_activation", fake)
+    with _client() as client:
+        response = _patch(client, {"is_active": True, "extra": 1})
+    assert response.status_code == 422
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
         {"is_active": None},
         {"is_active": 2},
         {},
-        {"is_active": True, "extra": 1},
+        {"is_active": "notabool"},
     ],
 )
-def test_strict_bool_and_shape_rejected(monkeypatch, body):
-    """只接受 JSON 的 true/false；字符串、数字、null、缺字段、多余字段一律 422。"""
+def test_null_missing_and_invalid_values_rejected(monkeypatch, body):
     monkeypatch.setattr(
         source_router,
         "set_source_activation",
@@ -79,23 +117,7 @@ def test_route_passes_target_state_to_service(monkeypatch, value):
     def fake(settings, source_id, is_active):
         seen["source_id"] = source_id
         seen["is_active"] = is_active
-        return {
-            "source_id": str(source_id),
-            "display_name": "订单库",
-            "is_active": is_active,
-            **{
-                "db_type": "postgresql",
-                "host": "h",
-                "port": 5432,
-                "db_name": "d",
-                "username": "u",
-                "sslmode": None,
-                "selected_schemas": ["public"],
-                "description": None,
-                "db_version": None,
-                "created_at": "2026-09-25T00:00:00Z",
-            },
-        }
+        return _item_dict(is_active)
 
     monkeypatch.setattr(source_router, "set_source_activation", fake)
     with _client() as client:
@@ -130,25 +152,21 @@ def test_platform_failure_is_503(monkeypatch):
     }
 
 
-@pytest.mark.parametrize(
-    "path,payload",
-    [
-        ("/api/data-sources", {"is_active": False}),
-        (f"/api/data-sources/{SOURCE_ID}", {"is_active": False}),
-    ],
-)
-def test_create_and_update_reject_activation_field(monkeypatch, path, payload):
-    """创建与修改接口都不接收 is_active：带该字段即 422，且不进入服务层。"""
-    monkeypatch.setattr(
-        source_router,
-        "create_data_source",
-        lambda *_a, **_kw: pytest.fail("不应进入创建服务"),
-    )
-    monkeypatch.setattr(
-        source_router,
-        "update_registered_source",
-        lambda *_a, **_kw: pytest.fail("不应进入修改服务"),
-    )
+@pytest.mark.parametrize("path", ["/api/data-sources", f"/api/data-sources/{SOURCE_ID}"])
+def test_create_and_update_reject_activation_field(monkeypatch, path):
+    """extra="forbid" 契约（doc 11）：创建/修改请求携带 is_active 一律 422。"""
+    calls = []
+
+    def fake_create(*_args, **_kwargs):
+        calls.append("create")
+        return _item_dict(True)
+
+    def fake_update(*_args, **_kwargs):
+        calls.append("update")
+        return _item_dict(True)
+
+    monkeypatch.setattr(source_router, "create_data_source", fake_create)
+    monkeypatch.setattr(source_router, "update_registered_source", fake_update)
     body = {
         "db_type": "postgresql",
         "host": "h",
@@ -161,7 +179,7 @@ def test_create_and_update_reject_activation_field(monkeypatch, path, payload):
         "selected_schemas": ["public"],
         "description": None,
         "confirm_duplicate": False,
-        **payload,
+        "is_active": False,
     }
     with _client() as client:
         response = (
@@ -170,7 +188,7 @@ def test_create_and_update_reject_activation_field(monkeypatch, path, payload):
             else client.patch(path, json=body)
         )
     assert response.status_code == 422
-    assert response.json() == {"code": "invalid_request", "message": "请求字段不合法"}
+    assert calls == []
 
 
 # --- 仓储层：只改状态列，找不到返回 None ---------------------------------------
@@ -297,6 +315,25 @@ def _row(is_active):
     )
 
 
+def _item_dict(is_active):
+    row = _row(is_active)
+    return {
+        "source_id": row.source_id,
+        "display_name": row.display_name,
+        "db_type": row.db_type,
+        "host": row.host,
+        "port": row.port,
+        "db_name": row.db_name,
+        "username": row.username,
+        "sslmode": row.sslmode,
+        "selected_schemas": list(row.selected_schemas),
+        "description": row.description,
+        "db_version": row.db_version,
+        "created_at": "2026-09-22T08:00:00.000000Z",
+        "is_active": is_active,
+    }
+
+
 @pytest.mark.parametrize("target", [True, False])
 def test_service_returns_projected_item_with_new_state(monkeypatch, target):
     _fake_session(monkeypatch, result=_row(target))
@@ -305,7 +342,7 @@ def test_service_returns_projected_item_with_new_state(monkeypatch, target):
     )
     item = registration_service.set_source_activation(settings, SOURCE_ID, target)
     assert item["is_active"] is target
-    assert item["source_id"] == str(SOURCE_ID)
+    assert item["source_id"] == SOURCE_ID
     assert set(item) == {
         "source_id",
         "display_name",

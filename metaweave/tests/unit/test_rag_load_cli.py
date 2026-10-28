@@ -13,8 +13,8 @@ from click.testing import CliRunner
 from metaweave.cli import loader_cli
 
 SUMMARY_HEADING = "RAG 加载汇总"
-SOURCE = "b9a4943d-44d6-4f35-b553-d25207f9d8c1"
-JOB = "550e8400-e29b-41d4-a716-446655440000"
+SOURCE = "db_src_1"
+WORKSPACE = "ws_1"
 
 
 def _ok_loader(message="加载完成", execution_time=0.5):
@@ -142,18 +142,36 @@ class TestCommandContract:
 class TestTableSchemaDebugCli:
     """doc 20.1 §10.7：table_schema 调试加载"""
 
-    def test_requires_both_uuids(self, tmp_path):
+    def test_requires_both_ids(self, tmp_path):
         config = _write_config(tmp_path)
         for args in (
             ["--type", "table_schema"],
             ["--type", "table_schema", "--source_id", SOURCE],
-            ["--type", "table_schema", "--job_id", JOB],
-            ["--type", "table_schema", "--source_id", "bad", "--job_id", JOB],
+            ["--type", "table_schema", "--workspace_id", WORKSPACE],
         ):
             result = CliRunner().invoke(
                 loader_cli.rag_load_command, args + ["-c", config]
             )
             assert result.exit_code == 2, args
+
+    def test_bad_short_id_rejected_in_managed_derivation(self, tmp_path):
+        """非法短 ID 由受管配置派生拦截（配置错误，exit 1），不在 CLI 解析层。"""
+        config = _write_config(tmp_path)
+        result = CliRunner().invoke(
+            loader_cli.rag_load_command,
+            [
+                "--type",
+                "table_schema",
+                "--source_id",
+                "bad",
+                "--workspace_id",
+                WORKSPACE,
+                "-c",
+                config,
+            ],
+        )
+        assert result.exit_code == 1
+        assert "配置错误" in result.output and "短 ID" in result.output
 
     def test_clean_never_resolves_clean_target_or_warns_about_wiping(
         self, tmp_path, monkeypatch
@@ -178,8 +196,8 @@ class TestTableSchemaDebugCli:
                     "table_schema",
                     "--source_id",
                     SOURCE,
-                    "--job_id",
-                    JOB,
+                    "--workspace_id",
+                    WORKSPACE,
                     "-c",
                     config,
                 ]
@@ -214,8 +232,8 @@ class TestTableSchemaDebugCli:
                 "table_schema",
                 "--source_id",
                 SOURCE,
-                "--job_id",
-                JOB,
+                "--workspace_id",
+                WORKSPACE,
                 "-c",
                 config,
             ],
@@ -247,8 +265,8 @@ class TestTableSchemaDebugCli:
                 "table_schema",
                 "--source_id",
                 SOURCE,
-                "--job_id",
-                JOB,
+                "--workspace_id",
+                WORKSPACE,
                 "-c",
                 str(path),
             ],
@@ -270,8 +288,8 @@ class TestTableSchemaDebugCli:
                 "table_schema",
                 "--source_id",
                 SOURCE,
-                "--job_id",
-                JOB,
+                "--workspace_id",
+                WORKSPACE,
                 "-c",
                 config,
             ],

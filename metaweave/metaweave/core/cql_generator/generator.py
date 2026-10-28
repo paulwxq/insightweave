@@ -16,7 +16,9 @@ from services.config_loader import ConfigLoader
 
 logger = logging.getLogger("metaweave.cql_generator")
 
-DEFAULT_COMPOSITE_SCORE_THRESHOLD = 0.9  # 与 decision.high_confidence_threshold 语义对齐
+DEFAULT_COMPOSITE_SCORE_THRESHOLD = (
+    0.9  # 与 decision.high_confidence_threshold 语义对齐
+)
 
 
 class CQLGenerator:
@@ -137,7 +139,9 @@ class CQLGenerator:
                 domain_resolver=self.domain_resolver,
                 composite_score_threshold=self.composite_score_threshold,
             )
-            tables, columns, has_column_rels, join_on_rels, filter_stats = reader.read_all()
+            tables, columns, has_column_rels, join_on_rels, filter_stats = (
+                reader.read_all()
+            )
 
             logger.info(f"  - 表节点: {len(tables)}")
             logger.info(f"  - 列节点: {len(columns)}")
@@ -204,7 +208,7 @@ class CQLGenerator:
                 has_column_count=len(has_column_rels),
                 relationships_count=len(join_on_rels),
                 errors=errors,
-                filter_stats=filter_stats
+                filter_stats=filter_stats,
             )
 
             logger.info("\n" + "=" * 60)
@@ -222,5 +226,5 @@ class CQLGenerator:
                 tables_count=0,
                 columns_count=0,
                 relationships_count=0,
-                errors=[str(e)]
+                errors=[str(e)],
             )

@@ -42,7 +42,9 @@ class _DummyDomainGenerator:
         ]
 
 
-def test_generate_domains_uses_config_markdown_directory_by_default(tmp_path, monkeypatch):
+def test_generate_domains_uses_config_markdown_directory_by_default(
+    tmp_path, monkeypatch
+):
     cfg = tmp_path / "metadata_config.yaml"
     cfg.write_text("database:\n  database: demo\n", encoding="utf-8")
 
@@ -224,7 +226,9 @@ def test_generate_domains_succeeds_despite_yaml_domain_all(tmp_path, monkeypatch
     assert "已生成" in result.output
 
 
-def test_generate_domains_clean_removes_top_level_files_keeps_subdirs(tmp_path, monkeypatch):
+def test_generate_domains_clean_removes_top_level_files_keeps_subdirs(
+    tmp_path, monkeypatch
+):
     """--generate-domains --clean：清 domains 目录顶层所有文件，保留子目录（统一语义）。"""
     cfg = tmp_path / "metadata_config.yaml"
     cfg.write_text("database:\n  database: demo\n", encoding="utf-8")
@@ -250,10 +254,12 @@ def test_generate_domains_clean_removes_top_level_files_keeps_subdirs(tmp_path, 
     result = runner.invoke(
         metadata_cli.metadata_command,
         [
-            "--config", str(cfg),
+            "--config",
+            str(cfg),
             "--generate-domains",
             "--clean",
-            "--domains-config", str(domains_dir / "db_domains.yaml"),
+            "--domains-config",
+            str(domains_dir / "db_domains.yaml"),
         ],
     )
 
@@ -285,9 +291,7 @@ def test_generate_domains_rejects_non_positive_md_limit(tmp_path, monkeypatch):
         "metaweave.core.metadata.domain_generator.DomainGenerator",
         _DummyDomainGenerator,
     )
-    monkeypatch.setattr(
-        "services.config_loader.load_config", lambda _p: {"output": {}}
-    )
+    monkeypatch.setattr("services.config_loader.load_config", lambda _p: {"output": {}})
     md_dir = tmp_path / "output" / "md"
     md_dir.mkdir(parents=True, exist_ok=True)
     ok = runner.invoke(

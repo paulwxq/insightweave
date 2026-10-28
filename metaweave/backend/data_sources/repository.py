@@ -1,22 +1,24 @@
-"""数据源登记表访问。"""
+"""数据源登记表访问。source_id 为 text 短 ID（doc 6.1 §13）。"""
 
 from datetime import datetime
-from uuid import UUID
 
 from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from backend.persistence.models import (
+    CollectionJobInfo,
+    CollectionRunInfo,
     DbProfile,
     DbSourceInfo,
-    JobInfo,
-    PublishInfo,
+    PublishJobInfo,
+    PublishRunInfo,
     TableDefinition,
     TableProfile,
+    WorkspaceInfo,
 )
 
 
-def get_db_source(session: Session, source_id: UUID) -> DbSourceInfo | None:
+def get_db_source(session: Session, source_id: str) -> DbSourceInfo | None:
     return session.get(DbSourceInfo, source_id)
 
 
@@ -34,29 +36,48 @@ def find_db_sources_by_connection(
 
 def latest_source_activity(
     session: Session,
-) -> tuple[dict[UUID, datetime], dict[UUID, datetime]]:
-    """每个数据源最近一次采集和最近一次已提交发布。
+) -> tuple[dict[str, datetime], dict[str, datetime]]:
+    """每个数据源最近一次采集运行与发布运行的创建时间。
 
-    采集取 job_info.updated_at 的最大值；发布取 publish_info.created_at 的最大值。
-    没有对应行的数据源不会出现在字典里。
+    采集经 collection_run_info → collection_job_info → workspace_info 归源；
+    发布经 publish_run_info → publish_job_info → workspace_info 归源。
+    没有对应运行的数据源不会出现在字典里。
     """
+    collected_rows = session.execute(
+        select(
+            WorkspaceInfo.source_id,
+            func.max(CollectionRunInfo.created_at),
+        )
+        .join(
+            CollectionJobInfo,
+            CollectionJobInfo.collection_job_id == CollectionRunInfo.collection_job_id,
+        )
+        .join(
+            WorkspaceInfo,
+            WorkspaceInfo.workspace_id == CollectionJobInfo.workspace_id,
+        )
+        .group_by(WorkspaceInfo.source_id)
+    ).all()
+    published_rows = session.execute(
+        select(
+            WorkspaceInfo.source_id,
+            func.max(PublishRunInfo.created_at),
+        )
+        .join(
+            PublishJobInfo,
+            PublishJobInfo.publish_job_id == PublishRunInfo.publish_job_id,
+        )
+        .join(
+            WorkspaceInfo,
+            WorkspaceInfo.workspace_id == PublishJobInfo.workspace_id,
+        )
+        .group_by(WorkspaceInfo.source_id)
+    ).all()
     collected = {
-        source_id: moment
-        for source_id, moment in session.execute(
-            select(JobInfo.source_id, func.max(JobInfo.updated_at)).group_by(
-                JobInfo.source_id
-            )
-        ).all()
-        if moment is not None
+        source_id: moment for source_id, moment in collected_rows if moment is not None
     }
     published = {
-        source_id: moment
-        for source_id, moment in session.execute(
-            select(PublishInfo.source_id, func.max(PublishInfo.created_at)).group_by(
-                PublishInfo.source_id
-            )
-        ).all()
-        if moment is not None
+        source_id: moment for source_id, moment in published_rows if moment is not None
     }
     return collected, published
 
@@ -74,6 +95,10 @@ def insert_db_source(session: Session, fields: dict) -> DbSourceInfo:
         or not fields["display_name"].strip()
     ):
         raise ValueError("display_name 不能为空")
+    if "source_id" in fields:
+        # 登记入口不接受客户端指定 source_id（doc 6.1 §13.1）；
+        # 短 ID 由数据库序列默认值生成并取回。
+        raise ValueError("source_id 由数据库生成，不接受外部指定")
     row = DbSourceInfo(**fields)
     session.add(row)
     session.commit()
@@ -81,7 +106,7 @@ def insert_db_source(session: Session, fields: dict) -> DbSourceInfo:
 
 
 def update_db_source(
-    session: Session, source_id: UUID, fields: dict
+    session: Session, source_id: str, fields: dict
 ) -> DbSourceInfo | None:
     if (
         not isinstance(fields.get("display_name"), str)
@@ -99,7 +124,7 @@ def update_db_source(
 
 
 def set_db_source_active(
-    session: Session, source_id: UUID, is_active: bool
+    session: Session, source_id: str, is_active: bool
 ) -> DbSourceInfo | None:
     """按主键更新启用状态；找不到返回 None，不触碰其他列（doc 11）。"""
     row = get_db_source(session, source_id)
@@ -111,28 +136,30 @@ def set_db_source_active(
     return row
 
 
-def purge_source_profiles(session: Session, source_id: UUID) -> None:
-    """删除该源当前画像并清除全部 current 标记（doc 16 §6）。
+def count_workspaces_by_source(session: Session, source_id: str) -> int:
+    stmt = (
+        select(func.count())
+        .select_from(WorkspaceInfo)
+        .where(WorkspaceInfo.source_id == source_id)
+    )
+    return int(session.scalar(stmt) or 0)
+
+
+def purge_source_profiles(session: Session, source_id: str) -> None:
+    """删除该源当前已发布内容行（doc 6.1 §14.1）。
 
     `db_profile` 每源一行、`table_definition` 所有定义类型行一并删除；
-    `publish_info` 只翻 current，历史尝试行保留作审计。
+    `table_profile` 行删除后字段行由 ON DELETE CASCADE 级联清理。
     事务与提交由调用方决定，本模块不提交。
     """
     session.execute(delete(DbProfile).where(DbProfile.source_id == source_id))
     session.execute(
         delete(TableDefinition).where(TableDefinition.source_id == source_id)
     )
-    # JSON 对象画像行一并删除，字段行由 ON DELETE CASCADE 级联（doc 19.2 §7.4）
     session.execute(delete(TableProfile).where(TableProfile.source_id == source_id))
-    for row in session.scalars(
-        select(PublishInfo).where(PublishInfo.source_id == source_id)
-    ):
-        if row.is_current_publish:
-            row.is_current_publish = False
-            row.updated_at = func.now()
 
 
-def remove_db_source(session: Session, source_id: UUID) -> bool:
+def remove_db_source(session: Session, source_id: str) -> bool:
     """登记行加入待删除，不提交；不存在返回 False（doc 16 §6）。"""
     row = get_db_source(session, source_id)
     if row is None:

@@ -1132,16 +1132,20 @@ def _resolve_source_binding(
     if not isinstance(services_source, str) or not services_source:
         raise _RejectedSession("服务未绑定 source_id，拒绝执行（无源过滤检索被禁止）")
     try:
-        normalized_services = str(uuid.UUID(services_source))
+        from src.modules.db_deepagent.source_registry import (
+            normalize_short_source_id,
+        )
+
+        normalized_services = normalize_short_source_id(services_source)
     except ValueError:
-        raise _RejectedSession("服务绑定的 source_id 不是合法 UUID") from None
+        raise _RejectedSession("服务绑定的 source_id 不是合法短 ID") from None
 
     if request_source is not None:
         try:
-            normalized_request = str(uuid.UUID(str(request_source).strip()))
+            normalized_request = normalize_short_source_id(request_source)
         except (ValueError, AttributeError):
             raise _RejectedSession(
-                f"请求携带的 source_id 不是合法 UUID: {request_source!r}"
+                f"请求携带的 source_id 不是合法短 ID: {request_source!r}"
             ) from None
         if normalized_request != normalized_services:
             raise _RejectedSession(

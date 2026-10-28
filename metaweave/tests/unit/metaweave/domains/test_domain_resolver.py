@@ -181,9 +181,10 @@ class TestResolveTablePairs:
         # 客户管理 域内有 customer 和 address
         assert len(pairs) == 1
         pair_set = {frozenset(p) for p in pairs}
-        assert frozenset(
-            ["dvdrental.public.customer", "dvdrental.public.address"]
-        ) in pair_set
+        assert (
+            frozenset(["dvdrental.public.customer", "dvdrental.public.address"])
+            in pair_set
+        )
 
     def test_cross_domain(self, resolver):
         """跨域模式会产生域内+跨域表对"""
@@ -236,13 +237,17 @@ class TestResolveTablePairs:
     def test_domain_none_cross_domain_true_returns_all_pairs(self, resolver):
         """domain_filter=None 时 cross_domain=True 被忽略，走全量路径"""
         tables = ["t1", "t2", "t3"]
-        pairs = resolver.resolve_table_pairs(tables, domain_filter=None, cross_domain=True)
+        pairs = resolver.resolve_table_pairs(
+            tables, domain_filter=None, cross_domain=True
+        )
         assert len(pairs) == 3  # C(3,2)
 
     def test_domain_none_cross_domain_false_returns_all_pairs(self, resolver):
         """domain_filter=None + cross_domain=False 走全量路径"""
         tables = ["t1", "t2", "t3"]
-        pairs = resolver.resolve_table_pairs(tables, domain_filter=None, cross_domain=False)
+        pairs = resolver.resolve_table_pairs(
+            tables, domain_filter=None, cross_domain=False
+        )
         assert len(pairs) == 3  # C(3,2)
 
 

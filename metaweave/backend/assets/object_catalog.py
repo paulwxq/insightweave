@@ -6,7 +6,6 @@
 """
 
 import logging
-from uuid import UUID
 
 from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
@@ -17,7 +16,8 @@ from backend.data_sources.registration_service import (
     SourceNotFoundError,
 )
 from backend.data_sources.repository import get_db_source
-from backend.persistence.models import PublishInfo, TableProfile
+from backend.persistence.models import PublishRunInfo, TableProfile
+from metaweave.utils.source_id import normalize_source_id
 from backend.persistence.platform_db import PlatformSettings, platform_session
 from metaweave.utils.time_utils import utc_isoformat
 
@@ -27,28 +27,12 @@ JSON_STEP = "json"
 _TYPE_ORDER = {"table": 0, "view": 1, "materialized_view": 2}
 
 
-def get_current_json_publishes(session, source_id: UUID) -> list:
-    """该源 json 步骤 current 且成功的发布行（doc 19.2 §8.2）。
-
-    失败尝试的 current 标记不构成有效当前发布；防御性返回全部，
-    多条判不一致。
-    """
-    stmt = select(PublishInfo).where(
-        PublishInfo.source_id == source_id,
-        PublishInfo.step_name == JSON_STEP,
-        PublishInfo.is_current_publish.is_(True),
-        PublishInfo.status == "success",
-    )
-    return list(session.scalars(stmt))
-
-
-def _publish_block(current) -> dict | None:
-    if current is None:
+def _publish_block(run) -> dict | None:
+    if run is None:
         return None
     return {
-        "publish_id": str(current.publish_id),
-        "job_id": str(current.job_id),
-        "published_at": utc_isoformat(current.created_at),
+        "publish_run_id": str(run.publish_run_id),
+        "published_at": utc_isoformat(run.created_at),
     }
 
 
@@ -97,19 +81,6 @@ def _load_profile_rows(session, source_id) -> list:
     return list(session.scalars(stmt))
 
 
-def _source_rows_consistent(rows, current) -> bool:
-    """源级一致性：有对象行且全部行的 publish_id/job_id 与当前发布一致。
-
-    doc 19.2 §8.2：对象行的 publish_id/job_id 必须与 JSON 当前发布一致。
-    """
-    if not rows:
-        return False
-    return all(
-        row.publish_id == current.publish_id and row.job_id == current.job_id
-        for row in rows
-    )
-
-
 def _filter_rows(rows, object_type, schema_name, keyword) -> list:
     filtered = rows
     if object_type:
@@ -123,35 +94,30 @@ def _filter_rows(rows, object_type, schema_name, keyword) -> list:
     return filtered
 
 
-def _resolve_state(session, source_id: UUID):
-    """源级检查（doc 19.2 §8.2）。
+def _resolve_state(session, source_id: str):
+    """源级检查（doc 6.1 §16：table_profile 行即当前内容）。
 
-    返回 (state, current, rows)：state 取 ok / not_published /
-    inconsistent；inconsistent 时只写诊断日志，不返回部分数据。
+    返回 (state, run, rows)：无对象行 → not_published；对象行发布来源
+    不一致 → inconsistent（只写诊断日志，不返回部分数据）。
     """
-    currents = get_current_json_publishes(session, source_id)
-    if not currents:
-        return "not_published", None, None
     rows = _load_profile_rows(session, source_id)
-    if len(currents) > 1:
+    if not rows:
+        return "not_published", None, None
+    run_ids = {row.publish_run_id for row in rows}
+    if len(run_ids) > 1:
         logger.error(
-            "JSON 当前发布标记出现多条 source_id=%s count=%d",
+            "JSON 对象行存在多个发布来源 source_id=%s count=%d",
             source_id,
-            len(currents),
+            len(run_ids),
         )
         return "inconsistent", None, None
-    if not _source_rows_consistent(rows, currents[0]):
-        logger.error(
-            "JSON 当前画像行缺失或版本不符 source_id=%s",
-            source_id,
-        )
-        return "inconsistent", None, None
-    return "ok", currents[0], rows
+    run = session.get(PublishRunInfo, rows[0].publish_run_id)
+    return "ok", run, rows
 
 
 def list_objects(
     settings: PlatformSettings,
-    source_id: UUID,
+    source_id: str,
     *,
     page: int = 1,
     page_size: int = 50,
@@ -159,7 +125,8 @@ def list_objects(
     schema_name: str | None = None,
     keyword: str | None = None,
 ) -> dict:
-    """该源当前 JSON 发布的对象分页列表（doc 19.2 §8.1）。"""
+    """该源当前 JSON 发布的对象分页列表（doc 19.2 §8.1、6.1 §16）。"""
+    source_id = normalize_source_id(source_id)
     try:
         with platform_session(settings) as session:
             begin_readonly_repeatable_read(session)
@@ -188,13 +155,14 @@ def list_objects(
 
 def list_object_options(
     settings: PlatformSettings,
-    source_id: UUID,
+    source_id: str,
     *,
     object_type: str | None = None,
     schema_name: str | None = None,
     keyword: str | None = None,
 ) -> dict:
-    """级联搜索栏三级候选；keyword 只筛对象候选，不改变前两级（doc 19.2 §8.1）。"""
+    """级联搜索栏三级候选；keyword 只筛对象候选，不改变前两级。"""
+    source_id = normalize_source_id(source_id)
     try:
         with platform_session(settings) as session:
             begin_readonly_repeatable_read(session)

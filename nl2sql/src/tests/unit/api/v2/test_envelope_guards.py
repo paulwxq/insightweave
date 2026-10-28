@@ -67,7 +67,7 @@ class TestEnvelope:
             headers={**LOCAL, "Content-Type": "application/json"},
             json={
                 "question": "问",
-                "source_id": "11111111-1111-1111-1111-111111111111",
+                "source_id": "db_src_1",
                 "request_id": "req_x",
             },
         )

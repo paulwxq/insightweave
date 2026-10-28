@@ -1,277 +1,448 @@
-"""发布预检与发布端点的 HTTP 契约。业务调用真实发布服务。"""
+"""发布 HTTP 契约（doc 6.2 §6.1/§6.3）：publish-check、202 运行创建与详情轮询。
 
-from uuid import UUID
+路由层测试 monkeypatch workspaces 路由模块引用的服务函数；发布运行的
+创建/执行语义在 test_publish_service.py 走真实服务链。
+"""
+
+from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
 
 from backend.api.main import create_app
+from backend.api.routers import workspaces as workspaces_router
+from backend.jobs.run_detail import RunNotFoundError
 from backend.persistence.platform_db import PlatformSettings
-from tests.unit.test_publish_service import (
-    JOB_ID,
-    LEAK_PARAM,
-    LEAK_SQL,
-    SOURCE_ID,
-    FakePublishSession,
-    assert_safe_primary_key_exception,
-    install_session,
-    integrity_error,
-    write_profile,
-)
-from tests.unit.test_ddl_publish import (
-    DEFAULT_FILES,
-    _add_ddl_step,
-    write_ddl,
-)
+from backend.publishing.precheck import PublishPrecheckError
+from backend.workspaces.service import WorkspaceNotFoundError
 
-MISSING = UUID("11111111-1111-4111-8111-111111111111")
+WORKSPACE_ID = "ws_1"
+PUBLISH_JOB_ID = "pub_job_1"
+RUN_ID = uuid4()
+MISSING_RUN = uuid4()
 
 
-def _client(*, raise_server_exceptions=False):
+def _client():
     settings = PlatformSettings(
         host="platform", port=5432, name="metaweave", user="admin", password="secret"
     )
-    return TestClient(
-        create_app(settings, cors_origins=[]),
-        raise_server_exceptions=raise_server_exceptions,
-    )
-
-
-def _check(client, source_id=SOURCE_ID, job_id=JOB_ID):
-    return client.get(
-        f"/api/data-sources/{source_id}/collection-jobs/{job_id}/publish-check"
-    )
-
-
-def _post(client, steps, source_id=SOURCE_ID, job_id=JOB_ID):
-    return client.post(
-        f"/api/data-sources/{source_id}/collection-jobs/{job_id}/publications",
-        json={"steps": steps},
-    )
+    return TestClient(create_app(settings, cors_origins=[]))
 
 
 @pytest.fixture
-def ready(monkeypatch, tmp_path):
-    session = install_session(monkeypatch, tmp_path)
-    write_profile(tmp_path)
-    return session
+def executed(monkeypatch):
+    """记录后台任务是否被排入并执行（202 之后同线程执行）。"""
+    recorder = {"created": None, "executed": []}
+
+    def fake_create(settings, publish_job_id, *, revision_no, mode, steps, step_config):
+        recorder["created"] = {
+            "publish_run_id": str(RUN_ID),
+            "publish_job_id": publish_job_id,
+            "revision_no": revision_no,
+            "steps": steps or ["db"],
+            "status": "pending",
+        }
+        return dict(recorder["created"])
+
+    def fake_execute(settings, run_id):
+        recorder["executed"].append(run_id)
+
+    monkeypatch.setattr(workspaces_router, "create_publish_run", fake_create)
+    monkeypatch.setattr(workspaces_router, "execute_publish_run", fake_execute)
+    return recorder
 
 
-def test_check_ready_profile(ready):
+# ---- GET /api/workspaces/{workspace_id}/publish-check ----
+
+
+def test_publish_check_returns_fixed_eight_steps(monkeypatch):
+    from backend.publishing.precheck import PUBLISH_STEP_ORDER
+
+    def fake_check(_settings, workspace_id):
+        return {
+            "workspace_id": workspace_id,
+            "source_id": "db_src_1",
+            "steps": [
+                {
+                    "step_name": step,
+                    "ready": step == "db",
+                    "reason": None if step == "db" else "未就绪",
+                }
+                for step in PUBLISH_STEP_ORDER
+            ],
+            "input_directories": [
+                {
+                    "directory": "db",
+                    "marker_status": "success",
+                    "collection_run_id": str(RUN_ID),
+                    "collected_at": "2026-10-21T15:00:00+08:00",
+                    "error": None,
+                }
+            ],
+        }
+
+    monkeypatch.setattr(workspaces_router, "check_publication", fake_check)
     with _client() as client:
-        response = _check(client)
+        response = client.get(f"/api/workspaces/{WORKSPACE_ID}/publish-check")
     assert response.status_code == 200
     body = response.json()
-    assert body["source_id"] == str(SOURCE_ID)
-    assert body["job_id"] == str(JOB_ID)
-    step = body["steps"][0]
-    assert step == {
-        "step_name": "db",
-        "job_status": "success",
-        "output_ready": True,
-        "publishable": True,
-        "reason": None,
-    }
-
-
-def test_check_missing_db_row_is_not_404(monkeypatch, tmp_path):
-    session = install_session(monkeypatch, tmp_path, FakePublishSession())
-    session.steps[0].step_name = "ddl"
-    write_profile(tmp_path)
-    with _client() as client:
-        response = _check(client)
-    assert response.status_code == 200
-    assert response.json()["steps"][0]["reason"] == "没有执行记录"
-
-
-def test_check_and_post_reject_missing_or_disabled(monkeypatch, tmp_path):
-    session = install_session(monkeypatch, tmp_path)
-    write_profile(tmp_path)
-    session.source = None
-    with _client() as client:
-        missing = _check(client)
-        posted = _post(client, ["db"])
-    assert missing.status_code == 404 and missing.json()["message"] == "数据源不存在"
-    assert posted.status_code == 404
-    session.source = FakePublishSession().source
-    session.source.is_active = False
-    with _client() as client:
-        disabled = _post(client, ["db"])
-    assert disabled.status_code == 409
-    assert disabled.json()["code"] == "source_disabled"
-    assert session.publishes == [] and session.profiles == []
-
-
-def test_post_rejects_bad_steps_and_shape(ready):
-    with _client() as client:
-        empty = _post(client, [])
-        unknown = _post(client, ["md"])
-        extra = client.post(
-            f"/api/data-sources/{SOURCE_ID}/collection-jobs/{JOB_ID}/publications",
-            json={"steps": ["db"], "clean": True},
-        )
-        bad_id = client.post(
-            "/api/data-sources/not-a-uuid/collection-jobs/" f"{JOB_ID}/publications",
-            json={"steps": ["db"]},
-        )
-    assert empty.status_code == 400 and empty.json()["code"] == "step_not_supported"
-    assert unknown.status_code == 400
-    assert unknown.json()["code"] == "step_not_supported"
-    assert extra.status_code == 422 and extra.json()["code"] == "invalid_request"
-    assert bad_id.status_code == 422
-    assert ready.publishes == []
-
-
-@pytest.mark.parametrize("status", ["failed", "running"])
-def test_post_selected_step_failed_or_running_is_job_not_publishable(ready, status):
-    """所选步骤自身 failed/running 时整个 Job 不可发布：409，而非 400（doc 20.1 §11.2）。"""
-    ready.steps[0].last_status = status
-    with _client() as client:
-        response = _post(client, ["db"])
-    assert response.status_code == 409
-    assert response.json()["code"] == "job_not_publishable"
-    assert ready.publishes == []
-
-
-def test_post_selected_step_without_record_is_step_not_ready(monkeypatch, tmp_path):
-    """作业整体成功但所选步骤没有执行记录：仍是步骤级未就绪（400）。"""
-    session = install_session(monkeypatch, tmp_path)
-    write_profile(tmp_path)
-    session.steps[0].step_name = "ddl"  # 作业只有成功的 ddl 行，没有 db 行
-    with _client() as client:
-        response = _post(client, ["db"])
-    assert response.status_code == 400
-    assert response.json()["code"] == "step_not_ready"
-    assert response.json()["message"] == "步骤尚未采集成功"
-    assert session.publishes == []
-
-
-def test_post_success_and_duplicate_db(ready):
-    with _client() as client:
-        response = _post(client, ["db", "db"])
-    assert response.status_code == 200
-    body = response.json()
-    assert UUID(body["publish_id"])
-    assert len(body["results"]) == 1
-    assert body["results"][0]["status"] == "success"
-    assert body["results"][0]["step"] == "db"
-    assert len(ready.profiles) == 1
-    assert ready.profiles[0].publish_id == ready.publishes[0].publish_id
-
-
-def test_post_missing_file_is_recorded_failure(ready, tmp_path):
-    (
-        tmp_path / "output" / str(SOURCE_ID) / str(JOB_ID) / "db" / "database.json"
-    ).unlink()
-    with _client() as client:
-        response = _post(client, ["db"])
-    assert response.status_code == 200
-    assert response.json()["results"][0]["status"] == "failed"
-    assert response.json()["results"][0]["message"] == "画像输入不可用或校验失败"
-    assert ready.profiles == []
-
-
-def test_post_current_conflict_is_409(ready):
-    ready.commit_errors.append(integrity_error("23505", "publish_info_current_idx"))
-    with _client() as client:
-        response = _post(client, ["db"])
-    assert response.status_code == 409
-    assert response.json()["code"] == "publish_conflict"
-    assert response.json()["message"] == "发布发生并发冲突，请重新发布"
-    assert LEAK_SQL not in response.text
-    assert ready.publishes == [] and ready.profiles == []
-
-
-def test_post_primary_key_conflict_is_500(ready):
-    ready.commit_errors.append(integrity_error("23505", "publish_info_pkey"))
-    with _client() as client:
-        response = _post(client, ["db"])
-    assert response.status_code == 500
-    assert response.json()["code"] == "internal_error"
-    assert response.json()["message"] == "服务暂时无法处理请求"
-    assert LEAK_SQL not in response.text
-    assert LEAK_PARAM not in response.text
-    assert ready.publishes == [] and ready.profiles == []
-
-    ready.commit_errors.append(integrity_error("23505", "db_profile_pkey"))
-    with pytest.raises(RuntimeError) as caught:
-        with _client(raise_server_exceptions=True) as client:
-            _post(client, ["db"])
-    assert_safe_primary_key_exception(caught.value)
-    assert ready.publishes == [] and ready.profiles == []
-
-
-def test_post_failure_record_unavailable_is_503(ready, tmp_path):
-    (
-        tmp_path / "output" / str(SOURCE_ID) / str(JOB_ID) / "db" / "database.json"
-    ).unlink()
-    ready.commit_errors.append(RuntimeError("DRIVER-SECRET-XYZ"))
-    with _client() as client:
-        response = _post(client, ["db"])
-    assert response.status_code == 503
-    assert response.json()["code"] == "platform_unavailable"
-    assert "DRIVER-SECRET" not in response.text
-    assert ready.publishes == []
-
-
-def test_unknown_job_is_404(ready):
-    with _client() as client:
-        response = _check(client, job_id=MISSING)
-    assert response.status_code == 404
-    assert response.json()["message"] == "作业不存在或不属于该数据源"
-
-
-@pytest.fixture
-def ddl_ready(monkeypatch, tmp_path):
-    session = install_session(monkeypatch, tmp_path)
-    _add_ddl_step(session)
-    write_ddl(tmp_path, DEFAULT_FILES)
-    write_profile(tmp_path)
-    return session
-
-
-def test_check_reports_db_and_ddl_steps(ddl_ready):
-    with _client() as client:
-        response = _check(client)
-    assert response.status_code == 200
-    steps = response.json()["steps"]
-    assert [step["step_name"] for step in steps] == [
+    assert body["workspace_id"] == WORKSPACE_ID
+    assert [step["step_name"] for step in body["steps"]] == [
         "db",
         "ddl",
         "json",
         "domain",
-        "rel",
         "table_schema",
         "dim_value",
+        "rel",
         "sql",
     ]
-    by_name = {step["step_name"]: step for step in steps}
-    assert by_name["db"]["publishable"] and by_name["ddl"]["publishable"]
-    # json 未采集：不可发布，原因落在产物/状态上（doc 19.2 §7.2）
-    assert by_name["json"]["publishable"] is False
+    assert body["steps"][0] == {
+        "step_name": "db",
+        "ready": True,
+        "reason": None,
+    }
+    assert body["input_directories"][0]["marker_status"] == "success"
 
 
-def test_post_ddl_publishes_definitions(ddl_ready):
+def test_publish_check_missing_workspace_is_404(monkeypatch):
+    def missing(_settings, _workspace_id):
+        raise WorkspaceNotFoundError("工作区不存在")
+
+    monkeypatch.setattr(workspaces_router, "check_publication", missing)
     with _client() as client:
-        response = _post(client, ["ddl"])
-    assert response.status_code == 200
-    body = response.json()
-    assert body["results"][0]["step"] == "ddl"
-    assert body["results"][0]["status"] == "success"
-    assert len(ddl_ready.definitions) == len(DEFAULT_FILES)
-    assert all(
-        row.publish_id == UUID(body["publish_id"]) for row in ddl_ready.definitions
+        response = client.get(f"/api/workspaces/{WORKSPACE_ID}/publish-check")
+    assert response.status_code == 404
+    assert response.json() == {"code": "not_found", "message": "工作区不存在"}
+
+
+def test_publish_check_does_not_accept_steps_parameter(monkeypatch):
+    """§8.2.2：预检不提供 steps 参数，固定返回全部 8 步。"""
+    monkeypatch.setattr(
+        workspaces_router,
+        "check_publication",
+        lambda _s, ws: {
+            "workspace_id": ws,
+            "source_id": "db_src_1",
+            "steps": [],
+            "input_directories": [],
+        },
     )
-    assert ddl_ready.publishes[0].step_name == "ddl"
-
-
-def test_post_db_and_ddl_in_one_call(ddl_ready):
     with _client() as client:
-        response = _post(client, ["db", "ddl"])
+        response = client.get(
+            f"/api/workspaces/{WORKSPACE_ID}/publish-check",
+            params={"steps": ["db"]},
+        )
+    assert response.status_code == 200
+    assert response.json()["steps"] == []
+
+
+# ---- POST /api/publish-jobs/{job_id}/runs（202 + 后台执行） ----
+
+
+def test_create_publish_run_returns_202_and_schedules_execution(executed):
+    with _client() as client:
+        response = client.post(
+            f"/api/publish-jobs/{PUBLISH_JOB_ID}/runs",
+            json={"revision_no": 1, "mode": "default"},
+        )
+    assert response.status_code == 202
+    body = response.json()
+    assert body == {
+        "publish_run_id": str(RUN_ID),
+        "publish_job_id": PUBLISH_JOB_ID,
+        "revision_no": 1,
+        "steps": ["db"],
+        "status": "pending",
+    }
+    # BackgroundTasks 在响应后同线程执行：只执行本次新建的那一个运行
+    assert executed["executed"] == [RUN_ID]
+
+
+def test_precheck_failure_is_400_with_step_details(monkeypatch):
+    def rejected(*_args, **_kwargs):
+        raise PublishPrecheckError(
+            [
+                {"step": "dim_value", "reason": "dim_tables.yaml 没有任何维度表"},
+                {"step": "sql", "reason": "sql/ 目录没有采集 marker，产物不可用"},
+            ]
+        )
+
+    executed = []
+    monkeypatch.setattr(workspaces_router, "create_publish_run", rejected)
+    monkeypatch.setattr(
+        workspaces_router,
+        "execute_publish_run",
+        lambda *a, **k: executed.append(a),
+    )
+    with _client() as client:
+        response = client.post(
+            f"/api/publish-jobs/{PUBLISH_JOB_ID}/runs",
+            json={"revision_no": 1, "mode": "default"},
+        )
+    assert response.status_code == 400
+    body = response.json()
+    assert body["code"] == "publish_precheck_failed"
+    assert body["message"] == "发布预检未通过，本次请求未创建发布运行"
+    assert body["details"] == [
+        {"step": "dim_value", "reason": "dim_tables.yaml 没有任何维度表"},
+        {"step": "sql", "reason": "sql/ 目录没有采集 marker，产物不可用"},
+    ]
+    assert executed == []  # 不启动后台任务
+
+
+def test_invalid_run_request_is_400(executed):
+    from backend.publishing.publish_service import PublishRunError
+
+    def invalid(*_args, **_kwargs):
+        raise PublishRunError(
+            "default 模式不接受非空 step_config；需要临时参数请使用 custom 模式"
+        )
+
+    monkeypatch_holder = pytest.MonkeyPatch()
+    monkeypatch_holder.setattr(workspaces_router, "create_publish_run", invalid)
+    try:
+        with _client() as client:
+            response = client.post(
+                f"/api/publish-jobs/{PUBLISH_JOB_ID}/runs",
+                json={"revision_no": 1, "mode": "default", "step_config": {"db": {}}},
+            )
+    finally:
+        monkeypatch_holder.undo()
+    assert response.status_code == 400
+    assert response.json()["code"] == "invalid_request"
+    assert "step_config" in response.json()["message"]
+    assert executed["executed"] == []
+
+
+def test_malformed_body_is_422():
+    with _client() as client:
+        response = client.post(
+            f"/api/publish-jobs/{PUBLISH_JOB_ID}/runs",
+            json={"mode": "default"},  # 缺 revision_no
+        )
+    assert response.status_code == 422
+    assert response.json() == {"code": "invalid_request", "message": "请求字段不合法"}
+
+
+# ---- GET /api/publish-runs/{publish_run_id}（详情轮询模型） ----
+
+
+def _detail_payload():
+    return {
+        "publish_run_id": str(RUN_ID),
+        "job_id": PUBLISH_JOB_ID,
+        "job_name": "整包发布",
+        "workspace_id": WORKSPACE_ID,
+        "revision_no": 1,
+        "trigger_type": "manual",
+        "status": "partial_success",
+        "message": None,
+        "created_at": "2026-10-21T15:00:00.000000Z",
+        "started_at": "2026-10-21T15:00:01.000000Z",
+        "finished_at": "2026-10-21T15:00:09.000000Z",
+        "run_type": "publish",
+        "steps": [
+            {
+                "step_name": "db",
+                "status": "success",
+                "message": "数据库画像发布完成",
+                "step_config": None,
+                "input_manifest": {
+                    "files": [
+                        {
+                            "path": "db/database.json",
+                            "collection_run_id": str(uuid4()),
+                        }
+                    ]
+                },
+                "output_manifest": None,
+                "target_manifest": {
+                    "targets": [
+                        {
+                            "type": "postgresql",
+                            "database": "metaweave",
+                            "schema": "public",
+                            "table": "db_profile",
+                        }
+                    ]
+                },
+                "started_at": "2026-10-21T15:00:02.000000Z",
+                "finished_at": "2026-10-21T15:00:03.000000Z",
+            },
+            {
+                "step_name": "ddl",
+                "status": "blocked",
+                "message": "ddl/ 目录没有采集 marker，产物不可用",
+                "step_config": None,
+                "input_manifest": None,
+                "output_manifest": None,
+                "target_manifest": None,
+                "started_at": None,
+                "finished_at": "2026-10-21T15:00:04.000000Z",
+            },
+        ],
+    }
+
+
+def test_run_detail_shape(monkeypatch):
+    monkeypatch.setattr(
+        workspaces_router, "get_publish_run_detail", lambda _s, _rid: _detail_payload()
+    )
+    with _client() as client:
+        response = client.get(f"/api/publish-runs/{RUN_ID}")
     assert response.status_code == 200
     body = response.json()
-    assert [row["step"] for row in body["results"]] == ["db", "ddl"]
-    assert all(row["status"] == "success" for row in body["results"])
-    publish_id = UUID(body["publish_id"])
-    assert ddl_ready.profiles[0].publish_id == publish_id
-    assert all(row.publish_id == publish_id for row in ddl_ready.definitions)
+    assert body["publish_run_id"] == str(RUN_ID)
+    assert body["status"] == "partial_success"
+    assert body["run_type"] == "publish"
+    assert [step["step_name"] for step in body["steps"]] == ["db", "ddl"]
+    blocked = body["steps"][1]
+    assert blocked["status"] == "blocked"
+    assert blocked["started_at"] is None
+    assert "marker" in blocked["message"]
+    success = body["steps"][0]
+    assert success["target_manifest"]["targets"][0]["table"] == "db_profile"
+
+
+def test_run_detail_missing_is_404(monkeypatch):
+    def missing(_settings, _run_id):
+        raise RunNotFoundError("运行不存在")
+
+    monkeypatch.setattr(workspaces_router, "get_publish_run_detail", missing)
+    with _client() as client:
+        response = client.get(f"/api/publish-runs/{MISSING_RUN}")
+    assert response.status_code == 404
+    assert response.json() == {"code": "not_found", "message": "运行不存在"}
+
+
+# ---- 作业运行历史与工作区运行列表 ----
+
+
+def test_publish_job_runs_listing(monkeypatch):
+    payload = {
+        "workspace_id": None,
+        "job_id": PUBLISH_JOB_ID,
+        "run_type": "publish",
+        "total": 1,
+        "limit": 20,
+        "offset": 0,
+        "items": [
+            {
+                "run_id": str(RUN_ID),
+                "job_id": PUBLISH_JOB_ID,
+                "job_name": "整包发布",
+                "revision_no": 1,
+                "status": "success",
+                "trigger_type": "manual",
+                "created_at": "2026-10-21T15:00:00.000000Z",
+                "started_at": "2026-10-21T15:00:01.000000Z",
+                "finished_at": "2026-10-21T15:00:09.000000Z",
+                "run_type": "publish",
+            }
+        ],
+    }
+    monkeypatch.setattr(
+        workspaces_router, "list_publish_job_runs", lambda *a, **k: payload
+    )
+    with _client() as client:
+        response = client.get(f"/api/publish-jobs/{PUBLISH_JOB_ID}/runs")
+    assert response.status_code == 200
+    assert response.json() == payload
+
+
+def test_workspace_publish_runs_listing(monkeypatch):
+    payload = {
+        "workspace_id": WORKSPACE_ID,
+        "job_id": None,
+        "run_type": "publish",
+        "total": 0,
+        "limit": 20,
+        "offset": 0,
+        "items": [],
+    }
+    monkeypatch.setattr(
+        workspaces_router, "list_workspace_publish_runs", lambda *a, **k: payload
+    )
+    with _client() as client:
+        response = client.get(f"/api/workspaces/{WORKSPACE_ID}/publish-runs")
+    assert response.status_code == 200
+    assert response.json() == payload
+
+
+def test_workspace_run_listing_validates_pagination(monkeypatch):
+    """limit/offset 分页参数（doc 6.2 §6.1）由路由 Query 约束。"""
+    monkeypatch.setattr(
+        workspaces_router, "list_workspace_publish_runs", lambda *a, **k: {}
+    )
+    with _client() as client:
+        too_large = client.get(
+            f"/api/workspaces/{WORKSPACE_ID}/publish-runs", params={"limit": 101}
+        )
+        negative = client.get(
+            f"/api/workspaces/{WORKSPACE_ID}/publish-runs", params={"offset": -1}
+        )
+    assert too_large.status_code == 422
+    assert negative.status_code == 422
+
+
+# ---- 工作区路由的存在性与删除入口缺失（A29） ----
+
+
+def test_no_delete_routes_for_workspace_or_jobs():
+    """本期不提供工作区/作业/版本/运行删除入口（doc 6.2 §1.1）。
+
+    唯一的 DELETE 是数据源登记（受工作区关联检查保护），工作区路由
+    不出现任何 DELETE 方法。
+    """
+    workspace_paths = {
+        (method, route.path)
+        for route in workspaces_router.router.routes
+        for method in route.methods
+    }
+    assert not any(method == "DELETE" for method, _path in workspace_paths)
+    # 采集/发布运行创建与详情路由就位
+    for method, path in workspace_paths:
+        if method == "POST" and path.endswith("/runs"):
+            assert "/publish-jobs/" in path or "/collection-jobs/" in path
+    assert (
+        "GET",
+        "/api/workspaces/{workspace_id}/publish-check",
+    ) in workspace_paths
+    from backend.api.routers import data_sources as source_router_module
+
+    source_deletes = [
+        route.path
+        for route in source_router_module.router.routes
+        if "DELETE" in route.methods
+    ]
+    # 唯一的 DELETE 入口是数据源登记（受工作区关联检查保护，A29）
+    assert source_deletes == ["/api/data-sources/{source_id}"]
+
+
+def test_workspace_create_and_list_routes(monkeypatch):
+    """工作区创建/列表路由接线（服务语义见 workspaces.service 测试）。"""
+    item = {
+        "workspace_id": WORKSPACE_ID,
+        "source_id": "db_src_1",
+        "workspace_name": "生产",
+        "workspace_desc": None,
+        "created_at": "2026-10-21T15:00:00.000000Z",
+        "updated_at": "2026-10-21T15:00:00.000000Z",
+    }
+    monkeypatch.setattr(
+        workspaces_router,
+        "list_workspaces",
+        lambda *a, **k: {"source_id": "db_src_1", "items": [item]},
+    )
+    monkeypatch.setattr(workspaces_router, "create_workspace", lambda *a, **k: item)
+    with _client() as client:
+        listed = client.get(f"/api/data-sources/db_src_1/workspaces")
+        created = client.post(
+            f"/api/data-sources/db_src_1/workspaces",
+            json={"workspace_name": "生产"},
+        )
+    assert listed.status_code == 200
+    assert listed.json() == {"source_id": "db_src_1", "items": [item]}
+    assert created.status_code == 201
+    assert created.json()["workspace_id"] == WORKSPACE_ID

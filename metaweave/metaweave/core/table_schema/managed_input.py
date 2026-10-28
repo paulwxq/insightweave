@@ -16,22 +16,25 @@ from metaweave.core.table_schema.models import (
     SchemaObject,
     check_record_lengths,
 )
-from metaweave.utils.source_id import normalize_source_id
+from metaweave.utils.source_id import (
+    normalize_source_id,
+    normalize_workspace_id,
+)
 
 
-def configure_managed_loader(config, source_id, job_id):
+def configure_managed_loader(config, source_id, workspace_id):
     """覆盖输入路径并标注来源；集合名沿用配置，不再按源拆分；调用方传派生配置，不修改主配置。"""
     source = normalize_source_id(source_id)
-    job = normalize_source_id(job_id)
+    workspace = normalize_workspace_id(workspace_id)
     cfg = config.setdefault("table_schema_loader", {})
     base = str(cfg.get("collection_name", "")).strip()
     if not base:
         raise ValueError("table_schema_loader.collection_name 未配置")
     cfg.update(
-        md_directory=str(resolve_md_output_dir(source, job)),
-        json_llm_directory=str(resolve_json_output_dir(source, job)),
+        md_directory=str(resolve_md_output_dir(source, workspace)),
+        json_llm_directory=str(resolve_json_output_dir(source, workspace)),
         source_id=str(source),
-        job_id=str(job),
+        job_id=str(workspace),
     )
 
 
@@ -72,16 +75,18 @@ def read_managed_pairs(json_dir, md_dir, expected_json_marker=None, database_nam
     """返回内存快照；Web 额外核对 JSON 运行标识及登记库名。"""
     _, json_names = _manifest(json_dir, ".json")
     md_manifest, md_names = _manifest(md_dir, ".md")
-    marker = md_manifest.get("source_json_updated_at")
-    from datetime import datetime
-    from metaweave.utils.time_utils import utc_isoformat
+    marker = md_manifest.get("source_collection_run_id")
+    from metaweave.utils.source_id import normalize_run_uuid
 
-    if (
-        not isinstance(marker, str)
-        or utc_isoformat(datetime.fromisoformat(marker)) != marker
+    try:
+        normalized_marker = str(normalize_run_uuid(marker)) if marker else None
+    except ValueError:
+        normalized_marker = None
+    if normalized_marker is None:
+        raise ValueError("MD 清单 source_collection_run_id 不是合法 UUID")
+    if expected_json_marker is not None and normalized_marker != str(
+        normalize_run_uuid(expected_json_marker)
     ):
-        raise ValueError("MD 清单 JSON 运行标识不是 UTC 六位微秒 Z 文本")
-    if expected_json_marker is not None and marker != expected_json_marker:
         raise ValueError("JSON 已重跑，请重新生成 MD")
     if {n[:-5] for n in json_names} != {n[:-3] for n in md_names}:
         raise ValueError("JSON 与 MD 对象集合不一致")
@@ -147,9 +152,13 @@ def prepare_managed_table_schema_input(
             raise ValueError(f"MD 含 JSON 中不存在的字段: {stem}: {', '.join(unknown)}")
         missing = sorted(json_columns - set(columns))
         if missing:
-            raise ValueError(f"JSON 字段在 MD 中缺失或无法识别: {stem}: {', '.join(missing)}")
+            raise ValueError(
+                f"JSON 字段在 MD 中缺失或无法识别: {stem}: {', '.join(missing)}"
+            )
 
-        empty_names = [name for name, desc in columns.items() if is_empty_description(desc)]
+        empty_names = [
+            name for name, desc in columns.items() if is_empty_description(desc)
+        ]
         if empty_names and not options.skip_empty_desc:
             raise ValueError(
                 f"字段没有有效描述（skip_empty_desc=false）: {stem}: {', '.join(empty_names)}"
@@ -186,9 +195,7 @@ def prepare_managed_table_schema_input(
 
         for obj in objects:
             check_record_lengths(
-                obj.to_milvus_dict(
-                    source_id=source, publish_id=_PLACEHOLDER_PUBLISH_ID
-                )
+                obj.to_milvus_dict(source_id=source, publish_id=_PLACEHOLDER_PUBLISH_ID)
             )
         result.groups.append(objects)
 

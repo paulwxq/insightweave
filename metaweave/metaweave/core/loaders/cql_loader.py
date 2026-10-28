@@ -95,8 +95,7 @@ def normalize_neo4j_section(neo4j_section: Dict[str, Any]) -> Dict[str, Any]:
 # 发布 source_id 的节点；DETACH DELETE 一并删除关联关系。两个端点都保留
 # 的关系不会被这条语句触碰。
 _CLEAN_NODES = (
-    "MATCH (n) WHERE n.source_id IS NULL OR n.source_id = $source_id "
-    "DETACH DELETE n"
+    "MATCH (n) WHERE n.source_id IS NULL OR n.source_id = $source_id " "DETACH DELETE n"
 )
 
 # 按源统计（提交前核验；HAS_COLUMN 单查避免两次 OPTIONAL MATCH 行积）。
@@ -770,7 +769,11 @@ class CQLLoader(BaseLoader):
 
     @staticmethod
     def _extract_header_source_id(file_path: Path) -> Optional[str]:
-        """提取头部 ``// source_id: <uuid>``（新格式脚本必有；旧格式返回 None）。"""
+        """提取头部 ``// source_id: <短ID>``（新格式脚本必有；旧格式返回 None）。
+
+        新格式来源为 db_src_N 短 ID（doc 6 §1）；旧 36 位 UUID 头不再
+        被识别——按断代原则不兼容旧脚本。
+        """
         content = file_path.read_text(encoding="utf-8")
-        match = re.search(r"//\s*source_id:\s*([0-9a-fA-F-]{36})", content)
+        match = re.search(r"//\s*source_id:\s*(db_src_[1-9][0-9]*)", content)
         return match.group(1) if match else None

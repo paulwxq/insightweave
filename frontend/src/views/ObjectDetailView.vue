@@ -390,8 +390,8 @@ async function ensureDdl(retrying = false) {
   try {
     const response = await getObjectDdl(sourceId.value, schemaName.value, objectName.value)
     if (requestId !== ddlRequestId || key !== routeKey.value) return
-    const displayedPublishId = detail.value?.json_publish?.publish_id ?? null
-    if (response.json_publish_id !== displayedPublishId) {
+    const displayedPublishId = detail.value?.json_publish?.publish_run_id ?? null
+    if (response.json_publish_run_id !== displayedPublishId) {
       // JSON 在详情与 DDL 两次请求之间重新发布：不展示旧详情与新 DDL 的
       // 组合（doc 19.2 §8.2）——丢弃本次响应，先刷新详情；刷新后如仍停留
       // 在 DDL Tab 再取当前 DDL。连续重发布时放弃本轮，避免刷新循环

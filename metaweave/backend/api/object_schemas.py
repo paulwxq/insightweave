@@ -4,14 +4,12 @@ from pydantic import BaseModel
 
 
 class JsonPublishInfo(BaseModel):
-    publish_id: str
-    job_id: str
-    published_at: str
+    publish_run_id: str
+    published_at: str | None = None
 
 
 class DdlPublishInfo(BaseModel):
-    publish_id: str
-    job_id: str
+    publish_run_id: str
     loaded_at: str
 
 
@@ -64,7 +62,7 @@ class ObjectDetailColumn(BaseModel):
     source_id: str
     schema_name: str
     object_name: str
-    publish_id: str
+    publish_run_id: str
     column_name: str
     ordinal_position: int
     data_type: str
@@ -94,8 +92,7 @@ class ObjectDetailProfile(BaseModel):
     object_name: str
     db_name: str
     object_type: str
-    publish_id: str
-    job_id: str
+    publish_run_id: str
     metadata_version: str
     generated_timestamp: str | None
     loaded_at: str
@@ -139,7 +136,7 @@ class ObjectDetailResponse(BaseModel):
 
 class ObjectDdlResponse(BaseModel):
     state: str
-    json_publish_id: str | None
+    json_publish_run_id: str | None
     ddl_publish: DdlPublishInfo | None
     definition_sql: str | None
     sample_state: str | None

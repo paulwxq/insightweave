@@ -31,10 +31,10 @@ class MetadataRepository:
     HIGH_UNIQUENESS = 0.95  # 单列统计唯一性阈值（与 scorer 使用相同阈值）
 
     def __init__(
-            self,
-            json_dir: Path,
-            rel_id_salt: str = "",
-            logical_key_min_confidence: float = 0.8,
+        self,
+        json_dir: Path,
+        rel_id_salt: str = "",
+        logical_key_min_confidence: float = 0.8,
     ):
         """初始化元数据仓库
 
@@ -95,7 +95,9 @@ class MetadataRepository:
         logger.info(f"成功加载 {len(tables)} 张表的元数据")
         return tables
 
-    def collect_foreign_keys(self, tables: Dict[str, dict]) -> Tuple[List[Relation], Set[str]]:
+    def collect_foreign_keys(
+        self, tables: Dict[str, dict]
+    ) -> Tuple[List[Relation], Set[str]]:
         """从JSON元数据中提取外键直通关系
 
         Args:
@@ -132,14 +134,20 @@ class MetadataRepository:
                     target_table = fk.get("target_table")
                     target_columns = fk.get("target_columns", [])
 
-                    if not all([source_columns, target_schema, target_table, target_columns]):
+                    if not all(
+                        [source_columns, target_schema, target_table, target_columns]
+                    ):
                         logger.warning(f"外键信息不完整: {fk}")
                         continue
 
                     # 生成relationship_id
                     rel_id = self._generate_relation_id(
-                        source_schema, source_table, source_columns,
-                        target_schema, target_table, target_columns
+                        source_schema,
+                        source_table,
+                        source_columns,
+                        target_schema,
+                        target_table,
+                        target_columns,
                     )
 
                     # 创建Relation对象
@@ -152,7 +160,9 @@ class MetadataRepository:
                         target_table=target_table,
                         target_columns=target_columns,
                         relationship_type="foreign_key",
-                        cardinality=self._infer_cardinality(fk, tables, full_name, target_schema, target_table),
+                        cardinality=self._infer_cardinality(
+                            fk, tables, full_name, target_schema, target_table
+                        ),
                         constraint_name=fk.get("constraint_name"),
                         composite_score=FOREIGN_KEY_COMPOSITE_SCORE,
                     )
@@ -161,8 +171,10 @@ class MetadataRepository:
                     # 收集 relationship_id 用于去重（双向一致，不受方向影响）
                     fk_relationship_id_set.add(rel_id)
 
-                    logger.debug(f"外键直通: {source_schema}.{source_table}.{source_columns} -> "
-                                 f"{target_schema}.{target_table}.{target_columns}")
+                    logger.debug(
+                        f"外键直通: {source_schema}.{source_table}.{source_columns} -> "
+                        f"{target_schema}.{target_table}.{target_columns}"
+                    )
 
                 except Exception as e:
                     logger.error(f"处理外键失败 ({full_name}): {e}")
@@ -172,13 +184,13 @@ class MetadataRepository:
 
     @staticmethod
     def compute_relationship_id(
-            source_schema: str,
-            source_table: str,
-            source_columns: List[str],
-            target_schema: str,
-            target_table: str,
-            target_columns: List[str],
-            rel_id_salt: str = ""
+        source_schema: str,
+        source_table: str,
+        source_columns: List[str],
+        target_schema: str,
+        target_table: str,
+        target_columns: List[str],
+        rel_id_salt: str = "",
     ) -> str:
         """生成确定性relationship_id（静态方法，可复用）
 
@@ -224,12 +236,12 @@ class MetadataRepository:
 
     @staticmethod
     def compute_undirected_identity(
-            source_schema: str,
-            source_table: str,
-            source_columns: List[str],
-            target_schema: str,
-            target_table: str,
-            target_columns: List[str],
+        source_schema: str,
+        source_table: str,
+        source_columns: List[str],
+        target_schema: str,
+        target_table: str,
+        target_columns: List[str],
     ) -> str:
         """无向身份（评分后合并分组键，忽略方向，见 doc 19 §3.3）
 
@@ -278,13 +290,13 @@ class MetadataRepository:
         )
 
     def _generate_relation_id(
-            self,
-            source_schema: str,
-            source_table: str,
-            source_columns: List[str],
-            target_schema: str,
-            target_table: str,
-            target_columns: List[str]
+        self,
+        source_schema: str,
+        source_table: str,
+        source_columns: List[str],
+        target_schema: str,
+        target_table: str,
+        target_columns: List[str],
     ) -> str:
         """生成确定性relationship_id（实例方法，调用静态方法）
 
@@ -306,17 +318,17 @@ class MetadataRepository:
             target_schema=target_schema,
             target_table=target_table,
             target_columns=target_columns,
-            rel_id_salt=self.rel_id_salt
+            rel_id_salt=self.rel_id_salt,
         )
 
     def _generate_fk_signature(
-            self,
-            source_schema: str,
-            source_table: str,
-            source_columns: List[str],
-            target_schema: str,
-            target_table: str,
-            target_columns: List[str]
+        self,
+        source_schema: str,
+        source_table: str,
+        source_columns: List[str],
+        target_schema: str,
+        target_table: str,
+        target_columns: List[str],
     ) -> str:
         """生成FK签名（用于候选去重）
 
@@ -340,12 +352,12 @@ class MetadataRepository:
         )
 
     def _infer_cardinality(
-            self,
-            fk: Dict[str, Any],
-            tables: Dict[str, dict],
-            source_full_name: str,
-            target_schema: str,
-            target_table: str
+        self,
+        fk: Dict[str, Any],
+        tables: Dict[str, dict],
+        source_full_name: str,
+        target_schema: str,
+        target_table: str,
     ) -> str:
         """推断外键关系的基数（物理 FK 固定为 1:1 / N:1，见 doc 19 §3.2.3）
 
@@ -366,7 +378,9 @@ class MetadataRepository:
         source_columns = fk["source_columns"]
         target_columns = fk.get("target_columns", fk.get("referenced_columns", []))
 
-        source_is_unique = self._is_columns_unique(tables, source_full_name, source_columns)
+        source_is_unique = self._is_columns_unique(
+            tables, source_full_name, source_columns
+        )
         cardinality = "1:1" if source_is_unique else "N:1"
 
         logger.debug(
@@ -377,10 +391,7 @@ class MetadataRepository:
         return cardinality
 
     def _is_columns_unique(
-            self,
-            tables: Dict[str, dict],
-            full_name: str,
-            columns: List[str]
+        self, tables: Dict[str, dict], full_name: str, columns: List[str]
     ) -> bool:
         """判断列组合（单列或复合列）是否唯一（见 doc 19 §3.2.3）
 
@@ -413,13 +424,20 @@ class MetadataRepository:
 
         # 1. 主键（单列/复合，无序集合比较）
         pk = physical.get("primary_key")
-        if pk and len(pk.get("columns", [])) == len(columns) and set(pk.get("columns", [])) == col_set:
+        if (
+            pk
+            and len(pk.get("columns", [])) == len(columns)
+            and set(pk.get("columns", [])) == col_set
+        ):
             logger.debug(f"{full_name}.{columns}: 主键，判定为唯一")
             return True
 
         # 2. 唯一约束（单列/复合，无序集合比较）
         for uk in physical.get("unique_constraints", []):
-            if len(uk.get("columns", [])) == len(columns) and set(uk.get("columns", [])) == col_set:
+            if (
+                len(uk.get("columns", [])) == len(columns)
+                and set(uk.get("columns", [])) == col_set
+            ):
                 logger.debug(f"{full_name}.{columns}: 唯一约束，判定为唯一")
                 return True
 

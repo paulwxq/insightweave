@@ -1,99 +1,350 @@
-"""doc 23.2 批次 3：rel 发布服务单元测试（A01–A05、A12、A15–A17、A19–A28）。
+"""rel 发布（doc 23.2、6 §4.3、6.2 §8）：输入检查、锚点快照与执行链。
 
-覆盖白名单/归组/Literal（A01）、check_publication rel 条目（A02）、
-publish_steps 前置控制流（A03/A22 前半）、rel_loader 严格预检与锚点快照
-（A03/A05/A20）、_publish_rel 执行链与失败分类（A15–A17、A19、A22–A28）。
+新鲜度检查已按 doc 6 §4.3 取消：Rel marker 早于 JSON/Domain 不再阻断
+（显式断言）；内容、端点与指纹检查保留，指纹复核覆盖"预检后有编辑保存"。
 """
 
 import hashlib
 import json
-from contextlib import contextmanager
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
+from pathlib import Path
 from types import SimpleNamespace
-from uuid import uuid4
+from uuid import UUID
 
 import pytest
 
-import backend.publishing.publish_service as publish_service
 import backend.profile_loading.rel_loader as rel_loader
-from backend.publishing.errors import PublicationStepNotReadyError
-from backend.publishing.publish_service import (
-    UnsupportedPublicationStepError,
-    _publish_rel,
-    check_publication,
-    normalize_publish_steps,
-    publish_steps,
+from backend.profile_loading.rel_loader import (
+    RelPrecheckError,
+    build_rel_input_manifest,
+    capture_rel_precheck_snapshot,
+    check_rel_output_ready,
+    inspect_rel_inputs,
 )
+from backend.publishing import publish_service
+from backend.publishing.precheck import check_step
+from backend.publishing.publish_service import (
+    create_publish_run,
+    execute_publish_run,
+)
+from metaweave.core.cql_generator import generator as cql_generator_module
+from tests.unit.test_json_publish_service import sample_document, write_json_dir
+from tests.unit.test_publish_service import (
+    DB_NAME,
+    FakeSession,
+    PUBLISH_JOB_ID,
+    SETTINGS,
+    SOURCE_ID,
+    WORKSPACE_ID,
+    install,
+    run_step_row,
+    step_dir,
+    write_marker,
+)
+import yaml
 
-SOURCE_ID = uuid4()
-JOB_ID = uuid4()
-DB_NAME = "orders"
-NOW = datetime(2026, 10, 10, 2, 0, 0, tzinfo=timezone.utc)
-EARLIER = NOW - timedelta(minutes=10)
-LATER = NOW + timedelta(minutes=5)
-SETTINGS = SimpleNamespace(database_url="fake")
+JSON_RUN = UUID("11111111-1111-4111-8111-111111111111")
+DOMAIN_RUN = UUID("22222222-2222-4222-8222-222222222222")
+REL_RUN = UUID("33333333-3333-4333-8333-333333333333")
+
+MAIN_CONFIG = {
+    "loaders": {
+        "cql_loader": {
+            "input_file": "output/cql/x.cypher",
+            "neo4j": {
+                "uri": "bolt://x",
+                "user": "u",
+                "password": "p",
+                "database": "neo4j",
+            },
+        }
+    }
+}
+
+REL_ARTIFACT = {
+    "generated_by": "rel",
+    "database": DB_NAME,
+    "relationships": [{"relationship_id": "rel_x"}],
+    "statistics": {"total_relationships_found": 1},
+}
 
 
-# ---- 公共假件 ----
+def registration():
+    from backend.profile_loading.json_loader import RegistrationSnapshot
 
-
-class FakeSession:
-    def __init__(self, step_rows=None, source_row=None, fail_commit=False):
-        self.step_rows = step_rows or {}
-        self.source_row = source_row
-        self.fail_commit = fail_commit
-
-    def get(self, model, key):
-        from backend.persistence.models import DbSourceInfo, JobInfo
-
-        if model is JobInfo:
-            step_name = key["step_name"] if isinstance(key, dict) else key
-            return self.step_rows.get(step_name)
-        if model is DbSourceInfo:
-            return self.source_row
-        raise AssertionError(f"unexpected model {model}")  # pragma: no cover
-
-    def commit(self):
-        if self.fail_commit:
-            raise RuntimeError("commit boom")
-        return None
-
-    def rollback(self):
-        return None
-
-
-@contextmanager
-def _fake_session_ctx(session):
-    yield session
-
-
-def _source_row(updated_at=NOW):
-    return SimpleNamespace(
-        source_id=SOURCE_ID,
+    return RegistrationSnapshot(
+        updated_at=datetime(2026, 10, 20, tzinfo=datetime.now().astimezone().tzinfo),
         db_name=DB_NAME,
-        is_active=True,
-        updated_at=updated_at,
-        host="h",
-        port=5432,
-        username="u",
-        password_ciphertext="cipher",
-        sslmode=None,
-        selected_schemas=["public"],
+        selected_schemas=("public",),
     )
 
 
-def _step_row(status="success", updated_at=NOW, step="rel"):
-    return SimpleNamespace(
-        job_id=JOB_ID, step_name=step, last_status=status, updated_at=updated_at
+def write_domain_yaml(tmp_path, tables=("orders.public.users",)):
+    domain_dir = step_dir(tmp_path, "domain")
+    domain_dir.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "database": {"name": DB_NAME},
+        "domains": [
+            {"name": "用户管理", "description": "域", "tables": list(tables)},
+        ],
+    }
+    (domain_dir / "db_domains.yaml").write_text(
+        yaml.safe_dump(payload, allow_unicode=True, sort_keys=False), encoding="utf-8"
     )
+    return domain_dir
 
 
-class PublishRecorder:
-    def __init__(self):
-        self.inserted = []
-        self.cleared = []
-        self.stored_failures = []
-        self.uuid_calls = 0
+def write_rel_artifact(tmp_path, artifact=None):
+    rel_dir = step_dir(tmp_path, "rel")
+    rel_dir.mkdir(parents=True, exist_ok=True)
+    text = json.dumps(artifact or REL_ARTIFACT, ensure_ascii=False, indent=2)
+    (rel_dir / f"{DB_NAME}.relationships_global.json").write_text(
+        text, encoding="utf-8"
+    )
+    (rel_dir / f"{DB_NAME}.relationships_global.md").write_text("# r", encoding="utf-8")
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+
+
+def rel_ready(tmp_path):
+    """三目录 marker + 内容齐备（无任何时间先后要求）。"""
+    write_marker(tmp_path, "json", run_id=JSON_RUN)
+    write_marker(tmp_path, "domain", run_id=DOMAIN_RUN)
+    write_marker(tmp_path, "rel", run_id=REL_RUN)
+    write_json_dir(tmp_path, [sample_document(database=DB_NAME)])
+    write_domain_yaml(tmp_path)
+    return write_rel_artifact(tmp_path)
+
+
+# ---- 宽松产物就绪（check_rel_output_ready） ----
+
+
+@pytest.fixture(autouse=True)
+def _env(monkeypatch, tmp_path):
+    install(monkeypatch, tmp_path)
+
+
+class TestCheckRelOutputReady:
+    def test_ignore_rules(self, tmp_path):
+        rel_dir = step_dir(tmp_path, "rel")
+        rel_dir.mkdir(parents=True)
+        assert check_rel_output_ready(SOURCE_ID, WORKSPACE_ID) is False
+        (rel_dir / ".tmp-abc").write_text("x", encoding="utf-8")
+        backup = rel_dir / ".backup"
+        backup.mkdir()
+        (backup / f"{DB_NAME}.relationships_global.json").write_text(
+            "{}", encoding="utf-8"
+        )
+        assert check_rel_output_ready(SOURCE_ID, WORKSPACE_ID) is False
+        (rel_dir / f"{DB_NAME}.relationships_global.json").write_text(
+            "{}", encoding="utf-8"
+        )
+        assert check_rel_output_ready(SOURCE_ID, WORKSPACE_ID) is True
+
+    def test_marker_files_do_not_count(self, tmp_path):
+        write_marker(tmp_path, "rel", run_id=REL_RUN)
+        assert check_rel_output_ready(SOURCE_ID, WORKSPACE_ID) is False
+
+    def test_symlink_file_not_ready(self, tmp_path):
+        rel_dir = step_dir(tmp_path, "rel")
+        rel_dir.mkdir(parents=True)
+        staged = tmp_path / "staged.json"
+        staged.write_text("{}", encoding="utf-8")
+        (rel_dir / f"{DB_NAME}.relationships_global.json").symlink_to(staged)
+        assert check_rel_output_ready(SOURCE_ID, WORKSPACE_ID) is False
+
+    def test_directory_error_degrades_to_not_ready(self, tmp_path, monkeypatch):
+        def boom(_s, _j):
+            raise ValueError("路径包含符号链接")
+
+        monkeypatch.setattr(rel_loader, "resolve_rel_output_dir", boom)
+        assert check_rel_output_ready(SOURCE_ID, WORKSPACE_ID) is False
+
+
+# ---- inspect_rel_inputs：marker + 内容（无新鲜度比较，doc 6 §4.3） ----
+
+
+class TestInspectRelInputs:
+    def test_happy_path_returns_runs_and_fingerprint(self, tmp_path):
+        fingerprint = write_rel_artifact(tmp_path)
+        write_marker(tmp_path, "json", run_id=JSON_RUN)
+        write_marker(tmp_path, "domain", run_id=DOMAIN_RUN)
+        write_marker(tmp_path, "rel", run_id=REL_RUN)
+        write_json_dir(tmp_path, [sample_document(database=DB_NAME)])
+        write_domain_yaml(tmp_path)
+        result = inspect_rel_inputs(SOURCE_ID, WORKSPACE_ID, registration())
+        assert result == (str(JSON_RUN), str(DOMAIN_RUN), str(REL_RUN), fingerprint)
+
+    def test_rel_older_than_json_is_accepted(self, tmp_path):
+        """新鲜度取消（doc 6 §4.3）：Rel marker 早于 JSON/Domain 仍可发布。"""
+        from datetime import timedelta
+
+        from backend.workspace_files.timestamps import SHANGHAI_TZ
+
+        base = datetime(2026, 10, 21, 12, 0, 0, tzinfo=SHANGHAI_TZ)
+        write_marker(tmp_path, "rel", run_id=REL_RUN, moment=base)  # Rel 最早完成
+        write_marker(tmp_path, "json", run_id=JSON_RUN, moment=base + timedelta(days=1))
+        write_marker(
+            tmp_path, "domain", run_id=DOMAIN_RUN, moment=base + timedelta(days=2)
+        )
+        write_json_dir(tmp_path, [sample_document(database=DB_NAME)])
+        write_domain_yaml(tmp_path)
+        write_rel_artifact(tmp_path)
+        result = inspect_rel_inputs(SOURCE_ID, WORKSPACE_ID, registration())
+        assert result[2] == str(REL_RUN)  # 不因时间先后拒绝
+
+    @pytest.mark.parametrize("step", ["json", "domain", "rel"])
+    def test_missing_marker_rejected(self, tmp_path, step):
+        rel_ready(tmp_path)
+        for path in step_dir(tmp_path, step).glob(".coll_run_id_*"):
+            path.unlink()
+        with pytest.raises(RelPrecheckError):
+            inspect_rel_inputs(SOURCE_ID, WORKSPACE_ID, registration())
+
+    @pytest.mark.parametrize("step", ["json", "domain", "rel"])
+    def test_failed_marker_rejected(self, tmp_path, step):
+        rel_ready(tmp_path)
+        for path in step_dir(tmp_path, step).glob(".coll_run_id_*"):
+            path.unlink()
+        write_marker(tmp_path, step, run_id=UUID(int=9), status="failed")
+        with pytest.raises(RelPrecheckError, match="未成功"):
+            inspect_rel_inputs(SOURCE_ID, WORKSPACE_ID, registration())
+
+    def test_json_products_not_ready(self, tmp_path):
+        write_marker(tmp_path, "json", run_id=JSON_RUN)
+        write_marker(tmp_path, "domain", run_id=DOMAIN_RUN)
+        write_marker(tmp_path, "rel", run_id=REL_RUN)
+        # json 目录有 marker 但没有产物
+        write_domain_yaml(tmp_path)
+        write_rel_artifact(tmp_path)
+        with pytest.raises(RelPrecheckError, match="JSON 产物未就绪"):
+            inspect_rel_inputs(SOURCE_ID, WORKSPACE_ID, registration())
+
+    def test_domain_artifact_invalid(self, tmp_path):
+        write_marker(tmp_path, "json", run_id=JSON_RUN)
+        write_marker(tmp_path, "domain", run_id=DOMAIN_RUN)
+        write_marker(tmp_path, "rel", run_id=REL_RUN)
+        write_json_dir(tmp_path, [sample_document(database=DB_NAME)])
+        write_domain_yaml(tmp_path, tables=())
+        # 空 tables 的 domains 仍非空列表 → artifact 合法；改成坏 YAML
+        (step_dir(tmp_path, "domain") / "db_domains.yaml").write_text(
+            "domains: [\n", encoding="utf-8"
+        )
+        write_rel_artifact(tmp_path)
+        with pytest.raises(RelPrecheckError, match="请先执行 Domain 采集"):
+            inspect_rel_inputs(SOURCE_ID, WORKSPACE_ID, registration())
+
+    def test_extra_file_rejected(self, tmp_path):
+        rel_ready(tmp_path)
+        (step_dir(tmp_path, "rel") / "extra.txt").write_text("x", encoding="utf-8")
+        with pytest.raises(RelPrecheckError, match="两份文件"):
+            inspect_rel_inputs(SOURCE_ID, WORKSPACE_ID, registration())
+
+    def test_tmp_files_ignored(self, tmp_path):
+        rel_ready(tmp_path)
+        (step_dir(tmp_path, "rel") / ".tmp-x").write_text("x", encoding="utf-8")
+        inspect_rel_inputs(SOURCE_ID, WORKSPACE_ID, registration())  # 通过
+
+    def test_database_mismatch_rejected(self, tmp_path):
+        write_rel_artifact(
+            tmp_path,
+            {"database": "other", "relationships": [], "statistics": {}},
+        )
+        write_marker(tmp_path, "json", run_id=JSON_RUN)
+        write_marker(tmp_path, "domain", run_id=DOMAIN_RUN)
+        write_marker(tmp_path, "rel", run_id=REL_RUN)
+        write_json_dir(tmp_path, [sample_document(database=DB_NAME)])
+        write_domain_yaml(tmp_path)
+        with pytest.raises(RelPrecheckError, match="结构不合法"):
+            inspect_rel_inputs(SOURCE_ID, WORKSPACE_ID, registration())
+
+    def test_broken_json_rejected(self, tmp_path):
+        fingerprint = write_rel_artifact(tmp_path)
+        assert len(fingerprint) == 16
+        (step_dir(tmp_path, "rel") / f"{DB_NAME}.relationships_global.json").write_text(
+            "{broken", encoding="utf-8"
+        )
+        write_marker(tmp_path, "json", run_id=JSON_RUN)
+        write_marker(tmp_path, "domain", run_id=DOMAIN_RUN)
+        write_marker(tmp_path, "rel", run_id=REL_RUN)
+        write_json_dir(tmp_path, [sample_document(database=DB_NAME)])
+        write_domain_yaml(tmp_path)
+        with pytest.raises(RelPrecheckError, match="无法解析"):
+            inspect_rel_inputs(SOURCE_ID, WORKSPACE_ID, registration())
+
+
+class TestBuildRelInputManifest:
+    def test_lists_all_read_files_with_runs(self, tmp_path):
+        write_json_dir(tmp_path, [sample_document(database=DB_NAME)])
+        write_domain_yaml(tmp_path)
+        entries = build_rel_input_manifest(
+            SOURCE_ID,
+            WORKSPACE_ID,
+            str(JSON_RUN),
+            str(DOMAIN_RUN),
+            str(REL_RUN),
+            DB_NAME,
+        )
+        assert entries == [
+            (f"json/{DB_NAME}.public.orders.json", str(JSON_RUN)),
+            ("domain/db_domains.yaml", str(DOMAIN_RUN)),
+            (f"rel/{DB_NAME}.relationships_global.json", str(REL_RUN)),
+            (f"rel/{DB_NAME}.relationships_global.md", str(REL_RUN)),
+        ]
+
+
+class TestCaptureSnapshot:
+    @pytest.fixture(autouse=True)
+    def _config(self, monkeypatch):
+        monkeypatch.setattr(
+            rel_loader, "load_main_config_snapshot", lambda _p: MAIN_CONFIG
+        )
+        monkeypatch.setattr(
+            cql_generator_module, "CQLGenerator", lambda *a, **k: object()
+        )
+
+    def test_snapshot_bundles_anchors(self, tmp_path):
+        fingerprint = rel_ready(tmp_path)
+        snapshot = capture_rel_precheck_snapshot(FakeSession(), SOURCE_ID, WORKSPACE_ID)
+        assert snapshot.rel_fingerprint == fingerprint
+        assert snapshot.json_run_id == str(JSON_RUN)
+        assert snapshot.domain_run_id == str(DOMAIN_RUN)
+        assert snapshot.rel_run_id == str(REL_RUN)
+        assert snapshot.registration.db_name == DB_NAME
+        assert snapshot.main_config is MAIN_CONFIG
+
+    def test_bad_main_config_rejected(self, tmp_path, monkeypatch):
+        rel_ready(tmp_path)
+
+        def broken_generator(*_args, **_kwargs):
+            raise ValueError("composite_score_threshold 非法")
+
+        monkeypatch.setattr(cql_generator_module, "CQLGenerator", broken_generator)
+        with pytest.raises(RelPrecheckError, match="composite_score_threshold"):
+            capture_rel_precheck_snapshot(FakeSession(), SOURCE_ID, WORKSPACE_ID)
+
+    def test_check_step_rel_wires_manifest_and_payload(self, tmp_path):
+        rel_ready(tmp_path)
+        session = FakeSession()
+        result = check_step(session, SOURCE_ID, WORKSPACE_ID, "rel", db_name=DB_NAME)
+        assert result.ready is True
+        assert ("domain/db_domains.yaml", str(DOMAIN_RUN)) in result.input_files
+        assert result.payload is not None
+        assert result.payload.rel_fingerprint == result.payload.rel_fingerprint
+
+    def test_check_step_rel_not_ready_reason(self, tmp_path):
+        # rel 目录存在但 json 目录完全没有
+        write_marker(tmp_path, "json", run_id=JSON_RUN)
+        write_marker(tmp_path, "domain", run_id=DOMAIN_RUN)
+        write_marker(tmp_path, "rel", run_id=REL_RUN)
+        write_domain_yaml(tmp_path)
+        write_rel_artifact(tmp_path)
+        session = FakeSession()
+        result = check_step(session, SOURCE_ID, WORKSPACE_ID, "rel", db_name=DB_NAME)
+        assert result.ready is False
+        assert "JSON 产物未就绪" in result.reason
+
+
+# ---- 执行链（_publish_rel：生成 → 校验 → Neo4j） ----
 
 
 class FakeGenerator:
@@ -101,18 +352,14 @@ class FakeGenerator:
     gen_result: object = None
     gen_raises: Exception | None = None
 
-    def __init__(self, config_path, **kwargs):
+    def __init__(self, _config_path, **kwargs):
         FakeGenerator.ctor_kwargs = dict(kwargs)
 
     def generate(self):
         if FakeGenerator.gen_raises is not None:
             raise FakeGenerator.gen_raises
         result = FakeGenerator.gen_result
-        # 核验需要真实文件：按受管快照的 cql_directory 落盘产物
-        cql_dir = FakeGenerator.ctor_kwargs["config"]["output"]["cql_directory"]
-        from pathlib import Path
-
-        cql_dir = Path(cql_dir)
+        cql_dir = Path(result_cql_dir())
         cql_dir.mkdir(parents=True, exist_ok=True)
         written = []
         for name in result.output_files or []:
@@ -121,6 +368,10 @@ class FakeGenerator:
             written.append(str(path))
         result.output_files = written
         return result
+
+
+def result_cql_dir():
+    return FakeGenerator.ctor_kwargs["config"]["output"]["cql_directory"]
 
 
 class FakeLoader:
@@ -151,6 +402,7 @@ class FakeLoader:
 @pytest.fixture(autouse=True)
 def _reset_fakes():
     FakeGenerator.ctor_kwargs = {}
+    FakeGenerator.gen_result = None
     FakeGenerator.gen_raises = None
     FakeLoader.ctor_config = {}
     FakeLoader.validate_result = True
@@ -158,139 +410,6 @@ def _reset_fakes():
     FakeLoader.load_raises = None
     FakeLoader.calls = []
     yield
-
-
-def _workspace(tmp_path):
-    root = tmp_path / "output" / str(SOURCE_ID) / str(JOB_ID)
-    (root / "json").mkdir(parents=True, exist_ok=True)
-    (root / "domain").mkdir(parents=True, exist_ok=True)
-    rel_dir = root / "rel"
-    rel_dir.mkdir(exist_ok=True)
-    return root, rel_dir
-
-
-REL_ARTIFACT = {
-    "generated_by": "rel",
-    "database": DB_NAME,
-    "relationships": [{"relationship_id": "rel_x"}],
-    "statistics": {"total_relationships_found": 1},
-}
-
-
-def _write_rel_artifact(rel_dir):
-    text = json.dumps(REL_ARTIFACT, ensure_ascii=False, indent=2)
-    (rel_dir / f"{DB_NAME}.relationships_global.json").write_text(
-        text, encoding="utf-8"
-    )
-    (rel_dir / f"{DB_NAME}.relationships_global.md").write_text("# r", encoding="utf-8")
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
-
-
-def _snapshot(tmp_path, fingerprint, main_config=None):
-    root, _ = _workspace(tmp_path)
-    return SimpleNamespace(
-        registration=SimpleNamespace(updated_at=NOW, db_name=DB_NAME),
-        json_marker=EARLIER,
-        domain_marker=EARLIER,
-        rel_fingerprint=fingerprint,
-        main_config=main_config
-        or {
-            "loaders": {
-                "cql_loader": {
-                    "input_file": "output/cql/x.cypher",
-                    "neo4j": {"uri": "bolt://x", "user": "u", "password": "p"},
-                    "options": {"validate_after_load": False},
-                }
-            }
-        },
-    )
-
-
-def _install_publish(monkeypatch, tmp_path, session, snapshot):
-    """patch publish_service 命名空间（_publish_rel 执行链）。"""
-    recorder = PublishRecorder()
-    monkeypatch.setattr(
-        publish_service, "platform_session", lambda s: _fake_session_ctx(session)
-    )
-    monkeypatch.setattr(
-        publish_service, "lock_db_source_row", lambda sess, sid: sess.source_row
-    )
-    monkeypatch.setattr(publish_service, "assert_workspace_owner", lambda *a, **k: None)
-
-    verified = []
-
-    def fake_verify(sess, jid, step, marker):
-        verified.append((step, marker))
-
-    monkeypatch.setattr(publish_service, "_verify_step_current_under_lock", fake_verify)
-
-    def fake_insert(
-        sess, pid, sid, jid, step, status, error_summary=None, is_current=False
-    ):
-        recorder.inserted.append(
-            {
-                "step": step,
-                "status": status,
-                "summary": error_summary,
-                "current": is_current,
-            }
-        )
-
-    monkeypatch.setattr(publish_service, "insert_publish_row", fake_insert)
-    monkeypatch.setattr(
-        publish_service,
-        "clear_current",
-        lambda sess, sid, step: recorder.cleared.append(step),
-    )
-    monkeypatch.setattr(
-        publish_service,
-        "_store_failure",
-        lambda settings, sid, jid, pid, step, summary, revoke_current=False: (
-            recorder.stored_failures.append(
-                {"step": step, "summary": summary, "revoke": revoke_current}
-            )
-            or SimpleNamespace(
-                step=step, status="failed", message=summary, finished_at="t"
-            )
-        ),
-    )
-
-    # 受管快照：直接构造指向 tmp 工作区的 output 键（绕过真实 resolver）
-    root, rel_dir = _workspace(tmp_path)
-    monkeypatch.setattr(publish_service, "resolve_rel_output_dir", lambda s, j: rel_dir)
-    monkeypatch.setattr(
-        publish_service, "resolve_cql_output_dir", lambda s, j: root / "cql"
-    )
-    monkeypatch.setattr(
-        publish_service, "resolve_domain_output_dir", lambda s, j: root / "domain"
-    )
-    cleaned = []
-    monkeypatch.setattr(
-        publish_service,
-        "clean_top_level_files",
-        lambda path: cleaned.append(str(path)),
-    )
-    recorder.cleaned = cleaned
-
-    def fake_managed_snapshot(main_config, sid, jid, db_name, schemas):
-        return dict(main_config) | {
-            "output": {
-                "json_directory": str(root / "json"),
-                "rel_directory": str(rel_dir),
-                "cql_directory": str(root / "cql"),
-            }
-        }
-
-    monkeypatch.setattr(
-        publish_service, "build_managed_output_snapshot", fake_managed_snapshot
-    )
-    monkeypatch.setattr(publish_service, "DomainResolver", lambda yaml: object())
-    monkeypatch.setattr(publish_service, "CQLGenerator", FakeGenerator)
-    monkeypatch.setattr(publish_service, "CQLLoader", FakeLoader)
-    recorder.verified = verified
-    recorder.rel_dir = rel_dir
-    recorder.cql_dir = root / "cql"
-    return recorder
 
 
 def _gen_result(success=True, files=("import_all.orders.cypher", "meta.md"), **counts):
@@ -304,641 +423,222 @@ def _gen_result(success=True, files=("import_all.orders.cypher", "meta.md"), **c
     )
 
 
-# ---- A01 白名单 / 归组 / Literal ----
+def _install_rel_chain(monkeypatch, tmp_path):
+    """替换主配置/生成器/加载器/受管快照；目录仍走真实 resolver。"""
+    monkeypatch.setattr(rel_loader, "load_main_config_snapshot", lambda _p: MAIN_CONFIG)
+    monkeypatch.setattr(cql_generator_module, "CQLGenerator", lambda *a, **k: object())
+    monkeypatch.setattr(publish_service, "CQLGenerator", FakeGenerator)
+    monkeypatch.setattr(publish_service, "DomainResolver", lambda _yaml: object())
+    monkeypatch.setattr(publish_service, "CQLLoader", FakeLoader)
+    root = tmp_path / "output" / SOURCE_ID / WORKSPACE_ID
 
+    def fake_managed_snapshot(_cfg, _sid, _ws, _db, _schemas):
+        return dict(MAIN_CONFIG) | {
+            "output": {
+                "json_directory": str(root / "json"),
+                "rel_directory": str(root / "rel"),
+                "cql_directory": str(root / "cql"),
+            }
+        }
 
-def test_a01_whitelist_contains_rel():
-    assert normalize_publish_steps(["rel"]) == ["rel"]
-    assert normalize_publish_steps(["db", "rel", "rel"]) == ["db", "rel"]
-
-
-def test_a01_unknown_step_message_lists_rel():
-    with pytest.raises(UnsupportedPublicationStepError, match="rel"):
-        normalize_publish_steps(["nope"])
-
-
-def test_a01_rag_steps_swap_cql_for_rel():
-    from backend.publishing.listing import RAG_STEPS
-
-    assert "rel" in RAG_STEPS
-    assert "cql" not in RAG_STEPS
-
-
-def test_a01_response_literals_accept_rel():
-    from backend.api.schemas import PublicationStepResult, PublishCheckStep
-
-    PublishCheckStep(
-        step_name="rel",
-        job_status="success",
-        output_ready=True,
-        publishable=True,
-        reason=None,
+    monkeypatch.setattr(
+        publish_service, "build_managed_output_snapshot", fake_managed_snapshot
     )
-    row = PublicationStepResult(
-        step="rel", status="success", message="m", finished_at="2026-10-10T00:00:00Z"
+    return root
+
+
+def _publish_rel_once(monkeypatch, tmp_path, session):
+    result = create_publish_run(
+        SETTINGS,
+        PUBLISH_JOB_ID,
+        revision_no=1,
+        mode="custom",
+        steps=["rel"],
+        step_config=None,
     )
-    assert row.step == "rel"
-
-
-# ---- A02 check_publication rel 条目 ----
-
-
-class TestCheckPublicationRel:
-    def _install(self, monkeypatch, rel_row, output_ready=True):
-        full_rows = {
-            step: _step_row(step=step)
-            for step in ("db", "ddl", "json", "domain", "table_schema", "dim_value")
-        }
-        full_rows["md"] = _step_row(step="md")
-        if rel_row is not None:
-            full_rows["rel"] = rel_row
-        session = FakeSession(step_rows=full_rows, source_row=_source_row())
-        monkeypatch.setattr(
-            publish_service, "platform_session", lambda s: _fake_session_ctx(session)
-        )
-        monkeypatch.setattr(
-            publish_service, "_job_is_publishable", lambda *a, **k: True
-        )
-        monkeypatch.setattr(
-            publish_service, "check_rel_output_ready", lambda sid, jid: output_ready
-        )
-
-        def make_inspector(step_col):
-            def inspector(sess, _sid, _jid):
-                row = sess.step_rows.get(step_col)
-                if row is None:
-                    return None, None
-                return row.last_status, row.updated_at
-
-            return inspector
-
-        monkeypatch.setattr(
-            publish_service,
-            "_INSPECTORS",
-            {
-                publish_service.DB_STEP: make_inspector("db"),
-                publish_service.DDL_STEP: make_inspector("ddl"),
-                publish_service.JSON_STEP: make_inspector("json"),
-                publish_service.DOMAIN_STEP: make_inspector("domain"),
-                publish_service.REL_STEP: make_inspector("rel"),
-                publish_service.TABLE_SCHEMA_STEP: make_inspector("md"),
-                publish_service.DIM_VALUE_STEP: make_inspector("dim_config"),
-                publish_service.SQL_STEP: make_inspector("sql"),
-            },
-        )
-        monkeypatch.setattr(
-            publish_service,
-            "read_registration_snapshot",
-            lambda sess, sid: SimpleNamespace(updated_at=NOW, db_name=DB_NAME),
-        )
-        monkeypatch.setattr(
-            publish_service, "check_db_output_ready", lambda *a, **k: (True, None)
-        )
-        for name in (
-            "check_ddl_output_ready",
-            "check_json_output_ready",
-            "check_domain_output_ready",
-            "check_table_schema_output_ready",
-            "check_dim_value_output_ready",
-        ):
-            if hasattr(publish_service, name):
-                monkeypatch.setattr(publish_service, name, lambda *a, **k: True)
-        return session
-
-    def test_a02_publishable_when_row_success_and_file(self, monkeypatch):
-        self._install(monkeypatch, _step_row())
-        entry = next(
-            s
-            for s in check_publication(SETTINGS, SOURCE_ID, JOB_ID)["steps"]
-            if s["step_name"] == "rel"
-        )
-        assert entry["publishable"] is True
-        assert entry["reason"] is None
-
-    def test_a02_row_failed_reason_step_not_success(self, monkeypatch):
-        self._install(monkeypatch, _step_row(status="failed"))
-        entry = next(
-            s
-            for s in check_publication(SETTINGS, SOURCE_ID, JOB_ID)["steps"]
-            if s["step_name"] == "rel"
-        )
-        assert entry["publishable"] is False
-        assert entry["reason"] == "最近一次采集失败"
-
-    def test_a02_no_artifact_reason(self, monkeypatch):
-        self._install(monkeypatch, _step_row(), output_ready=False)
-        entry = next(
-            s
-            for s in check_publication(SETTINGS, SOURCE_ID, JOB_ID)["steps"]
-            if s["step_name"] == "rel"
-        )
-        assert entry["publishable"] is False
-        assert entry["reason"] == "该作业没有 Rel 产物"
-
-    def test_a02_step_order_between_domain_and_table_schema(self, monkeypatch):
-        self._install(monkeypatch, _step_row())
-        names = [
-            s["step_name"]
-            for s in check_publication(SETTINGS, SOURCE_ID, JOB_ID)["steps"]
-        ]
-        assert names.index("domain") < names.index("rel") < names.index("table_schema")
-
-    def test_a02_freshness_not_in_ui(self, monkeypatch):
-        """json 重跑后 rel 未重跑：页面仍可选（新鲜度只在执行预检）。"""
-        rows = {
-            "json": _step_row(step="json", updated_at=LATER),
-            "domain": _step_row(step="domain", updated_at=EARLIER),
-            "rel": _step_row(step="rel", updated_at=NOW),
-        }
-        for step in ("db", "ddl", "table_schema", "dim_value"):
-            rows[step] = _step_row(step=step)
-        rows["md"] = _step_row(step="md")
-        self._install(monkeypatch, rows["rel"])
-        # 重新注入带时间戳的行
-        entry = next(
-            s
-            for s in check_publication(SETTINGS, SOURCE_ID, JOB_ID)["steps"]
-            if s["step_name"] == "rel"
-        )
-        assert entry["publishable"] is True
-
-
-# ---- publish_steps 前置控制流（A03/A22 前半） ----
-
-
-class TestPublishStepsPrecheck:
-    def _install(self, monkeypatch, session):
-        monkeypatch.setattr(
-            publish_service, "platform_session", lambda s: _fake_session_ctx(session)
-        )
-        monkeypatch.setattr(
-            publish_service, "_assert_job_admission", lambda *a, **k: None
-        )
-        monkeypatch.setattr(
-            publish_service, "_job_is_publishable", lambda *a, **k: True
-        )
-        monkeypatch.setattr(
-            publish_service,
-            "_INSPECTORS",
-            {publish_service.REL_STEP: lambda sess, sid, jid: ("success", NOW)},
-        )
-        monkeypatch.setattr(
-            publish_service,
-            "read_registration_snapshot",
-            lambda sess, sid: SimpleNamespace(updated_at=NOW, db_name=DB_NAME),
-        )
-        calls = {"strict": 0, "capture": 0}
-
-        def fake_strict(settings, sid, jid):
-            calls["strict"] += 1
-
-        snapshot = SimpleNamespace(rel_fingerprint="f")
-
-        def fake_capture(settings, sid, jid):
-            calls["capture"] += 1
-            return snapshot
-
-        monkeypatch.setattr(publish_service, "assert_rel_publish_strict", fake_strict)
-        monkeypatch.setattr(
-            publish_service, "capture_rel_precheck_snapshot", fake_capture
-        )
-        return calls, snapshot
-
-    def test_anchor_branch_runs_and_dispatches_six_args(self, monkeypatch, tmp_path):
-        session = FakeSession(source_row=_source_row())
-        calls, snapshot = self._install(monkeypatch, session)
-        dispatched = []
-
-        def fake_publish_rel(settings, sid, jid, pid, marker, snap):
-            dispatched.append((sid, jid, pid, marker, snap))
-            return SimpleNamespace(
-                step="rel", status="success", message="m", finished_at="t"
-            )
-
-        monkeypatch.setattr(publish_service, "_publish_rel", fake_publish_rel)
-        publish_steps(SETTINGS, SOURCE_ID, JOB_ID, ["rel"])
-
-        assert calls == {"strict": 1, "capture": 1}
-        assert len(dispatched) == 1
-        sid, jid, pid, marker, snap = dispatched[0]
-        assert (sid, jid) == (SOURCE_ID, JOB_ID)
-        assert marker == NOW
-        assert snap is snapshot
-
-    def test_strict_failure_no_publish_id(self, monkeypatch):
-        session = FakeSession(source_row=_source_row())
-        self._install(monkeypatch, session)
-
-        def boom(settings, sid, jid):
-            raise PublicationStepNotReadyError("过期")
-
-        monkeypatch.setattr(publish_service, "assert_rel_publish_strict", boom)
-        uuid_calls = []
-
-        def fake_uuid4():
-            uuid_calls.append(1)
-            return uuid4()
-
-        monkeypatch.setattr(publish_service, "uuid4", fake_uuid4)
-        with pytest.raises(PublicationStepNotReadyError, match="过期"):
-            publish_steps(SETTINGS, SOURCE_ID, JOB_ID, ["rel"])
-        assert uuid_calls == []
-
-    def test_non_rel_choice_skips_branch(self, monkeypatch, tmp_path):
-        """仅发布 db：不跑 rel 严格预检/锚点（控制流块只在 chosen 含 rel 时）。"""
-        session = FakeSession(source_row=_source_row())
-        calls, _ = self._install(monkeypatch, session)
-        monkeypatch.setattr(
-            publish_service,
-            "_INSPECTORS",
-            {publish_service.DB_STEP: lambda sess, sid, jid: ("success", NOW)},
-        )
-        monkeypatch.setitem(
-            publish_service._PUBLISHERS,
-            publish_service.DB_STEP,
-            lambda *a: SimpleNamespace(
-                step="db", status="success", message="m", finished_at="t"
-            ),
-        )
-        publish_steps(SETTINGS, SOURCE_ID, JOB_ID, ["db"])
-        assert calls == {"strict": 0, "capture": 0}
-
-
-# ---- rel_loader 严格预检与锚点快照（A03/A05/A20） ----
-
-
-class TestRelLoaderStrict:
-    def _install(self, monkeypatch, tmp_path, rows, source=None):
-        session = FakeSession(step_rows=rows, source_row=source or _source_row())
-        monkeypatch.setattr(
-            rel_loader, "platform_session", lambda s: _fake_session_ctx(session)
-        )
-        monkeypatch.setattr(rel_loader, "assert_workspace_owner", lambda *a, **k: None)
-        root, rel_dir = _workspace(tmp_path)
-        monkeypatch.setattr(rel_loader, "resolve_rel_output_dir", lambda s, j: rel_dir)
-        monkeypatch.setattr(
-            rel_loader, "resolve_domain_output_dir", lambda s, j: root / "domain"
-        )
-        (root / "domain" / "db_domains.yaml").write_text("d: 1", encoding="utf-8")
-        monkeypatch.setattr(
-            rel_loader,
-            "read_managed_json_input",
-            lambda s, j, d: [{"schema": "public", "object": "t"}],
-        )
-        monkeypatch.setattr(
-            rel_loader,
-            "verify_domain_artifact",
-            lambda path: (True, ""),
-        )
-        monkeypatch.setattr(
-            rel_loader,
-            "load_main_config_snapshot",
-            lambda p: {"decision": {}},
-        )
-        monkeypatch.setattr(
-            "metaweave.core.cql_generator.generator.CQLGenerator",
-            lambda *a, **k: object(),
-        )
-        return rel_dir
-
-    def _rows(
-        self,
-        json_at=EARLIER,
-        domain_at=EARLIER,
-        rel_at=NOW,
-        rel_status="success",
-        json_status="success",
-    ):
-        return {
-            "json": _step_row(step="json", updated_at=json_at, status=json_status),
-            "domain": _step_row(step="domain", updated_at=domain_at),
-            "rel": _step_row(step="rel", updated_at=rel_at, status=rel_status),
-        }
-
-    def test_check_output_ready_ignore_rules(self, monkeypatch, tmp_path):
-        _, rel_dir = _workspace(tmp_path)
-        monkeypatch.setattr(rel_loader, "resolve_rel_output_dir", lambda s, j: rel_dir)
-        assert rel_loader.check_rel_output_ready(SOURCE_ID, JOB_ID) is False
-        (rel_dir / ".tmp-abc").write_text("x", encoding="utf-8")
-        backup = rel_dir / ".backup"
-        backup.mkdir()
-        (backup / f"{DB_NAME}.relationships_global.json").write_text(
-            "{}", encoding="utf-8"
-        )
-        assert rel_loader.check_rel_output_ready(SOURCE_ID, JOB_ID) is False
-        (rel_dir / f"{DB_NAME}.relationships_global.json").write_text(
-            "{}", encoding="utf-8"
-        )
-        assert rel_loader.check_rel_output_ready(SOURCE_ID, JOB_ID) is True
-
-    def test_check_output_ready_swallows_directory_errors(self, monkeypatch, tmp_path):
-        """目录不可用（符号链接 ValueError / 不可读 OSError）兜底降级为未就绪
-        ——不让整个 check_publication 500（与 domain/dim_value 兄弟同构）。"""
-
-        def boom(_s, _j, _e=None):
-            raise _e
-
-        _, rel_dir = _workspace(tmp_path)
-        monkeypatch.setattr(rel_loader, "resolve_rel_output_dir", lambda s, j: rel_dir)
-        for exc in (ValueError("路径包含符号链接"), OSError("permission denied")):
-            monkeypatch.setattr(
-                rel_loader,
-                "resolve_rel_output_dir",
-                lambda s, j, _e=exc: boom(s, j, _e),
-            )
-            assert rel_loader.check_rel_output_ready(SOURCE_ID, JOB_ID) is False
-
-    def test_missing_row_rejected(self, monkeypatch, tmp_path):
-        rows = self._rows()
-        rows.pop("json")
-        self._install(monkeypatch, tmp_path, rows)
-        with pytest.raises(PublicationStepNotReadyError, match="未成功"):
-            rel_loader.assert_rel_publish_strict(SETTINGS, SOURCE_ID, JOB_ID)
-
-    def test_failed_row_rejected(self, monkeypatch, tmp_path):
-        self._install(monkeypatch, tmp_path, self._rows(json_status="failed"))
-        with pytest.raises(PublicationStepNotReadyError, match="未成功"):
-            rel_loader.assert_rel_publish_strict(SETTINGS, SOURCE_ID, JOB_ID)
-
-    def test_a20_stale_json_rejected(self, monkeypatch, tmp_path):
-        self._install(monkeypatch, tmp_path, self._rows(json_at=LATER))
-        with pytest.raises(
-            PublicationStepNotReadyError, match="已重跑，Rel 产物已过期"
-        ):
-            rel_loader.assert_rel_publish_strict(SETTINGS, SOURCE_ID, JOB_ID)
-
-    def test_a20_equal_timestamps_treated_stale(self, monkeypatch, tmp_path):
-        self._install(monkeypatch, tmp_path, self._rows(json_at=NOW, rel_at=NOW))
-        with pytest.raises(PublicationStepNotReadyError, match="过期"):
-            rel_loader.assert_rel_publish_strict(SETTINGS, SOURCE_ID, JOB_ID)
-
-    def test_strict_passes_when_fresh(self, monkeypatch, tmp_path):
-        self._install(monkeypatch, tmp_path, self._rows())
-        rel_loader.assert_rel_publish_strict(SETTINGS, SOURCE_ID, JOB_ID)  # 不抛即通过
-
-    def test_rerun_between_assert_and_capture_rejected(self, monkeypatch, tmp_path):
-        """A20 强化（并发窗口）：json 在 assert 与 capture 两个无锁会话之间
-        完成重跑——捕获期以锚点 marker 复查排序，旧 rel 不再配合新 json 发布。"""
-        rows = self._rows()  # json=EARLIER / rel=NOW → assert 以旧时间戳通过
-        rel_dir = self._install(monkeypatch, tmp_path, rows)
-        rel_loader.assert_rel_publish_strict(SETTINGS, SOURCE_ID, JOB_ID)
-        _write_rel_artifact(rel_dir)
-        rows["json"] = _step_row(step="json", updated_at=LATER)  # 重跑恰在其间提交
-        with pytest.raises(PublicationStepNotReadyError, match="过期"):
-            rel_loader.capture_rel_precheck_snapshot(SETTINGS, SOURCE_ID, JOB_ID)
-
-    def test_capture_snapshot_happy_path(self, monkeypatch, tmp_path):
-        rel_dir = self._install(monkeypatch, tmp_path, self._rows())
-        fingerprint = _write_rel_artifact(rel_dir)
-        snap = rel_loader.capture_rel_precheck_snapshot(SETTINGS, SOURCE_ID, JOB_ID)
-        assert snap.rel_fingerprint == fingerprint
-        assert snap.json_marker == EARLIER
-        assert snap.domain_marker == EARLIER
-        assert snap.registration.db_name == DB_NAME
-
-    def test_capture_extra_file_rejected(self, monkeypatch, tmp_path):
-        rel_dir = self._install(monkeypatch, tmp_path, self._rows())
-        _write_rel_artifact(rel_dir)
-        (rel_dir / "extra.txt").write_text("x", encoding="utf-8")
-        with pytest.raises(PublicationStepNotReadyError, match="两份文件"):
-            rel_loader.capture_rel_precheck_snapshot(SETTINGS, SOURCE_ID, JOB_ID)
-
-    def test_capture_tmp_ignored(self, monkeypatch, tmp_path):
-        rel_dir = self._install(monkeypatch, tmp_path, self._rows())
-        _write_rel_artifact(rel_dir)
-        (rel_dir / ".tmp-x").write_text("x", encoding="utf-8")
-        rel_loader.capture_rel_precheck_snapshot(SETTINGS, SOURCE_ID, JOB_ID)  # 通过
-
-    def test_capture_database_mismatch_rejected(self, monkeypatch, tmp_path):
-        rel_dir = self._install(monkeypatch, tmp_path, self._rows())
-        (rel_dir / f"{DB_NAME}.relationships_global.json").write_text(
-            json.dumps({"database": "other", "relationships": [], "statistics": {}}),
-            encoding="utf-8",
-        )
-        (rel_dir / f"{DB_NAME}.relationships_global.md").write_text(
-            "# r", encoding="utf-8"
-        )
-        with pytest.raises(PublicationStepNotReadyError, match="结构不合法"):
-            rel_loader.capture_rel_precheck_snapshot(SETTINGS, SOURCE_ID, JOB_ID)
-
-
-# ---- _publish_rel 执行链（A15–A17、A19、A22–A28） ----
+    run_id = UUID(result["publish_run_id"])
+    execute_publish_run(SETTINGS, run_id)
+    return run_id
 
 
 class TestPublishRelExecution:
-    def _run(self, monkeypatch, tmp_path, snapshot=None):
-        root, rel_dir = _workspace(tmp_path)
-        fingerprint = _write_rel_artifact(rel_dir)
-        snapshot = snapshot or _snapshot(tmp_path, fingerprint)
-        session = FakeSession(source_row=_source_row())
-        recorder = _install_publish(monkeypatch, tmp_path, session, snapshot)
-        result = _publish_rel(SETTINGS, SOURCE_ID, JOB_ID, uuid4(), NOW, snapshot)
-        return recorder, result
+    def _run(self, monkeypatch, tmp_path):
+        rel_ready(tmp_path)
+        session = install(monkeypatch, tmp_path, FakeSession(steps=("rel",)))
+        _install_rel_chain(monkeypatch, tmp_path)
+        if FakeGenerator.gen_result is None:
+            FakeGenerator.gen_result = _gen_result()
+        return session, _publish_rel_once(monkeypatch, tmp_path, session)
 
-    def test_success_message_and_counts(self, monkeypatch, tmp_path):
+    def test_success_message_counts_and_provenance(self, monkeypatch, tmp_path):
         FakeGenerator.gen_result = _gen_result(tables=4, columns=30, relationships=3)
-        recorder, result = self._run(monkeypatch, tmp_path)
-        assert result["status"] == "success"
-        assert "4 张表 / 30 列 / 3 条关系" in result["message"]
-        assert recorder.inserted == [
-            {"step": "rel", "status": "success", "summary": None, "current": True}
-        ]
-        assert recorder.cleared == ["rel"]
-        assert FakeLoader.calls[-1] == "close"  # A26
-        assert "load" in FakeLoader.calls  # doc 4 §4.4：按源替换（无全清）
-        loader_section = FakeLoader.ctor_config["cql_loader"]
-        assert loader_section["input_file"].endswith("import_all.orders.cypher")
-        # doc 4 §4.4-2：删除范围为后端已验证的 source_id
-        assert FakeLoader.ctor_source_id == str(SOURCE_ID)
-        # provenance 传递（A13 链路；doc 4 §4.2 后必填）
-        assert FakeGenerator.ctor_kwargs["provenance"] is not None
+        session, run_id = self._run(monkeypatch, tmp_path)
+        step = run_step_row(session, run_id, "rel")
+        assert step.status == "success"
+        assert step.message == "Rel 已发布到 Neo4j（4 张表 / 30 列 / 3 条关系）"
+        assert FakeLoader.calls[-1] == "close"
+        assert FakeLoader.ctor_source_id == SOURCE_ID
+        assert FakeLoader.ctor_config["cql_loader"]["input_file"].endswith(
+            "import_all.orders.cypher"
+        )
+        assert FakeGenerator.ctor_kwargs["provenance"] == (SOURCE_ID, str(run_id))
+        # input_manifest 覆盖三目录实际读取文件
+        paths = [item["path"] for item in step.input_manifest["files"]]
+        assert "domain/db_domains.yaml" in paths
+        assert f"rel/{DB_NAME}.relationships_global.json" in paths
+        assert step.target_manifest == {
+            "targets": [{"type": "neo4j", "database": "neo4j"}]
+        }
 
-    def test_a19_zero_relationship_warning(self, monkeypatch, tmp_path):
+    def test_old_cql_backed_up_before_generation(self, monkeypatch, tmp_path):
+        cql_dir = step_dir(tmp_path, "cql")
+        cql_dir.mkdir(parents=True)
+        (cql_dir / "import_all.old.cypher").write_text("-- old", encoding="utf-8")
+        session, run_id = self._run(monkeypatch, tmp_path)
+        backups = list((cql_dir / ".backup").iterdir())
+        assert len(backups) == 1
+        assert (backups[0] / "import_all.old.cypher").read_text(encoding="utf-8") == (
+            "-- old"
+        )
+        # 新产物在顶层
+        assert (cql_dir / "import_all.orders.cypher").is_file()
+
+    def test_zero_relationships_success_with_warning(self, monkeypatch, tmp_path):
         FakeGenerator.gen_result = _gen_result(relationships=0)
-        recorder, result = self._run(monkeypatch, tmp_path)
-        assert result["status"] == "success"
-        assert "关系为空" in result["message"]
+        session, run_id = self._run(monkeypatch, tmp_path)
+        step = run_step_row(session, run_id, "rel")
+        assert step.status == "success"
+        assert "关系为空" in step.message
 
-    def test_a16_validate_failure_no_revoke(self, monkeypatch, tmp_path):
+    def test_fingerprint_changed_between_capture_and_recheck_blocks(
+        self, monkeypatch, tmp_path
+    ):
+        """锚点快照与锁下复核之间内容被编辑：指纹捕获 → blocked，不进 Neo4j。
+
+        注：`_publish_rel` 锁内自行重新捕获快照（预检 payload 未回用），
+        因此该检查实际覆盖的是"捕获与复核之间"的窗口；预检→执行的窗口
+        由执行期 check_step 的内容复查兜底（已单测）。
+        """
+        import backend.profile_loading.file_utils as profile_file_utils
+
+        rel_ready(tmp_path)
+        session = install(monkeypatch, tmp_path, FakeSession(steps=("rel",)))
+        _install_rel_chain(monkeypatch, tmp_path)
+        FakeGenerator.gen_result = _gen_result()
+        real_read = profile_file_utils.read_regular_text
+        calls = {"n": 0}
+
+        def flipping_read(path, label):
+            status, content = real_read(path, label)
+            if path.name.endswith(".relationships_global.json"):
+                calls["n"] += 1
+                if calls["n"] == 1:
+                    # rel_loader 顶部绑定的原函数承担前三次读取（预检两次 +
+                    # 锁下捕获）；本 wrapper 只会接到锁下指纹复核这一次——
+                    # 返回变化后的内容，模拟捕获与复核之间的编辑保存。
+                    return status, json.dumps(
+                        {**REL_ARTIFACT, "statistics": {"total_relationships_found": 9}}
+                    )
+            return status, content
+
+        monkeypatch.setattr(profile_file_utils, "read_regular_text", flipping_read)
+        run_id = _publish_rel_once(monkeypatch, tmp_path, session)
+        step = run_step_row(session, run_id, "rel")
+        assert step.status == "blocked"
+        assert "内容已变更" in step.message
+        assert FakeLoader.calls == []  # 未进入 Neo4j 加载
+
+    def test_generation_failure_is_failed(self, monkeypatch, tmp_path):
+        FakeGenerator.gen_result = _gen_result(
+            success=False, files=(), errors=["生成炸了"]
+        )
+        session, run_id = self._run(monkeypatch, tmp_path)
+        step = run_step_row(session, run_id, "rel")
+        assert step.status == "failed"
+        assert "CQL 生成或产物核验未通过（生成炸了）" in step.message
+
+    def test_outputs_outside_cql_dir_rejected(self, monkeypatch, tmp_path):
+        """核验要求产物落在受管 cql 目录内：目录外文件按生成失败处理。"""
+        FakeGenerator.gen_result = _gen_result()
+
+        class EscapingGenerator(FakeGenerator):
+            def generate(self):
+                generated = super().generate()
+                (tmp_path / "escaped.cypher").write_text("// out", encoding="utf-8")
+                generated.output_files = [str(tmp_path / "escaped.cypher")]
+                return generated
+
+        rel_ready(tmp_path)
+        session = install(monkeypatch, tmp_path, FakeSession(steps=("rel",)))
+        _install_rel_chain(monkeypatch, tmp_path)
+        monkeypatch.setattr(publish_service, "CQLGenerator", EscapingGenerator)
+        run_id = _publish_rel_once(monkeypatch, tmp_path, session)
+        step = run_step_row(session, run_id, "rel")
+        assert step.status == "failed"
+        assert "CQL 生成或产物核验未通过" in step.message
+
+    def test_validate_failure_is_failed(self, monkeypatch, tmp_path):
         FakeGenerator.gen_result = _gen_result()
         FakeLoader.validate_result = False
-        recorder, result = self._run(monkeypatch, tmp_path)
-        assert result["status"] == "failed"
-        assert recorder.inserted[0]["summary"] == "Rel 发布失败：Neo4j 服务不可用"
-        assert recorder.cleared == []
-        assert recorder.stored_failures == []
-        assert "close" in FakeLoader.calls  # A26：validate 拒绝路径也收尾
+        session, run_id = self._run(monkeypatch, tmp_path)
+        step = run_step_row(session, run_id, "rel")
+        assert step.status == "failed"
+        assert step.message == "Rel 发布失败：Neo4j 服务不可用"
+        assert "close" in FakeLoader.calls
 
-    def test_a16_load_returns_failure_with_mismatch(self, monkeypatch, tmp_path):
-        """doc 4 §4.5：数据事务已回滚 → 旧子图即当前图，不撤销 current。"""
+    def test_rolled_back_failure_keeps_old_graph_message(self, monkeypatch, tmp_path):
+        from metaweave.core.loaders.cql_loader import CQLScriptValidationError
+
         FakeGenerator.gen_result = _gen_result()
         FakeLoader.load_result = {
             "success": False,
             "_rolled_back": True,
             "errors": [
-                {
-                    "section": "verify",
-                    "error_type": "StatsMismatch",
-                    "error_message": "图内数量与脚本统计不符（已回滚，旧图保留）: "
-                    "table_count 期望 4/实际 3",
-                }
+                {"section": "verify", "error_message": "table_count 期望 4/实际 3"}
             ],
         }
-        recorder, result = self._run(monkeypatch, tmp_path)
-        assert result["status"] == "failed"
-        assert "已回滚，旧图保留" in recorder.inserted[0]["summary"]
-        assert "table_count 期望 4/实际 3" in recorder.inserted[0]["summary"]
-        assert recorder.cleared == []  # 旧 current 仍指向有效图数据
-        assert recorder.inserted[0]["current"] is False
-        assert "close" in FakeLoader.calls  # A26：load 返回失败路径也收尾
-
-    def test_a16_load_returns_failure_with_section_error(self, monkeypatch, tmp_path):
-        FakeGenerator.gen_result = _gen_result()
-        FakeLoader.load_result = {
-            "success": False,
-            "_rolled_back": True,
-            "errors": [{"section": "S", "error_message": "boom"}],
-        }
-        recorder, result = self._run(monkeypatch, tmp_path)
-        assert (
-            recorder.inserted[0]["summary"] == "Rel 发布失败（已回滚，旧图保留）：boom"
+        session, run_id = self._run(monkeypatch, tmp_path)
+        step = run_step_row(session, run_id, "rel")
+        assert step.status == "failed"
+        assert step.message == (
+            "Rel 发布失败（已回滚，旧图保留）：table_count 期望 4/实际 3"
         )
 
-    def test_a16_load_raises_generic_revokes_current(self, monkeypatch, tmp_path):
-        """doc 4 §4.5：图事务提交状态不可知 → 保守撤销 current。"""
+    def test_unknown_commit_state_failure(self, monkeypatch, tmp_path):
         FakeGenerator.gen_result = _gen_result()
-        FakeLoader.load_raises = RuntimeError("net")
-        recorder, result = self._run(monkeypatch, tmp_path)
-        assert "提交状态不可知" in recorder.inserted[0]["summary"]
-        assert recorder.cleared == ["rel"]
-        assert "close" in FakeLoader.calls  # A26：load 异常路径也收尾
+        FakeLoader.load_result = {"success": False}
+        session, run_id = self._run(monkeypatch, tmp_path)
+        step = run_step_row(session, run_id, "rel")
+        assert step.status == "failed"
+        assert "提交状态不可知" in step.message
 
-    def test_a23_script_validation_rejected_before_clean(self, monkeypatch, tmp_path):
+    def test_script_validation_error_before_load(self, monkeypatch, tmp_path):
         from metaweave.core.loaders.cql_loader import CQLScriptValidationError
 
         FakeGenerator.gen_result = _gen_result()
         FakeLoader.load_raises = CQLScriptValidationError("bad script")
-        recorder, result = self._run(monkeypatch, tmp_path)
-        assert recorder.inserted[0]["summary"] == "Rel 发布失败：bad script"
-        assert recorder.cleared == []
-        assert recorder.stored_failures == []
-        assert "close" in FakeLoader.calls  # A26：脚本核验拒绝路径也收尾
+        session, run_id = self._run(monkeypatch, tmp_path)
+        step = run_step_row(session, run_id, "rel")
+        assert step.status == "failed"
+        assert step.message == "Rel 发布失败：bad script"
+        assert "close" in FakeLoader.calls
 
-    def test_a15_generation_failure_row(self, monkeypatch, tmp_path):
-        FakeGenerator.gen_result = _gen_result(
-            success=False, files=(), errors=["生成炸了"]
-        )
-        recorder, result = self._run(monkeypatch, tmp_path)
-        assert "CQL 生成或产物核验未通过（生成炸了）" in recorder.inserted[0]["summary"]
-        assert recorder.cleared == []
-        assert recorder.stored_failures == []
+    def test_precheck_marker_missing_rejects_before_run(self, monkeypatch, tmp_path):
+        from backend.publishing.precheck import PublishPrecheckError
 
-    def test_a22_fingerprint_mismatch_raises_no_row(self, monkeypatch, tmp_path):
-        root, rel_dir = _workspace(tmp_path)
-        _write_rel_artifact(rel_dir)
-        snapshot = _snapshot(tmp_path, "ffffffffffffffff")
-        session = FakeSession(source_row=_source_row())
-        recorder = _install_publish(monkeypatch, tmp_path, session, snapshot)
-        with pytest.raises(PublicationStepNotReadyError, match="内容已变更"):
-            _publish_rel(SETTINGS, SOURCE_ID, JOB_ID, uuid4(), NOW, snapshot)
-        assert recorder.inserted == []
-        assert recorder.stored_failures == []
-
-    def test_a04_three_verifies_with_captured_markers(self, monkeypatch, tmp_path):
-        FakeGenerator.gen_result = _gen_result()
-        recorder, _ = self._run(monkeypatch, tmp_path)
-        assert set(recorder.verified) == {
-            ("rel", NOW),
-            ("json", EARLIER),
-            ("domain", EARLIER),
-        }
-
-    def test_wide_exception_uses_store_failure_unlocked(self, monkeypatch, tmp_path):
-        FakeGenerator.gen_raises = RuntimeError("gen segfault")
-        recorder, result = self._run(monkeypatch, tmp_path)
-        assert recorder.stored_failures == [
-            {
-                "step": "rel",
-                "summary": "Rel 发布失败，请检查配置",
-                "revoke": False,
-            }
-        ]
-        assert recorder.inserted == []
-
-
-class TestPostLoadFailureRevocation:
-    """§6.3 提交失败撤销（审核修订）：进入过 load() 后的任何失败都不得保留
-    指向已消失数据的旧 current——宽兜底按 replacement_started 传 revoke。"""
-
-    def _setup(self, monkeypatch, tmp_path):
-        root, rel_dir = _workspace(tmp_path)
-        fingerprint = _write_rel_artifact(rel_dir)
-        snapshot = _snapshot(tmp_path, fingerprint)
-        session = FakeSession(source_row=_source_row())
-        recorder = _install_publish(monkeypatch, tmp_path, session, snapshot)
-        return snapshot, session, recorder
-
-    def test_post_load_commit_failure_revokes_current(self, monkeypatch, tmp_path):
-        """load 成功、锁内 commit 失败 → 图已替换，锁外补记撤销旧 current。"""
-        FakeGenerator.gen_result = _gen_result()
-        snapshot, session, recorder = self._setup(monkeypatch, tmp_path)
-        session.fail_commit = True
-
-        result = _publish_rel(SETTINGS, SOURCE_ID, JOB_ID, uuid4(), NOW, snapshot)
-
-        assert result.status == "failed"
-        assert recorder.stored_failures == [
-            {
-                "step": "rel",
-                "summary": "Rel 发布失败，请检查配置",
-                "revoke": True,
-            }
-        ]
-
-    def test_post_load_value_error_revokes_current(self, monkeypatch, tmp_path):
-        """加载后的意外 ValueError 不映射 400（会保留旧 current），按已替换撤销。"""
-        FakeGenerator.gen_result = _gen_result()
-        FakeLoader.load_result = {"success": False}
-        snapshot, _session, recorder = self._setup(monkeypatch, tmp_path)
-
-        def boom(_result):
-            raise ValueError("summary crashed")
-
-        monkeypatch.setattr(publish_service, "_rel_failure_summary", boom)
-
-        result = _publish_rel(SETTINGS, SOURCE_ID, JOB_ID, uuid4(), NOW, snapshot)
-
-        assert result.status == "failed"
-        assert recorder.stored_failures[0]["revoke"] is True
-
-    def test_pre_load_wide_failure_keeps_current(self, monkeypatch, tmp_path):
-        """对照组：加载前（生成段）失败图未动 → 不撤销（既有语义回归锁）。"""
-        FakeGenerator.gen_raises = RuntimeError("gen segfault")
-        snapshot, _session, recorder = self._setup(monkeypatch, tmp_path)
-
-        _publish_rel(SETTINGS, SOURCE_ID, JOB_ID, uuid4(), NOW, snapshot)
-
-        assert recorder.stored_failures == [
-            {
-                "step": "rel",
-                "summary": "Rel 发布失败，请检查配置",
-                "revoke": False,
-            }
-        ]
-
-
-def test_generation_check_requires_exact_cypher_name(monkeypatch, tmp_path):
-    """审核修订 5：核验段精确比对 import_all.{db}.cypher——仅元数据 md
-    （import_all.orders.md）不能满足，防 startswith 前缀被 md 单独满足。"""
-    FakeGenerator.gen_result = _gen_result(files=("import_all.orders.md", "meta.md"))
-    root, rel_dir = _workspace(tmp_path)
-    fingerprint = _write_rel_artifact(rel_dir)
-    snapshot = _snapshot(tmp_path, fingerprint)
-    session = FakeSession(source_row=_source_row())
-    recorder = _install_publish(monkeypatch, tmp_path, session, snapshot)
-
-    result = _publish_rel(SETTINGS, SOURCE_ID, JOB_ID, uuid4(), NOW, snapshot)
-
-    assert result["status"] == "failed"
-    assert "CQL 生成或产物核验未通过" in recorder.inserted[0]["summary"]
-    assert recorder.cleared == []
+        write_json_dir(tmp_path, [sample_document(database=DB_NAME)])
+        write_domain_yaml(tmp_path)
+        write_rel_artifact(tmp_path)  # 三目录都没有 marker
+        session = install(monkeypatch, tmp_path, FakeSession(steps=("rel",)))
+        with pytest.raises(PublishPrecheckError) as excinfo:
+            create_publish_run(
+                SETTINGS,
+                PUBLISH_JOB_ID,
+                revision_no=1,
+                mode="custom",
+                steps=["rel"],
+                step_config=None,
+            )
+        assert excinfo.value.failures[0]["step"] == "rel"
+        assert "marker" in excinfo.value.failures[0]["reason"]
+        assert session.runs == []

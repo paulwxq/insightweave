@@ -32,7 +32,9 @@ class QuestionSQLGenerator:
         self.questions_per_domain = self.config.get("questions_per_domain", 10)
         self.uncategorized_questions = self.config.get("uncategorized_questions", 3)
         self.skip_uncategorized = self.config.get("skip_uncategorized", False)
-        self.output_dir = resolve_project_path(self.config.get("output_dir", "output/sql-rag"))
+        self.output_dir = resolve_project_path(
+            self.config.get("output_dir", "output/sql-rag")
+        )
         self.max_prompt_chars = self.config.get("max_prompt_chars", 100000)
 
     def generate(
@@ -180,7 +182,7 @@ class QuestionSQLGenerator:
                 table_names=tables,
                 db_name=db_name,
             )
-        
+
         if not rel_content:
             rel_content = "未提取到与当前主题表相关的关系段落，可仅依据表结构生成高质量单表或谨慎关联的 SQL。"
 
@@ -220,9 +222,7 @@ class QuestionSQLGenerator:
         # 解析并清洗
         return self._parse_and_clean(response)
 
-    def _build_md_context(
-        self, tables: List[str], md_map: Dict[str, str]
-    ) -> str:
+    def _build_md_context(self, tables: List[str], md_map: Dict[str, str]) -> str:
         """构建 MD 上下文内容"""
         if not tables:
             return ""
@@ -288,13 +288,10 @@ class QuestionSQLGenerator:
 
         return None
 
-    def _write_output(
-        self, pairs: List[QuestionSQLPair], output_file: Path
-    ) -> None:
+    def _write_output(self, pairs: List[QuestionSQLPair], output_file: Path) -> None:
         """写入 JSON 输出文件（覆盖式）"""
         data = [
-            {"question": p.question, "sql": p.sql, "domain": p.domain}
-            for p in pairs
+            {"question": p.question, "sql": p.sql, "domain": p.domain} for p in pairs
         ]
         with open(output_file, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)

@@ -12,20 +12,19 @@ import json
 import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
-from uuid import UUID
 
 import yaml
 
 from backend.data_sources.repository import get_db_source
 from backend.profile_loading.file_utils import read_regular_text
-from backend.jobs.repository import get_step_row
+
 from backend.persistence.platform_db import PlatformSettings, platform_session
 from metaweave.core.clean_targets import (
-    resolve_dim_config_output_dir,
+    resolve_dim_output_dir,
     resolve_json_output_dir,
 )
 from metaweave.core.dim_value.models import DimTableConfig, DimTablesConfig
-from metaweave.utils.source_id import normalize_source_id
+from metaweave.utils.source_id import normalize_workspace_id
 
 DIM_CONFIG_ARTIFACT_NAME = "dim_tables.yaml"
 DIM_CONFIG_STEP_NAME = "dim_config"
@@ -74,6 +73,14 @@ class DimValueNotConfiguredError(ValueError):
             "dim_tables.yaml 中存在未指定 embedding_col 的表，请编辑配置或删除对应表"
         )
         self.details = {"tables": tables}
+
+
+class DimConfigBackupFailedError(Exception):
+    """500 dim_config_backup_failed：文件级备份失败，本次保存终止。"""
+
+    def __init__(self, message: str = "dim_tables.yaml 备份失败，本次保存未执行"):
+        super().__init__(message)
+        self.details: Dict[str, Any] = {}
 
 
 class DimValueColumnMissingError(ValueError):
@@ -165,19 +172,28 @@ def classify_dim_tables_yaml(
 # ---- 平台库读取 ----
 
 
-def _resolve_identifiers(source_id, job_id) -> Tuple[UUID, UUID]:
-    return normalize_source_id(source_id), normalize_source_id(job_id)
+def _require_workspace(session, workspace_id: str):
+    """工作区归属核对 + dim 目录成功 marker（doc 6 §4.1）。"""
+    from backend.workspaces.repository import get_workspace
+    from backend.workspace_files.markers import read_collection_marker
+
+    workspace = get_workspace(session, workspace_id)
+    if workspace is None:
+        raise DimConfigOutputMissingError("工作区不存在")
+    marker, error = read_collection_marker(
+        resolve_dim_output_dir(workspace.source_id, workspace_id)
+    )
+    if marker is None:
+        raise DimConfigOutputMissingError(
+            error or "该工作区没有 Dim 采集 marker，请先执行 Dim 采集"
+        )
+    if marker.status != "success":
+        raise DimConfigOutputMissingError("该工作区的 Dim 采集未成功，请先重跑后再编辑")
+    return workspace
 
 
-def _require_step_row(session, job_uuid: UUID):
-    row = get_step_row(session, job_uuid, DIM_CONFIG_STEP_NAME)
-    if row is None:
-        raise DimConfigOutputMissingError()
-    return row
-
-
-def _require_registration(session, source_uuid: UUID):
-    source = get_db_source(session, source_uuid)
+def _require_registration(session, source_id: str):
+    source = get_db_source(session, source_id)
     if source is None:
         raise DimConfigOutputMissingError("数据源不存在")
     return source
@@ -186,16 +202,14 @@ def _require_registration(session, source_uuid: UUID):
 # ---- GET dim-config（§5.1） ----
 
 
-def read_dim_value_config(
-    settings: PlatformSettings, source_id, job_id
-) -> Dict[str, Any]:
-    source_uuid, job_uuid = _resolve_identifiers(source_id, job_id)
+def read_dim_value_config(settings: PlatformSettings, workspace_id) -> Dict[str, Any]:
+    workspace_id = normalize_workspace_id(workspace_id)
     with platform_session(settings) as session:
-        step_row = _require_step_row(session, job_uuid)
-        source = _require_registration(session, source_uuid)
+        workspace = _require_workspace(session, workspace_id)
+        source = _require_registration(session, workspace.source_id)
 
         yaml_path = (
-            resolve_dim_config_output_dir(source_uuid, job_uuid)
+            resolve_dim_output_dir(workspace.source_id, workspace_id)
             / DIM_CONFIG_ARTIFACT_NAME
         )
         status, content = read_regular_text(yaml_path, DIM_CONFIG_ARTIFACT_NAME)
@@ -205,6 +219,10 @@ def read_dim_value_config(
             raise DimValueConfigInvalidError(
                 "dim_tables.yaml 配置文件无效或不存在，请重新生成后再发布", content
             )
+        # 版本锚点改为文件内容指纹（编辑冲突检查，doc 6.2 §5.2）
+        import hashlib as _hashlib
+
+        version = _hashlib.sha256(content.encode("utf-8")).hexdigest()
 
         state, reason, cfg = classify_dim_tables_yaml(yaml_path, source.db_name)
         if state == "invalid":
@@ -221,7 +239,7 @@ def read_dim_value_config(
             }
             for c in cfg.tables.values()
         ]
-        return {"tables": tables, "version": step_row.updated_at.isoformat()}
+        return {"tables": tables, "version": version}
 
 
 # ---- GET objects（§5.1） ----
@@ -244,13 +262,11 @@ def _iter_json_products(json_dir: Path):
             yield path, info
 
 
-def list_dim_value_objects(
-    settings: PlatformSettings, source_id, job_id
-) -> Dict[str, Any]:
-    source_uuid, job_uuid = _resolve_identifiers(source_id, job_id)
+def list_dim_value_objects(settings: PlatformSettings, workspace_id) -> Dict[str, Any]:
+    workspace_id = normalize_workspace_id(workspace_id)
     with platform_session(settings) as session:
-        _require_step_row(session, job_uuid)
-        json_dir = resolve_json_output_dir(source_uuid, job_uuid)
+        workspace = _require_workspace(session, workspace_id)
+        json_dir = resolve_json_output_dir(workspace.source_id, workspace_id)
         if not json_dir.is_dir():
             raise DimConfigOutputMissingError("受管 json 产物目录不存在")
 
@@ -299,12 +315,12 @@ def _first_sample_value(records: Any, column_name: str) -> str:
 
 
 def read_dim_value_object_columns(
-    settings: PlatformSettings, source_id, job_id, schema_name: str, object_name: str
+    settings: PlatformSettings, workspace_id, schema_name: str, object_name: str
 ) -> Dict[str, Any]:
-    source_uuid, job_uuid = _resolve_identifiers(source_id, job_id)
+    workspace_id = normalize_workspace_id(workspace_id)
     with platform_session(settings) as session:
-        _require_step_row(session, job_uuid)
-        json_dir = resolve_json_output_dir(source_uuid, job_uuid)
+        workspace = _require_workspace(session, workspace_id)
+        json_dir = resolve_json_output_dir(workspace.source_id, workspace_id)
 
         data = None
         for path, info in _iter_json_products(json_dir):
@@ -420,22 +436,46 @@ def _validate_payload(payload: Any) -> List[Dict[str, str]]:
 
 
 def write_dim_value_config(
-    settings: PlatformSettings, source_id, job_id, payload: Dict[str, Any]
+    settings: PlatformSettings, workspace_id, payload: Dict[str, Any]
 ) -> Dict[str, Any]:
-    source_uuid, job_uuid = _resolve_identifiers(source_id, job_id)
+    workspace_id = normalize_workspace_id(workspace_id)
     normalized = _validate_payload(payload)
 
     with platform_session(settings) as session:
-        step_row = _require_step_row(session, job_uuid)
-        source = _require_registration(session, source_uuid)
+        from backend.persistence.models import WorkspaceInfo
+        from backend.workspace_files.backups import (
+            EditBackupFailedError,
+            backup_files_before_edit,
+        )
 
-        # 版本复查（第 3 步）
+        workspace_row = session.get(WorkspaceInfo, workspace_id, with_for_update=True)
+        if workspace_row is None:
+            raise DimConfigOutputMissingError("工作区不存在")
+        _require_workspace(session, workspace_id)
+        source = _require_registration(session, workspace_row.source_id)
+
+        # 版本复查：文件内容指纹（编辑冲突检查）
+        yaml_path = (
+            resolve_dim_output_dir(workspace_row.source_id, workspace_id)
+            / DIM_CONFIG_ARTIFACT_NAME
+        )
+        status, current = read_regular_text(yaml_path, DIM_CONFIG_ARTIFACT_NAME)
+        if status != "ok" or not isinstance(current, str):
+            raise DimConfigOutputMissingError()
+        import hashlib as _hashlib
+
         version = payload.get("version")
-        if version != step_row.updated_at.isoformat():
+        if version != _hashlib.sha256(current.encode("utf-8")).hexdigest():
             raise DimConfigRegeneratedError()
 
-        # 写回（第 4 步）：与生成器同款 yaml.dump（审核修订 45，不手写引号）
-        dim_config_dir = resolve_dim_config_output_dir(source_uuid, job_uuid)
+        dim_config_dir = yaml_path.parent
+        # 文件级备份（doc 6.2 §5.2）：失败则本次保存终止，不写回、不删任何内容
+        try:
+            backup_files_before_edit(dim_config_dir, [DIM_CONFIG_ARTIFACT_NAME])
+        except EditBackupFailedError as exc:
+            raise DimConfigBackupFailedError(
+                f"dim_tables.yaml 备份失败，本次保存未执行：{exc}"
+            ) from None
         yaml_path = dim_config_dir / DIM_CONFIG_ARTIFACT_NAME
         config_dict = {
             "databases": {

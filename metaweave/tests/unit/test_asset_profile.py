@@ -1,4 +1,9 @@
-"""数据库画像页：只读当前 db 发布，不回退更早的成功画像。"""
+"""数据库画像页（doc 6.1 §14 新模型）：db_profile 每源一行即当前内容。
+
+无画像行 → not_published；有则 ready，发布来源取画像行 publish_run_id 对应
+的 PublishRunInfo（run 行缺失时 publish 为 null）。无 current 标记、无回退
+更早画像、无 inconsistent 态。
+"""
 
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -17,9 +22,8 @@ from backend.data_sources.registration_service import (
 )
 from backend.persistence.platform_db import PlatformSettings
 
-SOURCE_ID = UUID("b4a87275-7c37-4feb-bf1c-e5a8446c174f")
-CURRENT = UUID("63221a9e-6a82-4311-a08c-9f74001da835")
-OLDER = UUID("84c017f4-b438-453b-a888-715b7f0cbea2")
+SOURCE_ID = "db_src_1"
+RUN = UUID("63221a9e-6a82-4311-a08c-9f74001da835")
 VERSION_FULL = "PostgreSQL 18.1 on x86_64-windows, compiled by msvc-19.44.35221, 64-bit"
 
 
@@ -35,14 +39,10 @@ def _source(**overrides):
     return SimpleNamespace(**values)
 
 
-def _publish(**overrides):
+def _run(**overrides):
     values = {
-        "publish_id": CURRENT,
-        "source_id": SOURCE_ID,
-        "step_name": "db",
+        "publish_run_id": RUN,
         "status": "success",
-        "is_current_publish": True,
-        "error_summary": None,
         "created_at": datetime(2026, 9, 28, 3, 18, 13, tzinfo=timezone.utc),
     }
     values.update(overrides)
@@ -51,8 +51,8 @@ def _publish(**overrides):
 
 def _profile(**overrides):
     values = {
-        "publish_id": CURRENT,
         "source_id": SOURCE_ID,
+        "publish_run_id": RUN,
         "db_type": "postgresql",
         "host": "172.29.128.1",
         "port": 5432,
@@ -87,19 +87,17 @@ def _profile(**overrides):
     return SimpleNamespace(**values)
 
 
-def test_ready_profile_uses_current_publish_and_registration_username():
-    result = assemble_asset_profile(
-        _source(),
-        [
-            _publish(),
-            _publish(publish_id=OLDER, is_current_publish=False, status="success"),
-        ],
-        [_profile(), _profile(publish_id=OLDER, db_name="old")],
-    )
+def test_ready_profile_uses_row_publish_run():
+    result = assemble_asset_profile(_source(), _profile(), _run())
     assert result["state"] == "ready"
     assert set(result["source"]) == {"source_id", "display_name", "username"}
     assert result["source"]["display_name"] == "订单库pg"
     assert result["source"]["username"] == "postgres"
+    assert result["publish"] == {
+        "publish_run_id": str(RUN),
+        "status": "success",
+        "published_at": "2026-09-28T03:18:13.000000Z",
+    }
     profile = result["profile"]
     assert profile["db_name"] == "orders"
     assert profile["host"] == "172.29.128.1"
@@ -119,61 +117,48 @@ def test_ready_profile_uses_current_publish_and_registration_username():
     assert "password_ciphertext" not in result["source"]
 
 
-def test_failed_current_does_not_fall_back_to_older_success():
-    result = assemble_asset_profile(
-        _source(),
-        [
-            _publish(status="failed", error_summary="画像输入不可用或校验失败"),
-            _publish(publish_id=OLDER, is_current_publish=False, status="success"),
-        ],
-        [_profile(publish_id=OLDER)],
-    )
-    assert result["state"] == "failed"
-    assert result["profile"] is None
-    assert result["publish"]["error_summary"] == "画像输入不可用或校验失败"
-    assert result["publish"]["publish_id"] == str(CURRENT)
-
-
-def test_missing_current_is_not_published():
-    result = assemble_asset_profile(_source(), [], [_profile()])
+def test_missing_profile_is_not_published():
+    result = assemble_asset_profile(_source(), None, None)
     assert result["state"] == "not_published"
     assert result["publish"] is None
     assert result["profile"] is None
+    assert result["source"]["display_name"] == "订单库pg"
 
 
-def test_success_without_profile_is_inconsistent():
-    result = assemble_asset_profile(_source(), [_publish()], [])
-    assert result["state"] == "inconsistent"
-    assert result["profile"] is None
+def test_profile_without_run_row_publish_is_null():
+    result = assemble_asset_profile(_source(), _profile(), None)
+    assert result["state"] == "ready"
+    assert result["publish"] is None
+    assert result["profile"]["db_name"] == "orders"
 
 
 def test_null_platform_stays_null():
     result = assemble_asset_profile(
         _source(display_name=""),
-        [_publish()],
-        [_profile(os_platform=None, server_version_full=None)],
+        _profile(os_platform=None, server_version_full=None),
+        _run(),
     )
     assert result["profile"]["os_platform"] is None
     assert result["profile"]["server_version_full"] is None
+    # 登记名缺失时回退画像库名
     assert result["source"]["display_name"] == "orders"
 
 
-def test_get_asset_profile_reads_current_row(monkeypatch):
+def test_get_asset_profile_reads_rows_by_key(monkeypatch):
     class Session:
-        def get(self, _model, key):
-            return _source() if key == SOURCE_ID else None
+        def __init__(self):
+            self.source = _source()
+            self.profile = _profile()
+            self.run = _run()
 
-        def scalars(self, stmt):
-            sql = str(stmt)
-            if "publish_info" in sql:
-                assert "is_current_publish" in sql
-                return [
-                    _publish(),
-                    _publish(publish_id=OLDER, is_current_publish=False),
-                ]
-            if "db_profile" in sql:
-                return [_profile()]
-            raise AssertionError(sql)
+        def get(self, model, key):
+            if model.__name__ == "DbSourceInfo":
+                return self.source if key == SOURCE_ID else None
+            if model.__name__ == "DbProfile":
+                return self.profile if key == SOURCE_ID else None
+            if model.__name__ == "PublishRunInfo":
+                return self.run if key == RUN else None
+            raise AssertionError(model)
 
     @contextmanager
     def fake_session(_settings):
@@ -186,15 +171,13 @@ def test_get_asset_profile_reads_current_row(monkeypatch):
     )
     assert result["state"] == "ready"
     assert result["profile"]["os_platform"] == "Windows x86_64"
+    assert result["publish"]["publish_run_id"] == str(RUN)
 
 
 def test_missing_source_is_404(monkeypatch):
     class Session:
         def get(self, _model, _key):
             return None
-
-        def scalars(self, _stmt):
-            raise AssertionError("不存在的数据源不应查询发布记录")
 
     @contextmanager
     def fake_session(_settings):

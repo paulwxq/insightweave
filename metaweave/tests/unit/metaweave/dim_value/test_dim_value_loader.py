@@ -20,8 +20,15 @@ class FakeMilvusClient:
     def test_connection(self) -> bool:
         return True
 
-    def ensure_collection(self, collection_name, schema, index_params, clean=False,
-                          validate_schema=False, index_field_name="embedding"):
+    def ensure_collection(
+        self,
+        collection_name,
+        schema,
+        index_params,
+        clean=False,
+        validate_schema=False,
+        index_field_name="embedding",
+    ):
         self.collection = collection_name
 
     def connect(self):
@@ -70,11 +77,23 @@ def _write_metadata_config(path: Path):
                 },
                 "embedding": {
                     "active": "qwen",
-                    "providers": {"qwen": {"model": "text-embedding-v3", "api_key": "k", "dimensions": 1024}},
+                    "providers": {
+                        "qwen": {
+                            "model": "text-embedding-v3",
+                            "api_key": "k",
+                            "dimensions": 1024,
+                        }
+                    },
                 },
                 "vector_database": {
                     "active": "milvus",
-                    "providers": {"milvus": {"host": "localhost", "port": 19530, "database": "nl2sql"}},
+                    "providers": {
+                        "milvus": {
+                            "host": "localhost",
+                            "port": 19530,
+                            "database": "nl2sql",
+                        }
+                    },
                 },
             }
         ),

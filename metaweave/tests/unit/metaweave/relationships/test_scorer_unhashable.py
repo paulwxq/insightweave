@@ -14,6 +14,7 @@ from metaweave.core.relationships.scorer import RelationshipScorer
 # _make_hashable
 # ===========================================================================
 
+
 class TestMakeHashable:
 
     def test_int_passthrough(self):
@@ -58,6 +59,7 @@ class TestMakeHashable:
     def test_datetime_passthrough(self):
         """datetime 是可哈希的，应直接返回"""
         from datetime import datetime
+
         dt = datetime(2025, 1, 1)
         assert RelationshipScorer._make_hashable(dt) == dt
 
@@ -65,6 +67,7 @@ class TestMakeHashable:
 # ===========================================================================
 # _extract_value_set（需要 mock scorer 实例，但只用到 staticmethod 调用）
 # ===========================================================================
+
 
 class TestExtractValueSetWithUnhashable:
     """验证 _extract_value_set 对不可哈希类型的安全处理"""
@@ -74,6 +77,7 @@ class TestExtractValueSetWithUnhashable:
         """构造最简 scorer 实例（只需要 _extract_value_set 可调用）"""
         # scorer.__init__ 需要 config 和 connector，用 mock 绕过
         from unittest.mock import MagicMock
+
         s = object.__new__(RelationshipScorer)
         s.config = {}
         s.connector = MagicMock()

@@ -129,7 +129,7 @@ def main():
         print(f"输出文件: {len(result.output_files)} 个")
         
         if result.errors:
-            print(f"\n错误列表:")
+            print("\n错误列表:")
             for error in result.errors[:5]:
                 print(f"  - {error}")
             if len(result.errors) > 5:

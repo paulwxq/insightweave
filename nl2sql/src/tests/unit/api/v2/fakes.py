@@ -87,7 +87,7 @@ class FakeStore:
 
 
 def make_registration(
-    source_id: str = "11111111-1111-1111-1111-111111111111",
+    source_id: str = "db_src_1",
     db_name: str = "ordersdb",
 ) -> SourceRegistration:
     return SourceRegistration(
@@ -174,14 +174,14 @@ def make_evidence(evidence_id: str = "ev_1", result_ref: str = "res_" + "a" * 32
 class FakeBackend:
     """ReadinessBackend 可控 fake（默认全就绪）。"""
 
-    def __init__(self, source_id: str = "11111111-1111-1111-1111-111111111111"):
+    def __init__(self, source_id: str = "db_src_1"):
         from src.api.v2.readiness import MilvusFacts, Neo4jFacts
 
         self.source_id = source_id
         self.registration = make_registration(source_id)
         self.lookup_status = "ok"
         self.lookup_detail = ""
-        self.job_id = "job-1"
+        self.workspace_id = "ws-1"
         self.publish_id_ts: str = "pub-ts-1"
         self.publish_id_rel: Optional[str] = "pub-rel-1"
         self.optional_steps: dict[str, Optional[str]] = {}
@@ -206,18 +206,16 @@ class FakeBackend:
             {
                 "step_name": "table_schema",
                 "status": "success",
-                "is_current_publish": True,
-                "publish_id": self.publish_id_ts,
-                "job_id": self.job_id,
-                "created_at": "2026-10-01T00:00:00+00:00",
+                "publish_run_id": self.publish_id_ts,
+                "workspace_id": self.workspace_id,
+                "published_at": "2026-10-01T00:00:00+00:00",
             },
             {
                 "step_name": "rel",
                 "status": "success",
-                "is_current_publish": True,
-                "publish_id": self.publish_id_rel,
-                "job_id": self.job_id,
-                "created_at": "2026-10-01T00:00:00+00:00",
+                "publish_run_id": self.publish_id_rel,
+                "workspace_id": self.workspace_id,
+                "published_at": "2026-10-01T00:00:00+00:00",
             },
         ]
         for step, publish_id in self.optional_steps.items():
@@ -227,10 +225,9 @@ class FakeBackend:
                 {
                     "step_name": step,
                     "status": "success",
-                    "is_current_publish": True,
-                    "publish_id": publish_id,
-                    "job_id": self.job_id,
-                    "created_at": "2026-10-01T00:00:00+00:00",
+                    "publish_run_id": publish_id,
+                    "workspace_id": self.workspace_id,
+                    "published_at": "2026-10-01T00:00:00+00:00",
                 }
             )
         return rows

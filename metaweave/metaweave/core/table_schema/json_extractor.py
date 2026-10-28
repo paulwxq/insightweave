@@ -49,7 +49,9 @@ class JSONExtractor:
             if any(keyword in data_type for keyword in TIME_TYPE_KEYWORDS):
                 time_cols.append(col_name)
             elif any(suspicious in data_type for suspicious in ["date", "time"]):
-                logger.warning("可疑的未识别时间类型: 列=%s, data_type=%s", col_name, data_type)
+                logger.warning(
+                    "可疑的未识别时间类型: 列=%s, data_type=%s", col_name, data_type
+                )
 
         return time_cols
 
@@ -59,4 +61,3 @@ class JSONExtractor:
 
 
 __all__ = ["JSONExtractor", "TIME_TYPE_KEYWORDS"]
-

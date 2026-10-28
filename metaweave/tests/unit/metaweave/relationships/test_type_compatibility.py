@@ -1,5 +1,9 @@
 import pytest
-from metaweave.core.relationships.type_compatibility import get_type_compatibility_score, meets_type_compatibility_threshold
+from metaweave.core.relationships.type_compatibility import (
+    get_type_compatibility_score,
+    meets_type_compatibility_threshold,
+)
+
 
 def test_type_compatibility():
     # 至少覆盖：

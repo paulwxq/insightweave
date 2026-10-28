@@ -17,7 +17,7 @@ from metaweave.core.metadata.execution import (
 )
 from metaweave.core.cql_generator.models import CQLGenerationResult
 
-SOURCE_ID = "0f0e8d64-9d3a-4d0f-8d5f-2a3b4c5d6e7f"
+SOURCE_ID = "db_src_1"
 
 
 def _cfg(tmp_path: Path) -> Path:
@@ -47,12 +47,14 @@ class TestExecuteCqlSourceId:
         assert "--source-id" in result["message"]
         assert "实体键" in result["message"]
 
-    def test_invalid_uuid_rejected(self, tmp_path, monkeypatch):
+    def test_invalid_short_id_rejected(self, tmp_path, monkeypatch):
         monkeypatch.setattr(
             "services.config_loader.load_config", lambda _p: {"output": {}}
         )
         req = MetadataExecutionRequest(
-            config_path=_cfg(tmp_path), operation="cql", cql_source_id="not-uuid"
+            config_path=_cfg(tmp_path),
+            operation="cql",
+            cql_source_id="not-a-short-id",
         )
         result = execute_cql(req)
         assert result["success"] is False

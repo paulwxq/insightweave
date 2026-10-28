@@ -14,8 +14,8 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
-from uuid import UUID
 
 from src.utils.logger import get_module_logger
 
@@ -93,7 +93,18 @@ def _decrypt_password(ciphertext: str) -> str:
         ) from exc
 
 
-def resolve_source_registration(source_id: str | UUID) -> SourceRegistration:
+SOURCE_ID_RE = re.compile(r"^db_src_[1-9][0-9]*$")
+
+
+def normalize_short_source_id(value: object) -> str:
+    """数据源短 ID 校验与规范化（doc 6 §1：db_src_1 等 text 短 ID）。"""
+    text = str(value).strip() if isinstance(value, (str, int)) else ""
+    if not SOURCE_ID_RE.match(text):
+        raise ValueError(f"source_id 不是合法短 ID（形如 db_src_1）: {value!r}")
+    return text
+
+
+def resolve_source_registration(source_id) -> SourceRegistration:
     """按 source_id 读取并校验登记源（doc 4 §5.3 的后端解析）。
 
     Raises:
@@ -103,9 +114,9 @@ def resolve_source_registration(source_id: str | UUID) -> SourceRegistration:
     import psycopg
 
     try:
-        normalized = str(UUID(str(source_id).strip()))
+        normalized = normalize_short_source_id(source_id)
     except (ValueError, AttributeError):
-        raise SourceResolutionError(f"source_id 不是合法 UUID: {source_id!r}") from None
+        raise SourceResolutionError(f"source_id 不是合法短 ID: {source_id!r}") from None
 
     try:
         with psycopg.connect(_platform_conninfo(), connect_timeout=10) as conn:

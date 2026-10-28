@@ -1,13 +1,12 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
 
-import { getDomainConfig, getDomainTables, putDomainConfig } from '../api/dataSources'
+import { getDomainConfig, getDomainTables, putDomainConfig } from '../api/workspaces'
 import { ApiError } from '../api/http'
 import type { DomainConfigDomain, DomainConfigTableOption } from '../api/types'
 
 const props = defineProps<{
-  sourceId: string
-  jobId: string
+  workspaceId: string
 }>()
 
 const emit = defineEmits<{
@@ -75,7 +74,14 @@ function pickerOptions(index: number) {
 
 function reasonOf(error: unknown) {
   if (error instanceof ApiError) {
-    const reason = error.details && !Array.isArray(error.details) ? error.details.reason : ''
+    const details = error.details
+    const reason =
+      typeof details === 'object' &&
+      details !== null &&
+      !Array.isArray(details) &&
+      'reason' in details
+        ? (details as { reason?: unknown }).reason
+        : ''
     if (typeof reason === 'string' && reason) return reason
     return error.message
   }
@@ -88,8 +94,8 @@ async function load() {
   saveError.value = ''
   try {
     const [config, tables] = await Promise.all([
-      getDomainConfig(props.sourceId, props.jobId),
-      getDomainTables(props.sourceId, props.jobId),
+      getDomainConfig(props.workspaceId),
+      getDomainTables(props.workspaceId),
     ])
     fingerprint.value = config.fingerprint
     dbName.value = config.database.name
@@ -201,7 +207,7 @@ async function save() {
   }
   saving.value = true
   try {
-    await putDomainConfig(props.sourceId, props.jobId, {
+    await putDomainConfig(props.workspaceId, {
       fingerprint: fingerprint.value,
       database: { name: dbName.value, description: dbDescription.value },
       max_domains_per_table: maxDomains.value,

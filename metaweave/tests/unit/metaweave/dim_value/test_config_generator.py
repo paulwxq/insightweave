@@ -13,7 +13,11 @@ def test_generate_dim_tables(tmp_path: Path):
     (json_dir / "dvdrental.public.dim_company.json").write_text(
         json.dumps(
             {
-                "object_info": {"database": "dvdrental", "schema_name": "public", "object_name": "dim_company"},
+                "object_info": {
+                    "database": "dvdrental",
+                    "schema_name": "public",
+                    "object_name": "dim_company",
+                },
                 "table_profile": {"table_category": "dim"},
             }
         ),
@@ -36,7 +40,11 @@ def test_generate_dim_tables(tmp_path: Path):
     (json_dir / "fact_sales.json").write_text(
         json.dumps(
             {
-                "table_profile": {"table_category": "fact", "schema_name": "public", "table_name": "fact_sales"}
+                "table_profile": {
+                    "table_category": "fact",
+                    "schema_name": "public",
+                    "table_name": "fact_sales",
+                }
             }
         ),
         encoding="utf-8",

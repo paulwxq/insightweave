@@ -16,7 +16,13 @@ class BaseVectorClient(ABC):
         """测试连接是否正常。"""
 
     @abstractmethod
-    def ensure_collection(self, collection_name: str, schema: Any, index_params: Dict[str, Any], clean: bool = False) -> Any:
+    def ensure_collection(
+        self,
+        collection_name: str,
+        schema: Any,
+        index_params: Dict[str, Any],
+        clean: bool = False,
+    ) -> Any:
         """确保集合存在并创建索引。"""
 
     @abstractmethod
@@ -30,4 +36,3 @@ class BaseVectorClient(ABC):
     @abstractmethod
     def close(self) -> None:
         """关闭连接。"""
-

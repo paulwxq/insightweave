@@ -35,13 +35,15 @@ class SessionCreateRequest(StrictModel):
 
     @field_validator("source_id")
     @classmethod
-    def _uuid(cls, value: str) -> str:
-        import uuid
+    def _short_id(cls, value: str) -> str:
+        from src.modules.db_deepagent.source_registry import (
+            normalize_short_source_id,
+        )
 
         try:
-            return str(uuid.UUID(value.strip()))
+            return normalize_short_source_id(value)
         except ValueError:
-            raise ValueError("source_id 必须是合法 UUID") from None
+            raise ValueError("source_id 必须是合法短 ID（形如 db_src_1）") from None
 
 
 class QueryRequest(StrictModel):
@@ -61,13 +63,15 @@ class QueryRequest(StrictModel):
 
     @field_validator("source_id")
     @classmethod
-    def _uuid(cls, value: str) -> str:
-        import uuid
+    def _short_id(cls, value: str) -> str:
+        from src.modules.db_deepagent.source_registry import (
+            normalize_short_source_id,
+        )
 
         try:
-            return str(uuid.UUID(value.strip()))
+            return normalize_short_source_id(value)
         except ValueError:
-            raise ValueError("source_id 必须是合法 UUID") from None
+            raise ValueError("source_id 必须是合法短 ID（形如 db_src_1）") from None
 
 
 # ---------------------------------------------------------------- 响应模型

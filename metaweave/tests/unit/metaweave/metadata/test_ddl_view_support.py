@@ -143,9 +143,7 @@ def test_ddl_sampling_uses_limit_without_ordering() -> None:
 
 def test_ddl_sampling_uses_configured_count_and_deduplicates_in_memory() -> None:
     generator = MetadataGenerator.__new__(MetadataGenerator)
-    generator.formatter = MagicMock(
-        sample_record_options={"enabled": True, "count": 4}
-    )
+    generator.formatter = MagicMock(sample_record_options={"enabled": True, "count": 4})
     generator.connector = MagicMock()
     generator.connector.sample_data_preserving_types.return_value = pd.DataFrame(
         [
@@ -170,9 +168,7 @@ def test_ddl_sampling_uses_configured_count_and_deduplicates_in_memory() -> None
 
 def test_ddl_sampling_count_zero_skips_database_query() -> None:
     generator = MetadataGenerator.__new__(MetadataGenerator)
-    generator.formatter = MagicMock(
-        sample_record_options={"enabled": True, "count": 0}
-    )
+    generator.formatter = MagicMock(sample_record_options={"enabled": True, "count": 0})
     generator.connector = MagicMock()
 
     assert generator._sample_data_for_ddl("public", "events") is None
@@ -236,11 +232,15 @@ def test_extractor_skips_constraints_for_view_and_keeps_mv_indexes() -> None:
     connector = MagicMock()
     connector.check_database_object_exists.return_value = True
     extractor = MetadataExtractor(connector)
-    extractor.extract_table_info = MagicMock(return_value={"object_comment": "汇总对象"})
+    extractor.extract_table_info = MagicMock(
+        return_value={"object_comment": "汇总对象"}
+    )
     extractor.extract_columns = MagicMock(
         return_value=[ColumnInfo("order_id", 1, "bigint")]
     )
-    extractor.extract_view_definition = MagicMock(return_value="SELECT order_id FROM orders")
+    extractor.extract_view_definition = MagicMock(
+        return_value="SELECT order_id FROM orders"
+    )
     extractor.extract_primary_keys = MagicMock()
     extractor.extract_foreign_keys = MagicMock()
     extractor.extract_unique_constraints = MagicMock()
@@ -297,9 +297,10 @@ def test_extractor_keeps_complete_index_definition() -> None:
     assert len(indexes) == 1
     assert indexes[0].is_unique is True
     assert indexes[0].condition == "order_id > 0"
-    assert indexes[0].definition == connector.execute_query.return_value[0][
-        "index_definition"
-    ]
+    assert (
+        indexes[0].definition
+        == connector.execute_query.return_value[0]["index_definition"]
+    )
 
 
 def test_formatter_generates_view_ddl_and_object_metadata(tmp_path) -> None:
@@ -438,8 +439,7 @@ def test_formatter_keeps_standalone_unique_index_for_table(tmp_path) -> None:
     ddl = formatter.generate_ddl(metadata)
 
     assert (
-        "CREATE UNIQUE INDEX orders_external_id_uidx "
-        "ON public.orders(external_id);"
+        "CREATE UNIQUE INDEX orders_external_id_uidx " "ON public.orders(external_id);"
     ) in ddl
 
 

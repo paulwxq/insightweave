@@ -29,14 +29,14 @@ def _cfg(rel_dir="out/rel", domains_dir="out/domains"):
 @pytest.fixture
 def env(tmp_path, monkeypatch):
     """项目根指向 tmp；预置 rel 目录旧产物。"""
-    monkeypatch.setattr(
-        "metaweave.utils.file_utils.get_project_root", lambda: tmp_path
-    )
+    monkeypatch.setattr("metaweave.utils.file_utils.get_project_root", lambda: tmp_path)
     rel_dir = tmp_path / "out" / "rel"
     rel_dir.mkdir(parents=True)
     old = rel_dir / "relationships_global.json"
     old.write_text('{"old": true}', encoding="utf-8")
-    (tmp_path / "cfg.yaml").write_text("database:\n  database: demo\n", encoding="utf-8")
+    (tmp_path / "cfg.yaml").write_text(
+        "database:\n  database: demo\n", encoding="utf-8"
+    )
     return tmp_path, rel_dir, old
 
 
@@ -123,8 +123,14 @@ class TestValidDomainsCleansAndRuns:
         calls = []
 
         class _DummyPipeline:
-            def __init__(self, config_path, domain_filter=None, cross_domain=False,
-                         domain_resolver=None, config=None):
+            def __init__(
+                self,
+                config_path,
+                domain_filter=None,
+                cross_domain=False,
+                domain_resolver=None,
+                config=None,
+            ):
                 calls.append("init")
                 assert domain_resolver is not None  # 非空校验通过后才构造
 

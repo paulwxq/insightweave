@@ -3,4 +3,3 @@
 from .milvus_client import MilvusClient  # noqa: F401
 
 __all__ = ["MilvusClient"]
-

@@ -6,9 +6,7 @@ from typing import Dict, List, Optional, Tuple
 
 
 # 保留以兼容旧导入；字段行解析已改为 §5.1 的结构化规则，不再使用该正则。
-COLUMN_PATTERN = re.compile(
-    r"^-\s+([\w.-]+)\s+\([^)]+\)\s+-\s+(.+?)(?:\s+\[示例:.*)?$"
-)
+COLUMN_PATTERN = re.compile(r"^-\s+([\w.-]+)\s+\([^)]+\)\s+-\s+(.+?)(?:\s+\[示例:.*)?$")
 TABLE_NAME_PATTERN = re.compile(r"^#\s+([\w.]+)")
 
 # 字段列表章节标题：接受生成器现用的“## 字段列表：”，也接受“## 字段列表”。
@@ -116,10 +114,10 @@ class MDParser:
                     break
         if type_end < 0:
             raise fail(f"字段 {name} 的类型括号未闭合")
-        if not rest[type_start + 1:type_end].strip():
+        if not rest[type_start + 1 : type_end].strip():
             raise fail(f"字段 {name} 的类型为空")
 
-        separator = _SEPARATOR.match(rest[type_end + 1:])
+        separator = _SEPARATOR.match(rest[type_end + 1 :])
         if separator is None:
             raise fail(f"字段 {name} 缺少描述分隔符")
         after = separator.group("after") or ""

@@ -12,4 +12,3 @@ __author__ = "MetaWeave Team"
 from metaweave.core.metadata.generator import MetadataGenerator
 
 __all__ = ["MetadataGenerator"]
-

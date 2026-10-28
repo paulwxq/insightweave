@@ -101,7 +101,9 @@ def test_insert_batch_keeps_non_auto_primary_field(monkeypatch):
 
 
 class _SchemaField:
-    def __init__(self, name, dtype="VARCHAR", is_primary=False, auto_id=False, **params):
+    def __init__(
+        self, name, dtype="VARCHAR", is_primary=False, auto_id=False, **params
+    ):
         self.name = name
         self.dtype = dtype
         self.is_primary = is_primary
@@ -184,7 +186,10 @@ class _UpsertCollection:
 
     def __init__(self, name, using=None):
         self.schema = SimpleNamespace(
-            fields=[_SchemaField("entity_id", is_primary=True), _SchemaField("source_id")]
+            fields=[
+                _SchemaField("entity_id", is_primary=True),
+                _SchemaField("source_id"),
+            ]
         )
 
     def upsert(self, entities):
@@ -213,7 +218,8 @@ def test_upsert_batch_returns_server_confirmed_count(monkeypatch):
     _patch_upsert_collection(monkeypatch, SimpleNamespace(primary_keys=["a", "b"]))
 
     written = MilvusClient(config={}).upsert_batch(
-        "c", [{"entity_id": "a", "source_id": "s"}, {"entity_id": "b", "source_id": "s"}]
+        "c",
+        [{"entity_id": "a", "source_id": "s"}, {"entity_id": "b", "source_id": "s"}],
     )
 
     assert written == 2
@@ -221,7 +227,9 @@ def test_upsert_batch_returns_server_confirmed_count(monkeypatch):
 
 
 @pytest.mark.parametrize("response", [None, SimpleNamespace(primary_keys=[])])
-def test_upsert_batch_does_not_report_input_count_when_response_is_missing(monkeypatch, response):
+def test_upsert_batch_does_not_report_input_count_when_response_is_missing(
+    monkeypatch, response
+):
     _patch_upsert_collection(monkeypatch, response)
 
     written = MilvusClient(config={}).upsert_batch(
@@ -239,7 +247,9 @@ def test_delete_by_expr_passes_filter_and_does_not_flush(monkeypatch):
     )
 
     assert deleted == 3
-    assert _UpsertCollection.calls == [("delete", 'source_id == "s" and publish_id != "p"')]
+    assert _UpsertCollection.calls == [
+        ("delete", 'source_id == "s" and publish_id != "p"')
+    ]
 
 
 def test_delete_by_expr_zero_matches_is_success(monkeypatch):
@@ -284,7 +294,15 @@ def _patch_connect(monkeypatch, db):
     monkeypatch.setattr(
         milvus_module,
         "_lazy_import_milvus",
-        lambda: (_FakeConnections(), db, None, None, None, None, SimpleNamespace(list_collections=lambda using=None: [])),
+        lambda: (
+            _FakeConnections(),
+            db,
+            None,
+            None,
+            None,
+            None,
+            SimpleNamespace(list_collections=lambda using=None: []),
+        ),
     )
 
 
@@ -307,4 +325,6 @@ def test_connect_creates_missing_database_when_requested(monkeypatch):
 
     assert client.test_connection(create_database=True) is True
 
-    assert db.created == ["nl2sql"] and db.used == ["nl2sql"] and client.connected is True
+    assert (
+        db.created == ["nl2sql"] and db.used == ["nl2sql"] and client.connected is True
+    )

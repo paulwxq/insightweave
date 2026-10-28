@@ -129,7 +129,11 @@ def deep_merge_dict(base: dict, override: dict) -> dict:
     """
     result = dict(base)
     for key, override_val in override.items():
-        if key in result and isinstance(result[key], dict) and isinstance(override_val, dict):
+        if (
+            key in result
+            and isinstance(result[key], dict)
+            and isinstance(override_val, dict)
+        ):
             result[key] = deep_merge_dict(result[key], override_val)
         else:
             result[key] = copy.deepcopy(override_val)

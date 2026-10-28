@@ -148,9 +148,7 @@ class TestValidateSQL:
         )
         result = validator.validate_sql("SELECT 1;")
         assert result.valid
-        assert any(
-            "default_transaction_read_only" in sql for sql in cursor.executed
-        )
+        assert any("default_transaction_read_only" in sql for sql in cursor.executed)
 
     def test_set_local_statement_timeout(self):
         cursor = FakeCursor()
@@ -334,10 +332,16 @@ class TestExtractTableNames:
 
 class TestExtractDbName:
     def test_standard_filename(self):
-        assert SQLValidator._extract_db_name("output/sql-rag/qs_dvdrental_pair.json") == "dvdrental"
+        assert (
+            SQLValidator._extract_db_name("output/sql-rag/qs_dvdrental_pair.json")
+            == "dvdrental"
+        )
 
     def test_underscore_in_name(self):
-        assert SQLValidator._extract_db_name("qs_sakila_dvd_rental_pair.json") == "sakila_dvd_rental"
+        assert (
+            SQLValidator._extract_db_name("qs_sakila_dvd_rental_pair.json")
+            == "sakila_dvd_rental"
+        )
 
     def test_non_standard(self):
         assert SQLValidator._extract_db_name("some_other_file.json") == ""
@@ -347,7 +351,9 @@ class TestLoadTableMd:
     def test_load_existing_md(self, tmp_path):
         md_dir = tmp_path / "md"
         md_dir.mkdir()
-        (md_dir / "testdb.public.orders.md").write_text("# orders\ncolumns...", encoding="utf-8")
+        (md_dir / "testdb.public.orders.md").write_text(
+            "# orders\ncolumns...", encoding="utf-8"
+        )
 
         validator = SQLValidator(
             connector=FakeConnector(), config={}, md_dir=str(md_dir)
@@ -382,6 +388,7 @@ class TestLoadTableMd:
 
 from metaweave.core.sql_rag.context_utils import extract_relevant_relationship_sections
 
+
 class TestExtractRelevantRelationshipSections:
     def test_extract_matching_sections(self, tmp_path):
         rel_dir = tmp_path / "rel"
@@ -399,9 +406,13 @@ class TestExtractRelevantRelationshipSections:
 ### 3. public.orders.product_id → public.products.product_id
 - **类型**: 单列
 """
-        (rel_dir / "testdb.relationships_global.md").write_text(rel_content, encoding="utf-8")
+        (rel_dir / "testdb.relationships_global.md").write_text(
+            rel_content, encoding="utf-8"
+        )
 
-        result = extract_relevant_relationship_sections(str(rel_dir), ["orders", "customers"], "testdb")
+        result = extract_relevant_relationship_sections(
+            str(rel_dir), ["orders", "customers"], "testdb"
+        )
         assert "orders.customer_id" in result
         assert "orders.product_id" in result
         assert "film.language_id" not in result
@@ -412,4 +423,7 @@ class TestExtractRelevantRelationshipSections:
     def test_missing_rel_file(self, tmp_path):
         rel_dir = tmp_path / "rel"
         rel_dir.mkdir()
-        assert extract_relevant_relationship_sections(str(rel_dir), ["orders"], "testdb") == ""
+        assert (
+            extract_relevant_relationship_sections(str(rel_dir), ["orders"], "testdb")
+            == ""
+        )

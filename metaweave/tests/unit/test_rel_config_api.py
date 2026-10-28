@@ -1,18 +1,17 @@
-"""doc 23.2 批次 2：rel 编辑 API 三端点单元测试（A06–A10、A21、A25）。
+"""doc 23.2 批次 2、6.2 §5.2：rel 编辑 API 三端点单元测试（新模型）。
 
-FakeSession 提供 get(JobInfo)/get(DbSourceInfo) 最小分发；产物目录按受管
-布局在 tmp_path 落盘（rel/{db}.relationships_global.{json,md} + json 画像）。
-PUT 的源行锁/主配置快照/渲染函数均在模块命名空间打桩。
+按工作区定位（read/write_rel_config(settings, workspace_id)）；准入 = rel
+目录顶层唯一成功采集 marker；PUT 持工作区行锁 + 指纹乐观并发 + 逐条校验
+（D7/D8）+ statistics 重算 + 文件级备份（json+md 两文件）+ 两阶段写回。
 """
 
 import hashlib
 import json
 import re
 from contextlib import contextmanager
-from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from uuid import uuid4
+from uuid import UUID
 
 import pytest
 
@@ -25,25 +24,39 @@ from backend.profile_loading.rel_config_api import (
     read_rel_object_columns,
     write_rel_config,
 )
+from backend.workspace_files.backups import EditBackupFailedError
+from backend.workspace_files.markers import (
+    list_collection_markers,
+    write_collection_marker,
+)
+from backend.profile_loading.db_loader import MetaLoadSourceDisabledError
 
-SOURCE_ID = uuid4()
-JOB_ID = uuid4()
+SOURCE_ID = "db_src_1"
+WORKSPACE_ID = "ws_1"
+RUN_ID = UUID("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee")
 DB_NAME = "demo"
-STEP_AT = datetime(2026, 10, 10, 0, 0, 0, tzinfo=timezone.utc)
 REL_DIR_NAME = "rel"
+SETTINGS = object()
 
 
 class FakeSession:
-    def __init__(self, step_row=None, source_row=None):
-        self.step_row = step_row
+    def __init__(self, workspace_row=None, source_row=None):
+        self.workspace_row = workspace_row
         self.source_row = source_row
+        self.events: list[str] = []
 
-    def get(self, model, key):
-        from backend.persistence.models import DbSourceInfo, JobInfo
+    def get(self, model, key, with_for_update=None):
+        from backend.persistence.models import DbSourceInfo, WorkspaceInfo
 
-        if model is JobInfo:
-            return self.step_row
+        if model is WorkspaceInfo:
+            if with_for_update:
+                self.events.append(("lock", key))
+            if self.workspace_row is None or key != self.workspace_row.workspace_id:
+                return None
+            return self.workspace_row
         if model is DbSourceInfo:
+            if self.source_row is None or key != self.source_row.source_id:
+                return None
             return self.source_row
         raise AssertionError(f"unexpected model {model}")  # pragma: no cover
 
@@ -53,19 +66,16 @@ def _fake_platform_session(session):
     yield session
 
 
-def _step_row(status="success", updated_at=STEP_AT):
-    return SimpleNamespace(
-        job_id=JOB_ID, step_name="rel", last_status=status, updated_at=updated_at
-    )
+def _workspace_row():
+    return SimpleNamespace(workspace_id=WORKSPACE_ID, source_id=SOURCE_ID)
 
 
-def _source_row():
+def _source_row(is_active=True):
     return SimpleNamespace(
         source_id=SOURCE_ID,
         db_name=DB_NAME,
-        is_active=True,
+        is_active=is_active,
         selected_schemas=["public"],
-        updated_at=STEP_AT,
     )
 
 
@@ -161,8 +171,8 @@ TABLE_COLUMNS = {
 }
 
 
-def _write_workspace(tmp_path: Path, relationships=None) -> Path:
-    root = tmp_path / "output" / str(SOURCE_ID) / str(JOB_ID)
+def _write_workspace(tmp_path: Path, relationships=None, marker="success") -> Path:
+    root = tmp_path / "output" / SOURCE_ID / WORKSPACE_ID
     rel_dir = root / REL_DIR_NAME
     rel_dir.mkdir(parents=True, exist_ok=True)
     json_dir = root / "json"
@@ -197,36 +207,36 @@ def _write_workspace(tmp_path: Path, relationships=None) -> Path:
     (rel_dir / f"{DB_NAME}.relationships_global.md").write_text(
         "# 表间关系发现报告\n（采集直出）\n", encoding="utf-8"
     )
+    if marker is not None:
+        write_collection_marker(rel_dir, RUN_ID, marker)
     return root
 
 
-def _install(monkeypatch, tmp_path, step_status="success", workspace=True):
+def _install(
+    monkeypatch,
+    tmp_path,
+    *,
+    marker="success",
+    workspace=True,
+    is_active=True,
+):
     import backend.profile_loading.rel_config_api as api
+    from metaweave.utils import file_utils
 
     if workspace:
-        _write_workspace(tmp_path)
-    root = tmp_path / "output" / str(SOURCE_ID) / str(JOB_ID)
-    session = FakeSession(
-        step_row=_step_row(status=step_status), source_row=_source_row()
-    )
-    rec = SimpleNamespace(locked=[])
+        _write_workspace(tmp_path, marker=marker)
+    session = FakeSession(_workspace_row(), _source_row(is_active=is_active))
 
+    # 项目根指向 tmp_path：模块级与函数内局部 import 的 resolver 一并生效
+    monkeypatch.setattr(file_utils, "get_project_root", lambda: tmp_path)
     monkeypatch.setattr(
         api, "platform_session", lambda settings: _fake_platform_session(session)
     )
+    monkeypatch.setattr(api, "get_db_source", lambda _session, _sid: session.source_row)
     monkeypatch.setattr(
-        api,
-        "resolve_rel_output_dir",
-        lambda s, j: root / REL_DIR_NAME,
+        "backend.workspaces.repository.get_workspace",
+        lambda _session, _wid: session.workspace_row,
     )
-    monkeypatch.setattr(api, "resolve_json_output_dir", lambda s, j: root / "json")
-    monkeypatch.setattr(api, "assert_workspace_owner", lambda *a: None)
-
-    def fake_lock(_session, source_uuid):
-        rec.locked.append(source_uuid)
-        return _source_row()
-
-    monkeypatch.setattr(api, "lock_db_source_row", fake_lock)
     monkeypatch.setattr(
         api,
         "load_main_config_snapshot",
@@ -237,7 +247,15 @@ def _install(monkeypatch, tmp_path, step_status="success", workspace=True):
             }
         },
     )
-    return rec
+    return session
+
+
+def _rel_paths(tmp_path):
+    rel_dir = tmp_path / "output" / SOURCE_ID / WORKSPACE_ID / "rel"
+    return (
+        rel_dir / f"{DB_NAME}.relationships_global.json",
+        rel_dir / f"{DB_NAME}.relationships_global.md",
+    )
 
 
 def _fingerprint_of(path: Path) -> str:
@@ -283,7 +301,7 @@ def _slim(entry):
 
 def test_get_returns_relationships_fingerprint_tables_database(monkeypatch, tmp_path):
     _install(monkeypatch, tmp_path)
-    result = read_rel_config(object(), str(SOURCE_ID), str(JOB_ID))
+    result = read_rel_config(SETTINGS, WORKSPACE_ID)
 
     assert result["database"] == DB_NAME
     assert [r["relationship_id"] for r in result["relationships"]] == [
@@ -292,15 +310,8 @@ def test_get_returns_relationships_fingerprint_tables_database(monkeypatch, tmp_
         "rel_llm00000003",
     ]
     assert set(result["tables"]) == set(TABLE_COLUMNS)
-    rel_json = (
-        tmp_path
-        / "output"
-        / str(SOURCE_ID)
-        / str(JOB_ID)
-        / "rel"
-        / f"{DB_NAME}.relationships_global.json"
-    )
-    assert result["fingerprint"] == _fingerprint_of(rel_json)
+    json_path, _ = _rel_paths(tmp_path)
+    assert result["fingerprint"] == _fingerprint_of(json_path)
     # 桩配置没有 cql_generation 时与 CQLGenerator 缺省一致
     assert result["score_threshold"] == 0.9
 
@@ -314,37 +325,39 @@ def test_get_returns_configured_score_threshold(monkeypatch, tmp_path):
         "load_main_config_snapshot",
         lambda _p: {"cql_generation": {"composite_score_threshold": 0.95}},
     )
-    result = read_rel_config(object(), str(SOURCE_ID), str(JOB_ID))
+    result = read_rel_config(SETTINGS, WORKSPACE_ID)
     assert result["score_threshold"] == 0.95
     assert len(result["relationships"]) == 3
 
 
-@pytest.mark.parametrize("status", [None, "failed", "running"])
-def test_get_rejects_when_rel_row_not_success(monkeypatch, tmp_path, status):
-    _install(monkeypatch, tmp_path, step_status=status)
-    with pytest.raises(RelConfigOutputMissingError, match="重跑"):
-        read_rel_config(object(), str(SOURCE_ID), str(JOB_ID))
+@pytest.mark.parametrize(
+    "marker,match",
+    [(None, "没有 Rel 采集 marker"), ("failed", "重跑")],
+)
+def test_get_rejects_when_rel_marker_not_success(monkeypatch, tmp_path, marker, match):
+    _install(monkeypatch, tmp_path, marker=marker)
+    with pytest.raises(RelConfigOutputMissingError, match=match):
+        read_rel_config(SETTINGS, WORKSPACE_ID)
 
 
 def test_get_missing_artifact_raises(monkeypatch, tmp_path):
     _install(monkeypatch, tmp_path, workspace=False)
     with pytest.raises(RelConfigOutputMissingError):
-        read_rel_config(object(), str(SOURCE_ID), str(JOB_ID))
+        read_rel_config(SETTINGS, WORKSPACE_ID)
 
 
 def test_get_unparseable_artifact_raises(monkeypatch, tmp_path):
     _install(monkeypatch, tmp_path)
-    rel_json = (
-        tmp_path
-        / "output"
-        / str(SOURCE_ID)
-        / str(JOB_ID)
-        / "rel"
-        / f"{DB_NAME}.relationships_global.json"
-    )
-    rel_json.write_text("{not json", encoding="utf-8")
+    json_path, _ = _rel_paths(tmp_path)
+    json_path.write_text("{not json", encoding="utf-8")
     with pytest.raises(RelConfigInvalidError):
-        read_rel_config(object(), str(SOURCE_ID), str(JOB_ID))
+        read_rel_config(SETTINGS, WORKSPACE_ID)
+
+
+def test_get_disabled_source_raises(monkeypatch, tmp_path):
+    _install(monkeypatch, tmp_path, is_active=False)
+    with pytest.raises(MetaLoadSourceDisabledError):
+        read_rel_config(SETTINGS, WORKSPACE_ID)
 
 
 # ---- GET object-columns ----
@@ -352,32 +365,22 @@ def test_get_unparseable_artifact_raises(monkeypatch, tmp_path):
 
 def test_object_columns_returns_names_in_ordinal_order(monkeypatch, tmp_path):
     _install(monkeypatch, tmp_path)
-    result = read_rel_object_columns(
-        object(), str(SOURCE_ID), str(JOB_ID), "public", "orders"
-    )
+    result = read_rel_object_columns(SETTINGS, WORKSPACE_ID, "public", "orders")
     assert result["columns"] == ["id", "user_id", "amount"]
 
 
 def test_object_columns_unknown_object_raises(monkeypatch, tmp_path):
     _install(monkeypatch, tmp_path)
     with pytest.raises(RelConfigOutputMissingError):
-        read_rel_object_columns(object(), str(SOURCE_ID), str(JOB_ID), "public", "nope")
+        read_rel_object_columns(SETTINGS, WORKSPACE_ID, "public", "nope")
 
 
 # ---- PUT（A07–A10、A21、A25） ----
 
 
-def _rel_paths(tmp_path):
-    rel_dir = tmp_path / "output" / str(SOURCE_ID) / str(JOB_ID) / "rel"
-    return (
-        rel_dir / f"{DB_NAME}.relationships_global.json",
-        rel_dir / f"{DB_NAME}.relationships_global.md",
-    )
-
-
 def test_put_rejects_duplicate_endpoints_and_accepts_reverse(monkeypatch, tmp_path):
     """同一起点表/列与终点表/列（列顺序一致）不可再新增；方向相反是另一条。"""
-    _install(monkeypatch, tmp_path)
+    session = _install(monkeypatch, tmp_path)
     json_path, _md_path = _rel_paths(tmp_path)
     fp = _fingerprint_of(json_path)
     base = [_slim(FK_ENTRY), _slim(RULE_ENTRY), _slim(LLM_COMPOSITE_ENTRY)]
@@ -386,27 +389,27 @@ def test_put_rejects_duplicate_endpoints_and_accepts_reverse(monkeypatch, tmp_pa
     )
     with pytest.raises(RelConfigInvalidError, match="这条关系已存在"):
         write_rel_config(
-            object(),
-            str(SOURCE_ID),
-            str(JOB_ID),
+            SETTINGS,
+            WORKSPACE_ID,
             {"fingerprint": fp, "relationships": [*base, duplicate]},
         )
 
     reverse = _payload_entry("public.users", ["id"], "public.orders", ["user_id"])
     write_rel_config(
-        object(),
-        str(SOURCE_ID),
-        str(JOB_ID),
+        SETTINGS,
+        WORKSPACE_ID,
         {"fingerprint": fp, "relationships": [*base, reverse]},
     )
     data = json.loads(json_path.read_text(encoding="utf-8"))
     assert data["relationships"][-1]["from_table"]["table"] == "users"
     assert data["relationships"][-1]["to_table"]["table"] == "orders"
+    # 持工作区行锁（doc 6.2 §5.1）：每次 PUT（含被拒的那次）都先锁行
+    assert session.events.count(("lock", WORKSPACE_ID)) == 2
 
 
 def test_put_adds_manual_entry_with_d7_schema(monkeypatch, tmp_path):
     """A07：新增手工条目按 D7 定型；statistics 重算、遥测保留、md 重渲染。"""
-    rec = _install(monkeypatch, tmp_path)
+    _install(monkeypatch, tmp_path)
     json_path, md_path = _rel_paths(tmp_path)
     fp = _fingerprint_of(json_path)
 
@@ -418,9 +421,8 @@ def test_put_adds_manual_entry_with_d7_schema(monkeypatch, tmp_path):
         cardinality="M:N",
     )
     result = write_rel_config(
-        object(),
-        str(SOURCE_ID),
-        str(JOB_ID),
+        SETTINGS,
+        WORKSPACE_ID,
         {
             "fingerprint": fp,
             "relationships": [
@@ -431,7 +433,6 @@ def test_put_adds_manual_entry_with_d7_schema(monkeypatch, tmp_path):
             ],
         },
     )
-    assert rec.locked == [SOURCE_ID]
 
     data = json.loads(json_path.read_text(encoding="utf-8"))
     added = data["relationships"][-1]
@@ -475,9 +476,8 @@ def test_put_modifying_rule_entry_relabels_d8(monkeypatch, tmp_path):
         rid=RULE_ENTRY["relationship_id"],
     )
     write_rel_config(
-        object(),
-        str(SOURCE_ID),
-        str(JOB_ID),
+        SETTINGS,
+        WORKSPACE_ID,
         {
             "fingerprint": fp,
             "relationships": [_slim(FK_ENTRY), changed, _slim(LLM_COMPOSITE_ENTRY)],
@@ -514,9 +514,8 @@ def test_put_modifying_fk_entry_clears_constraint_name(monkeypatch, tmp_path):
         rid=FK_ENTRY["relationship_id"],
     )
     write_rel_config(
-        object(),
-        str(SOURCE_ID),
-        str(JOB_ID),
+        SETTINGS,
+        WORKSPACE_ID,
         {
             "fingerprint": fp,
             "relationships": [
@@ -545,9 +544,8 @@ def test_put_delete_updates_statistics_keeps_telemetry(monkeypatch, tmp_path):
     fp = _fingerprint_of(json_path)
 
     write_rel_config(
-        object(),
-        str(SOURCE_ID),
-        str(JOB_ID),
+        SETTINGS,
+        WORKSPACE_ID,
         {"fingerprint": fp, "relationships": [_slim(FK_ENTRY), _slim(RULE_ENTRY)]},
     )
 
@@ -565,9 +563,8 @@ def test_put_fingerprint_mismatch_raises_409(monkeypatch, tmp_path):
     _install(monkeypatch, tmp_path)
     with pytest.raises(RelRegeneratedError):
         write_rel_config(
-            object(),
-            str(SOURCE_ID),
-            str(JOB_ID),
+            SETTINGS,
+            WORKSPACE_ID,
             {"fingerprint": "stale0000000000ff", "relationships": []},
         )
 
@@ -581,9 +578,8 @@ def test_put_unknown_relationship_id_rejected(monkeypatch, tmp_path):
     )
     with pytest.raises(RelConfigInvalidError, match="未知 relationship_id"):
         write_rel_config(
-            object(),
-            str(SOURCE_ID),
-            str(JOB_ID),
+            SETTINGS,
+            WORKSPACE_ID,
             {"fingerprint": fp, "relationships": [entry]},
         )
 
@@ -598,9 +594,8 @@ def test_put_unknown_column_and_bad_cardinality_rejected(monkeypatch, tmp_path):
     )
     with pytest.raises(RelConfigInvalidError, match="列名"):
         write_rel_config(
-            object(),
-            str(SOURCE_ID),
-            str(JOB_ID),
+            SETTINGS,
+            WORKSPACE_ID,
             {"fingerprint": fp, "relationships": [bad_column]},
         )
 
@@ -609,9 +604,8 @@ def test_put_unknown_column_and_bad_cardinality_rejected(monkeypatch, tmp_path):
     )
     with pytest.raises(RelConfigInvalidError, match="基数"):
         write_rel_config(
-            object(),
-            str(SOURCE_ID),
-            str(JOB_ID),
+            SETTINGS,
+            WORKSPACE_ID,
             {"fingerprint": fp, "relationships": [bad_cardinality]},
         )
 
@@ -623,7 +617,7 @@ def test_put_empty_list_allowed(monkeypatch, tmp_path):
     fp = _fingerprint_of(json_path)
 
     result = write_rel_config(
-        object(), str(SOURCE_ID), str(JOB_ID), {"fingerprint": fp, "relationships": []}
+        SETTINGS, WORKSPACE_ID, {"fingerprint": fp, "relationships": []}
     )
 
     data = json.loads(json_path.read_text(encoding="utf-8"))
@@ -649,15 +643,81 @@ def test_put_substantive_unchanged_overwrites_client_fields(monkeypatch, tmp_pat
     tampered["metrics"] = {"inclusion_rate": 0.0}
 
     write_rel_config(
-        object(),
-        str(SOURCE_ID),
-        str(JOB_ID),
+        SETTINGS,
+        WORKSPACE_ID,
         {"fingerprint": fp, "relationships": [tampered]},
     )
 
     data = json.loads(json_path.read_text(encoding="utf-8"))
     kept = data["relationships"][0]
     assert kept == FK_ENTRY
+
+
+# ---- 文件级备份（doc 6.2 §5.2、A28/A30） ----
+
+
+def test_put_success_backs_up_both_files_and_keeps_marker(monkeypatch, tmp_path):
+    _install(monkeypatch, tmp_path)
+    json_path, md_path = _rel_paths(tmp_path)
+    json_before = json_path.read_bytes()
+    md_before = md_path.read_bytes()
+    marker_names = [p.name for p in list_collection_markers(json_path.parent)]
+    fp = _fingerprint_of(json_path)
+
+    write_rel_config(
+        SETTINGS,
+        WORKSPACE_ID,
+        {"fingerprint": fp, "relationships": [_slim(FK_ENTRY)]},
+    )
+
+    backup_root = json_path.parent / ".backup"
+    backups = sorted(backup_root.iterdir())
+    assert len(backups) == 1 and backups[0].name.startswith("bak_")
+    assert sorted(p.name for p in backups[0].iterdir()) == [
+        f"{DB_NAME}.relationships_global.json",
+        f"{DB_NAME}.relationships_global.md",
+    ]
+    assert (backups[0] / json_path.name).read_bytes() == json_before
+    assert (backups[0] / md_path.name).read_bytes() == md_before
+    assert [p.name for p in list_collection_markers(json_path.parent)] == marker_names
+
+
+def test_put_backup_failure_aborts_save_without_touching_anything(
+    monkeypatch, tmp_path
+):
+    """A28：备份失败 → 本次保存未执行，两份原文件与 marker 不动，无临时文件。"""
+    import backend.workspace_files.backups as backups_module
+
+    _install(monkeypatch, tmp_path)
+    json_path, md_path = _rel_paths(tmp_path)
+    json_before = json_path.read_bytes()
+    md_before = md_path.read_bytes()
+    marker_names = [p.name for p in list_collection_markers(json_path.parent)]
+    fp = _fingerprint_of(json_path)
+    calls = []
+
+    def failing_backup(directory, relative_paths, **kwargs):
+        calls.append((Path(directory), list(relative_paths)))
+        raise EditBackupFailedError("注入的备份失败")
+
+    monkeypatch.setattr(backups_module, "backup_files_before_edit", failing_backup)
+    with pytest.raises(RelWriteFailedError, match="备份失败"):
+        write_rel_config(
+            SETTINGS,
+            WORKSPACE_ID,
+            {"fingerprint": fp, "relationships": [_slim(FK_ENTRY)]},
+        )
+    assert calls == [
+        (
+            json_path.parent,
+            [json_path.name, md_path.name],
+        )
+    ]
+    assert json_path.read_bytes() == json_before
+    assert md_path.read_bytes() == md_before
+    assert [p.name for p in list_collection_markers(json_path.parent)] == marker_names
+    assert not (json_path.parent / ".backup").exists()
+    assert [p for p in json_path.parent.iterdir() if p.name.startswith(".tmp")] == []
 
 
 def test_put_render_failure_leaves_both_files_untouched(monkeypatch, tmp_path):
@@ -676,9 +736,8 @@ def test_put_render_failure_leaves_both_files_untouched(monkeypatch, tmp_path):
     monkeypatch.setattr(api, "render_markdown_report", boom)
     with pytest.raises(RelWriteFailedError):
         write_rel_config(
-            object(),
-            str(SOURCE_ID),
-            str(JOB_ID),
+            SETTINGS,
+            WORKSPACE_ID,
             {"fingerprint": fp, "relationships": [_slim(FK_ENTRY)]},
         )
 
@@ -690,20 +749,19 @@ def test_put_render_failure_leaves_both_files_untouched(monkeypatch, tmp_path):
     monkeypatch.undo()
     _install(monkeypatch, tmp_path)
     result = write_rel_config(
-        object(),
-        str(SOURCE_ID),
-        str(JOB_ID),
+        SETTINGS,
+        WORKSPACE_ID,
         {"fingerprint": fp, "relationships": [_slim(FK_ENTRY)]},
     )
     assert result["fingerprint"] == _fingerprint_of(json_path)
 
 
-def test_put_replace_failure_keeps_json_intact(monkeypatch, tmp_path):
-    """A25：替换失败（阶段二，json 替换被注入失败）→ json 未变、可原指纹重试。"""
+def test_put_replace_failure_keeps_json_intact_and_backup(monkeypatch, tmp_path):
+    """A25+A30：替换失败（阶段二，json 替换被注入失败）→ json 未变、备份保留、可原指纹重试。"""
     import backend.profile_loading.rel_config_api as api
 
     _install(monkeypatch, tmp_path)
-    json_path, _ = _rel_paths(tmp_path)
+    json_path, md_path = _rel_paths(tmp_path)
     json_before = json_path.read_bytes()
     fp = _fingerprint_of(json_path)
 
@@ -719,30 +777,34 @@ def test_put_replace_failure_keeps_json_intact(monkeypatch, tmp_path):
     monkeypatch.setattr(api, "_replace_file", flaky)
     with pytest.raises(RelWriteFailedError, match="JSON 未写入"):
         write_rel_config(
-            object(),
-            str(SOURCE_ID),
-            str(JOB_ID),
+            SETTINGS,
+            WORKSPACE_ID,
             {"fingerprint": fp, "relationships": [_slim(FK_ENTRY)]},
         )
     assert json_path.read_bytes() == json_before
     assert [p for p in json_path.parent.iterdir() if p.name.startswith(".tmp")] == []
+    # A30：替换失败保留已完成的文件级备份（两份旧版都在）
+    backup_root = json_path.parent / ".backup"
+    backups = list(backup_root.iterdir())
+    assert len(backups) == 1
+    assert (backups[0] / json_path.name).read_bytes() == json_before
+    assert (backups[0] / md_path.name).exists()
 
     monkeypatch.setattr(api, "_replace_file", real_replace)
     result = write_rel_config(
-        object(),
-        str(SOURCE_ID),
-        str(JOB_ID),
+        SETTINGS,
+        WORKSPACE_ID,
         {"fingerprint": fp, "relationships": [_slim(FK_ENTRY)]},
     )
     assert result["fingerprint"] == _fingerprint_of(json_path)
 
 
 def test_routes_and_error_handlers_registered():
-    """§4.5：三码 + 404 handler 与三端点路由注册到位。"""
+    """§4.5：四类异常 handler 与三端点路由注册到位（workspaces 路由新模型）。"""
     from fastapi import FastAPI
 
     from backend.api.errors import register_exception_handlers
-    from backend.api.routers.publishing import router
+    from backend.api.routers.workspaces import router
     from backend.profile_loading import rel_config_api as api
 
     app = FastAPI()
@@ -756,7 +818,7 @@ def test_routes_and_error_handlers_registered():
         assert exc in app.exception_handlers
 
     paths = {route.path for route in router.routes}
-    base = "/api/data-sources/{source_id}/collection-jobs/{job_id}/rel-config"
+    base = "/api/workspaces/{workspace_id}/rel-config"
     assert base in paths
     assert f"{base}/object-columns" in paths
 
@@ -765,8 +827,6 @@ def test_a11_manual_entries_survive_real_generator_chain(monkeypatch, tmp_path):
     """A11（需求 8，§4.4 的可执行化）：PUT 落盘的产物（含 D7 手工复合条目）
     直接过真实 JSONReader/CQLGenerator——生成脚本含对应 JOIN_ON；推断条目
     按阈值过滤（0.85 < 0.9），FK 直通保留。"""
-    from pathlib import Path
-
     from metaweave.core.cql_generator.generator import CQLGenerator
 
     _install(monkeypatch, tmp_path)
@@ -781,9 +841,8 @@ def test_a11_manual_entries_survive_real_generator_chain(monkeypatch, tmp_path):
         cardinality="M:N",
     )
     result = write_rel_config(
-        object(),
-        str(SOURCE_ID),
-        str(JOB_ID),
+        SETTINGS,
+        WORKSPACE_ID,
         {
             "fingerprint": fp,
             "relationships": [
@@ -796,7 +855,7 @@ def test_a11_manual_entries_survive_real_generator_chain(monkeypatch, tmp_path):
     )
     manual_id = result["relationships"][-1]["relationship_id"]
 
-    root = tmp_path / "output" / str(SOURCE_ID) / str(JOB_ID)
+    root = tmp_path / "output" / SOURCE_ID / WORKSPACE_ID
     generator = CQLGenerator(
         Path("configs/metadata_config.yaml"),
         config={
@@ -807,7 +866,8 @@ def test_a11_manual_entries_survive_real_generator_chain(monkeypatch, tmp_path):
                 "cql_directory": str(root / "cql"),
             },
         },
-        # doc 4 §4.2：实体键身份必填（受管链路恒注入；此处为真实链路等价注入）
+        # doc 4 §4.2：实体键身份必填（受管链路恒注入；此处为真实链路等价注入）：
+        # source 短 ID + 发布运行 UUID
         provenance=(SOURCE_ID, "99999999-9999-4999-8999-999999999999"),
     )
     gen = generator.generate()

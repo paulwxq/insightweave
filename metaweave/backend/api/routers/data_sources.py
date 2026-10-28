@@ -1,16 +1,8 @@
 """数据源登记路由；不直接连接数据库或执行 SQL。"""
 
-from fastapi import APIRouter, Depends, Request
-from fastapi.responses import Response
-
-from uuid import UUID
+from fastapi import APIRouter, Depends, Request, Response
 
 from backend.api.schemas import (
-    CollectionHomeResponse,
-    CollectionJobCreateRequest,
-    CollectionJobCreateResponse,
-    CollectionJobListResponse,
-    SqlReadinessResponse,
     ConnectionCheckRequest,
     ConnectionCheckResponse,
     DataSourceActivationRequest,
@@ -19,11 +11,6 @@ from backend.api.schemas import (
     DataSourceListResponse,
     DataSourceUpdateRequest,
 )
-from backend.data_sources.domain_step_service import _UNSET
-from backend.data_sources.sql_step_service import get_sql_readiness
-from backend.jobs.collection_run import start_collection_job
-from backend.jobs.home import get_collection_home
-from backend.jobs.listing import list_collection_jobs
 from backend.data_sources.connection_check import (
     SourceConnectionInput,
     check_connection,
@@ -87,72 +74,23 @@ def list_sources(settings: PlatformSettings = Depends(get_platform_settings)):
     return {"items": list_registered_sources(settings)}
 
 
-@router.post(
-    "/{source_id}/collection-jobs",
-    response_model=CollectionJobCreateResponse,
-)
-async def create_source_collection_job(
-    source_id: UUID,
-    payload: CollectionJobCreateRequest,
-    settings: PlatformSettings = Depends(get_platform_settings),
-):
-    return await start_collection_job(
-        settings,
-        source_id,
-        payload.steps,
-        payload.job_id,
-        domain_description=(
-            payload.domain_description
-            if "domain_description" in payload.model_fields_set
-            else _UNSET
-        ),
-        sync_domain_description=payload.sync_domain_description,
-    )
-
-
-@router.get(
-    "/{source_id}/collection-jobs/{job_id}/sql-readiness",
-    response_model=SqlReadinessResponse,
-)
-def sql_readiness(
-    source_id: UUID,
-    job_id: UUID,
-    settings: PlatformSettings = Depends(get_platform_settings),
-):
-    return get_sql_readiness(settings, source_id, job_id)
-
-
-@router.get("/{source_id}/collection-home", response_model=CollectionHomeResponse)
-def get_source_collection_home(
-    source_id: UUID, settings: PlatformSettings = Depends(get_platform_settings)
-):
-    return get_collection_home(settings, source_id)
-
-
-@router.get("/{source_id}/collection-jobs", response_model=CollectionJobListResponse)
-def list_source_collection_jobs(
-    source_id: UUID, settings: PlatformSettings = Depends(get_platform_settings)
-):
-    return list_collection_jobs(settings, source_id)
-
-
 @router.get("/{source_id}", response_model=DataSourceListItem)
 def get_source(
-    source_id: UUID, settings: PlatformSettings = Depends(get_platform_settings)
+    source_id: str, settings: PlatformSettings = Depends(get_platform_settings)
 ):
     return get_registered_source(settings, source_id)
 
 
 @router.post("/{source_id}/connection-check", response_model=ConnectionCheckResponse)
 def check_saved_source_connection(
-    source_id: UUID, settings: PlatformSettings = Depends(get_platform_settings)
+    source_id: str, settings: PlatformSettings = Depends(get_platform_settings)
 ):
     return check_saved_connection(settings, source_id)
 
 
 @router.patch("/{source_id}/activation", response_model=DataSourceListItem)
 def set_activation(
-    source_id: UUID,
+    source_id: str,
     payload: DataSourceActivationRequest,
     settings: PlatformSettings = Depends(get_platform_settings),
 ):
@@ -162,7 +100,7 @@ def set_activation(
 
 @router.patch("/{source_id}", response_model=DataSourceListItem)
 def update_source(
-    source_id: UUID,
+    source_id: str,
     payload: DataSourceUpdateRequest,
     settings: PlatformSettings = Depends(get_platform_settings),
 ):
@@ -184,9 +122,10 @@ def update_source(
 
 @router.delete("/{source_id}", status_code=204)
 def delete_source(
-    source_id: UUID,
+    source_id: str,
     delete_output: bool = False,
     settings: PlatformSettings = Depends(get_platform_settings),
 ):
+    """删除数据源；已关联工作区时拒绝（A29，不级联删除工作区）。"""
     delete_registered_source(settings, source_id, delete_output=delete_output)
     return Response(status_code=204)

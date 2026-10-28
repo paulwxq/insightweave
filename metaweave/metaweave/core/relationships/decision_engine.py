@@ -30,19 +30,26 @@ class DecisionEngine:
         output_config = config.get("output", {})
 
         self.accept_threshold = decision_config.get("accept_threshold", 0.80)
-        self.high_confidence_threshold = decision_config.get("high_confidence_threshold", 0.90)
-        self.medium_confidence_threshold = decision_config.get("medium_confidence_threshold", 0.80)
-        self.suppress_single_if_composite = decision_config.get("suppress_single_if_composite", True)
+        self.high_confidence_threshold = decision_config.get(
+            "high_confidence_threshold", 0.90
+        )
+        self.medium_confidence_threshold = decision_config.get(
+            "medium_confidence_threshold", 0.80
+        )
+        self.suppress_single_if_composite = decision_config.get(
+            "suppress_single_if_composite", True
+        )
 
         # 读取 rel_id_salt 配置（与 Repository 保持一致）
         self.rel_id_salt = output_config.get("rel_id_salt", "")
 
-        logger.info(f"决策引擎已初始化: accept_threshold={self.accept_threshold}, "
-                    f"suppress_single={self.suppress_single_if_composite}")
+        logger.info(
+            f"决策引擎已初始化: accept_threshold={self.accept_threshold}, "
+            f"suppress_single={self.suppress_single_if_composite}"
+        )
 
     def filter_and_suppress(
-            self,
-            scored_candidates: List[Dict[str, Any]]
+        self, scored_candidates: List[Dict[str, Any]]
     ) -> Tuple[List[Relation], List[Dict[str, Any]], List[Dict[str, Any]]]:
         """过滤和抑制候选关系
 
@@ -78,7 +85,9 @@ class DecisionEngine:
                     composite_score,
                 )
 
-        logger.info(f"阈值过滤: {len(above_threshold)} 个通过，{len(below_threshold)} 个未达标")
+        logger.info(
+            f"阈值过滤: {len(above_threshold)} 个通过，{len(below_threshold)} 个未达标"
+        )
 
         # 2. 应用抑制规则
         if self.suppress_single_if_composite:
@@ -93,13 +102,14 @@ class DecisionEngine:
             relation = self._candidate_to_relation(candidate)
             accepted_relations.append(relation)
 
-        logger.info(f"抑制规则: {len(accepted_relations)} 个接受，{len(suppressed)} 个抑制")
+        logger.info(
+            f"抑制规则: {len(accepted_relations)} 个接受，{len(suppressed)} 个抑制"
+        )
 
         return accepted_relations, suppressed, below_threshold
 
     def _apply_suppression(
-            self,
-            candidates: List[Dict[str, Any]]
+        self, candidates: List[Dict[str, Any]]
     ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
         """应用抑制规则
 
@@ -122,8 +132,12 @@ class DecisionEngine:
             source_info = candidate["source"].get("object_info", {})
             target_info = candidate["target"].get("object_info", {})
 
-            source_full = f"{source_info.get('schema_name')}.{source_info.get('object_name')}"
-            target_full = f"{target_info.get('schema_name')}.{target_info.get('object_name')}"
+            source_full = (
+                f"{source_info.get('schema_name')}.{source_info.get('object_name')}"
+            )
+            target_full = (
+                f"{target_info.get('schema_name')}.{target_info.get('object_name')}"
+            )
 
             table_pair = f"{source_full}->{target_full}"
 
@@ -245,9 +259,9 @@ class DecisionEngine:
 
         # 防御性校验（不作主判定，见 doc 19 §3.4）
         if (
-                not found
-                and candidate.get("candidate_origin") == "rule"
-                and candidate.get("key_origin") == "physical"
+            not found
+            and candidate.get("candidate_origin") == "rule"
+            and candidate.get("key_origin") == "physical"
         ):
             logger.warning(
                 "规则物理键候选的 target 端未检出物理约束（防御性校验失败）: %s",
@@ -284,7 +298,7 @@ class DecisionEngine:
             target_schema=target_schema,
             target_table=target_table,
             target_columns=target_columns,
-            rel_id_salt=self.rel_id_salt
+            rel_id_salt=self.rel_id_salt,
         )
 
         # 从评分结果获取基数（由 scorer 计算）

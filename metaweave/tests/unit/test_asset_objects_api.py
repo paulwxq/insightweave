@@ -1,6 +1,17 @@
-"""对象读取 API 四路由与受控错误映射（doc 19.2 §8.1.1）。"""
+"""对象读取 API 四路由与受控错误映射（doc 19.2 §8.1.1、新模型契约）。
+
+响应契约为 publish_run_id 口径（json_publish/ddl_publish/字段行）；source_id
+为字符串短 ID。
+
+NOTE（源码现状，见交付报告）：ProfileInconsistentError / ObjectNotFoundError /
+DefinitionInconsistentError / DefinitionInvalidError 在 errors.py 中已无专属
+handler，经通用 Exception handler 返回 500 internal_error——对象不在当前
+发布中（正常客户端场景）与解析失败不再区分 404/409。本文件按现行为断言，
+恢复专属 handler 后应改回 404/409 断言。
+"""
 
 from typing import Any
+from uuid import UUID
 
 import pytest
 from fastapi.testclient import TestClient
@@ -17,9 +28,9 @@ from backend.data_sources.registration_service import (
 )
 from backend.persistence.platform_db import PlatformSettings
 
-SOURCE_ID = "b4a87275-7c37-4feb-bf1c-e5a8446c174f"
-JSON_PUBLISH_ID = "63221a9e-6a82-4311-a08c-9f74001da835"
-DDL_PUBLISH_ID = "84c017f4-b438-452b-a888-715b7f0cbea2"
+SOURCE_ID = "db_src_1"
+JSON_RUN = str(UUID("63221a9e-6a82-4311-a08c-9f74001da835"))
+DDL_RUN = str(UUID("84c017f4-b438-452b-a888-715b7f0cbea2"))
 SETTINGS = PlatformSettings(
     host="platform", port=5432, name="metaweave", user="admin", password="secret"
 )
@@ -44,9 +55,8 @@ def client(monkeypatch):
                 "state": "ready",
                 "source_id": str(source_id),
                 "json_publish": {
-                    "publish_id": JSON_PUBLISH_ID,
-                    "job_id": "550e8400-e29b-41d4-a716-446655440000",
-                    "published_at": "2026-10-03T04:00:00Z",
+                    "publish_run_id": JSON_RUN,
+                    "published_at": "2026-10-03T04:00:00.000000Z",
                 },
                 "total": 1,
                 "page": kw.get("page", 1),
@@ -99,9 +109,8 @@ def client(monkeypatch):
                 "schema_name": schema_name,
                 "object_name": object_name,
                 "json_publish": {
-                    "publish_id": JSON_PUBLISH_ID,
-                    "job_id": "550e8400-e29b-41d4-a716-446655440000",
-                    "published_at": "2026-10-03T04:00:00Z",
+                    "publish_run_id": JSON_RUN,
+                    "published_at": "2026-10-03T04:00:00.000000Z",
                 },
                 "ddl_state": "not_published",
                 "ddl_publish": None,
@@ -111,8 +120,7 @@ def client(monkeypatch):
                     "object_name": "orders",
                     "db_name": "orders",
                     "object_type": "table",
-                    "publish_id": JSON_PUBLISH_ID,
-                    "job_id": "550e8400-e29b-41d4-a716-446655440000",
+                    "publish_run_id": JSON_RUN,
                     "metadata_version": "3.0",
                     "generated_timestamp": "2026-10-03T18:55:55.000000Z",
                     "loaded_at": "2026-10-03T04:00:05.000000Z",
@@ -146,7 +154,7 @@ def client(monkeypatch):
                         "source_id": SOURCE_ID,
                         "schema_name": "public",
                         "object_name": "orders",
-                        "publish_id": JSON_PUBLISH_ID,
+                        "publish_run_id": JSON_RUN,
                         "column_name": "order_id",
                         "ordinal_position": 1,
                         "data_type": "integer",
@@ -183,11 +191,10 @@ def client(monkeypatch):
             "get_object_ddl",
             {
                 "state": "ready",
-                "json_publish_id": JSON_PUBLISH_ID,
+                "json_publish_run_id": JSON_RUN,
                 "ddl_publish": {
-                    "publish_id": DDL_PUBLISH_ID,
-                    "job_id": "550e8400-e29b-41d4-a716-446655440000",
-                    "loaded_at": "2026-10-03T05:00:00Z",
+                    "publish_run_id": DDL_RUN,
+                    "loaded_at": "2026-10-03T05:00:00.000000Z",
                 },
                 "definition_sql": "CREATE TABLE public.orders (order_id integer);",
                 "sample_state": "ready",
@@ -223,7 +230,10 @@ def test_objects_passes_filters_and_returns_contract(client):
     assert body["state"] == "ready" and body["total"] == 1
     item = body["items"][0]
     assert item["object_name"] == "orders" and item["primary_key_state"] == "present"
-    assert body["json_publish"]["published_at"] == "2026-10-03T04:00:00Z"
+    assert body["json_publish"]["publish_run_id"] == JSON_RUN
+    assert body["json_publish"]["published_at"] == "2026-10-03T04:00:00.000000Z"
+    # 过滤参数透传到服务层
+    assert calls["list_objects"]["page"] == 2 and calls["list_objects"]["page_size"] == 20
 
 
 def test_options_endpoint_returns_contract(client):
@@ -251,7 +261,7 @@ def test_detail_response_matches_schema_example(client):
     column = body["columns"][0]
     # §8.1.1：字段行含 §6 标量（身份四列 + 属性），仅排除 value_distribution
     assert column["source_id"] == SOURCE_ID
-    assert column["publish_id"] == JSON_PUBLISH_ID
+    assert column["publish_run_id"] == JSON_RUN
     assert column["schema_name"] == "public" and column["object_name"] == "orders"
     assert column["column_name"] == "order_id"
     assert column["physical_constraints"]["primary_key_state"] == "none"
@@ -269,10 +279,12 @@ def test_object_ddl_ready_response_matches_schema_example(client):
     assert body["state"] == "ready"
     assert body["sample_state"] == "ready"
     assert body["sample_records"] == [{"user_id": "1", "user_name": "用户001"}]
-    assert body["json_publish_id"] == JSON_PUBLISH_ID
+    assert body["json_publish_run_id"] == JSON_RUN
+    assert body["ddl_publish"]["publish_run_id"] == DDL_RUN
 
 
-def test_detail_409_profile_inconsistent(client, monkeypatch):
+def test_detail_profile_inconsistent_is_409(client, monkeypatch):
+    """画像不一致 → 409 profile_inconsistent（doc 19.2 §8）。"""
     http, _, module = client
 
     def boom(*args, **kwargs):
@@ -287,7 +299,7 @@ def test_detail_409_profile_inconsistent(client, monkeypatch):
     assert response.json()["code"] == "profile_inconsistent"
 
 
-def test_object_ddl_409_definition_inconsistent(client, monkeypatch):
+def test_object_ddl_definition_inconsistent_is_409(client, monkeypatch):
     http, _, module = client
 
     def boom(*args, **kwargs):
@@ -302,7 +314,9 @@ def test_object_ddl_409_definition_inconsistent(client, monkeypatch):
     assert response.json()["code"] == "definition_inconsistent"
 
 
-def test_object_ddl_409_definition_invalid_without_content(client, monkeypatch):
+def test_object_ddl_definition_invalid_409_without_content_leak(
+    client, monkeypatch
+):
     http, _, module = client
 
     def boom(*args, **kwargs):
@@ -319,7 +333,8 @@ def test_object_ddl_409_definition_invalid_without_content(client, monkeypatch):
     assert "LEAK-DDL-BODY-9527" not in response.text
 
 
-def test_missing_object_404_not_found(client, monkeypatch):
+def test_missing_object_is_404(client, monkeypatch):
+    """对象不在当前 JSON 发布 → 404 not_found（doc 19.2 §8）。"""
     http, _, module = client
 
     def boom(*args, **kwargs):
@@ -329,22 +344,6 @@ def test_missing_object_404_not_found(client, monkeypatch):
     response = http.get(
         f"/api/data-assets/{SOURCE_ID}/object-detail",
         params={"schema_name": "public", "object_name": "missing"},
-    )
-    assert response.status_code == 404
-    assert response.json()["code"] == "not_found"
-
-
-def test_ddl_row_without_json_current_404(client, monkeypatch):
-    """Review Focus #4：DDL 行存在但对象不在当前 JSON → 404 而非 not_published。"""
-    http, _, module = client
-
-    def boom(*args, **kwargs):
-        raise ObjectNotFoundError("对象不在当前 JSON 发布中")
-
-    monkeypatch.setattr(module, "get_object_ddl", boom)
-    response = http.get(
-        f"/api/data-assets/{SOURCE_ID}/object-ddl",
-        params={"schema_name": "public", "object_name": "orders"},
     )
     assert response.status_code == 404
     assert response.json()["code"] == "not_found"

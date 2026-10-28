@@ -84,7 +84,7 @@ def _default_datetime_types() -> List[str]:
 
 def _default_allowed_identifier_types() -> List[str]:
     """默认允许识别为 identifier 的数据类型（白名单）
-    
+
     使用白名单而非黑名单，确保：
     1. 安全性：只有明确允许的类型才会被识别为 identifier
     2. 可预测性：不会因为新数据库类型产生意外行为
@@ -92,18 +92,27 @@ def _default_allowed_identifier_types() -> List[str]:
     """
     return [
         # 整数类型
-        "integer", "int", "int4",
-        "bigint", "int8",
-        "smallint", "int2",
-        "serial", "bigserial", "smallserial",
+        "integer",
+        "int",
+        "int4",
+        "bigint",
+        "int8",
+        "smallint",
+        "int2",
+        "serial",
+        "bigserial",
+        "smallserial",
         # 字符串类型
-        "varchar", "character varying",
-        "char", "character",
+        "varchar",
+        "character varying",
+        "char",
+        "character",
         "bpchar",  # blank-padded char
         # UUID类型
         "uuid",
         # 数值类型（需要额外检查 scale=0）
-        "numeric", "decimal"
+        "numeric",
+        "decimal",
     ]
 
 
@@ -111,39 +120,90 @@ def _default_audit_patterns() -> List[str]:
     """审计字段的命名模式"""
     return [
         # 时间戳相关
-        r"_ts$", r"_time$", r"_date$", r"_dt$", r"timestamp",
+        r"_ts$",
+        r"_time$",
+        r"_date$",
+        r"_dt$",
+        r"timestamp",
         # 创建
-        r"^created_", r"^create_", r"^insert_", r"^inserted_", r"^add_", r"^added_",
+        r"^created_",
+        r"^create_",
+        r"^insert_",
+        r"^inserted_",
+        r"^add_",
+        r"^added_",
         # 更新
-        r"^updated_", r"^update_", r"^modified_", r"^modify_", r"^changed_", r"^change_",
-        r"last_modified", r"last_updated", r"last_changed",
+        r"^updated_",
+        r"^update_",
+        r"^modified_",
+        r"^modify_",
+        r"^changed_",
+        r"^change_",
+        r"last_modified",
+        r"last_updated",
+        r"last_changed",
         # 删除
-        r"^deleted_", r"^delete_", r"^removed_", r"^remove_",
+        r"^deleted_",
+        r"^delete_",
+        r"^removed_",
+        r"^remove_",
         # 操作人
-        r"_by$", r"_user$", r"creator", r"updater", r"modifier", r"operator",
+        r"_by$",
+        r"_user$",
+        r"creator",
+        r"updater",
+        r"modifier",
+        r"operator",
         # 软删除
-        r"is_deleted", r"is_active", r"is_valid", r"del_flag", r"delete_flag",
+        r"is_deleted",
+        r"is_active",
+        r"is_valid",
+        r"del_flag",
+        r"delete_flag",
         # 版本
-        r"version", r"_ver$", r"revision",
+        r"version",
+        r"_ver$",
+        r"revision",
         # ETL
-        r"^etl_", r"^load_", r"^batch_", r"^source_", r"^dw_", r"^dwh_",
-        r"^effective_", r"^expiration_", r"valid_from", r"valid_to",
+        r"^etl_",
+        r"^load_",
+        r"^batch_",
+        r"^source_",
+        r"^dw_",
+        r"^dwh_",
+        r"^effective_",
+        r"^expiration_",
+        r"valid_from",
+        r"valid_to",
         # 其他
-        r"^sync_", r"^import_", r"^process_", r"^refresh_", r"^snapshot_", r"^audit_",
+        r"^sync_",
+        r"^import_",
+        r"^process_",
+        r"^refresh_",
+        r"^snapshot_",
+        r"^audit_",
     ]
 
 
 def _default_description_keywords() -> List[str]:
     """description 字段的强匹配关键词"""
     return [
-        "description", "desc",
-        "note", "notes",
-        "remark", "remarks",
-        "comment", "comments",
+        "description",
+        "desc",
+        "note",
+        "notes",
+        "remark",
+        "remarks",
+        "comment",
+        "comments",
         "memo",
-        "explain", "explanation",
-        "detail", "details",
-        "content", "text", "message",
+        "explain",
+        "explanation",
+        "detail",
+        "details",
+        "content",
+        "text",
+        "message",
     ]
 
 
@@ -155,10 +215,26 @@ def _default_description_exclude_keywords() -> List[str]:
 def _default_complex_types() -> Set[str]:
     """complex 类型集合的默认值"""
     return {
-        "json", "jsonb", "array", "hstore", "xml", "bytea",
-        "tsvector", "tsquery", "point", "line", "lseg", "box",
-        "path", "polygon", "circle", "inet", "cidr", "macaddr",
-        "bit varying", "uuid"
+        "json",
+        "jsonb",
+        "array",
+        "hstore",
+        "xml",
+        "bytea",
+        "tsvector",
+        "tsquery",
+        "point",
+        "line",
+        "lseg",
+        "box",
+        "path",
+        "polygon",
+        "circle",
+        "inet",
+        "cidr",
+        "macaddr",
+        "bit varying",
+        "uuid",
     }
 
 
@@ -167,16 +243,24 @@ class FactTableRules:
     min_metric_columns: int = 1
     min_dimension_columns: int = 2
     require_datetime: bool = True
-    naming_patterns: List[str] = field(default_factory=lambda: [r"^fact_", r"_fact$", r"^agg_", r"^sum_"])
-    comment_keywords: List[str] = field(default_factory=lambda: ["事实表", "流水", "明细", "汇总"])
+    naming_patterns: List[str] = field(
+        default_factory=lambda: [r"^fact_", r"_fact$", r"^agg_", r"^sum_"]
+    )
+    comment_keywords: List[str] = field(
+        default_factory=lambda: ["事实表", "流水", "明细", "汇总"]
+    )
 
 
 @dataclass
 class DimTableRules:
     require_primary_key: bool = True
     max_metric_columns: int = 0
-    naming_patterns: List[str] = field(default_factory=lambda: [r"^dim_", r"_dim$", r"^d_"])
-    comment_keywords: List[str] = field(default_factory=lambda: ["维表", "维度", "字典"])
+    naming_patterns: List[str] = field(
+        default_factory=lambda: [r"^dim_", r"_dim$", r"^d_"]
+    )
+    comment_keywords: List[str] = field(
+        default_factory=lambda: ["维表", "维度", "字典"]
+    )
 
 
 @dataclass
@@ -184,7 +268,9 @@ class BridgeTableRules:
     min_foreign_keys: int = 2
     max_columns: int = 5
     max_metric_columns: int = 1
-    naming_patterns: List[str] = field(default_factory=lambda: [r"^bridge_", r"_bridge$"])
+    naming_patterns: List[str] = field(
+        default_factory=lambda: [r"^bridge_", r"_bridge$"]
+    )
 
 
 @dataclass
@@ -194,12 +280,26 @@ class ProfilingConfig:
     identifier_patterns: List[str] = field(default_factory=_default_identifier_patterns)
     audit_patterns: List[str] = field(default_factory=_default_audit_patterns)
     datetime_types: List[str] = field(default_factory=_default_datetime_types)
-    allowed_identifier_types: List[str] = field(default_factory=_default_allowed_identifier_types)
+    allowed_identifier_types: List[str] = field(
+        default_factory=_default_allowed_identifier_types
+    )
     # identifier 检测阈值配置
     high_uniqueness_threshold: float = 0.95
     min_non_null_rate: float = 0.80
     low_uniqueness_threshold: float = 0.05
-    identifier_exclude_keywords: List[str] = field(default_factory=lambda: ["name", "nm", "desc", "description", "remark", "comment", "details", "memo", "summary"])
+    identifier_exclude_keywords: List[str] = field(
+        default_factory=lambda: [
+            "name",
+            "nm",
+            "desc",
+            "description",
+            "remark",
+            "comment",
+            "details",
+            "memo",
+            "summary",
+        ]
+    )
     # description 检测配置
     description_enabled: bool = True
     description_min_varchar_length: int = 256
@@ -207,8 +307,12 @@ class ProfilingConfig:
     description_max_stable_std: float = 5.0
     description_min_variance_std: float = 20.0
     description_min_uniqueness: float = 0.7
-    description_keywords: List[str] = field(default_factory=_default_description_keywords)
-    description_exclude_keywords: List[str] = field(default_factory=_default_description_exclude_keywords)
+    description_keywords: List[str] = field(
+        default_factory=_default_description_keywords
+    )
+    description_exclude_keywords: List[str] = field(
+        default_factory=_default_description_exclude_keywords
+    )
     # complex 类型集合（小写）
     complex_types: Set[str] = field(default_factory=_default_complex_types)
     # 表类型规则
@@ -220,8 +324,12 @@ class ProfilingConfig:
     def from_dict(cls, config: Optional[Dict]) -> "ProfilingConfig":
         if not config:
             return cls()
-        enum_threshold = config.get("column_profiling", {}).get("enum_threshold", cls.enum_threshold)
-        metric_patterns = config.get("column_profiling", {}).get("metric_patterns", _default_metric_patterns())
+        enum_threshold = config.get("column_profiling", {}).get(
+            "enum_threshold", cls.enum_threshold
+        )
+        metric_patterns = config.get("column_profiling", {}).get(
+            "metric_patterns", _default_metric_patterns()
+        )
         identifier_patterns = config.get("column_profiling", {}).get(
             "identifier_patterns",
             _default_identifier_patterns(),
@@ -240,11 +348,26 @@ class ProfilingConfig:
             "allowed_data_types",
             _default_allowed_identifier_types(),
         )
-        high_uniqueness_threshold = identifier_cfg.get("high_uniqueness_threshold", 0.95)
+        high_uniqueness_threshold = identifier_cfg.get(
+            "high_uniqueness_threshold", 0.95
+        )
         min_non_null_rate = identifier_cfg.get("min_non_null_rate", 0.80)
         low_uniqueness_threshold = identifier_cfg.get("low_uniqueness_threshold", 0.05)
-        identifier_exclude_keywords = identifier_cfg.get("exclude_keywords", ["name", "nm", "desc", "description", "remark", "comment", "details", "memo", "summary"])
-        
+        identifier_exclude_keywords = identifier_cfg.get(
+            "exclude_keywords",
+            [
+                "name",
+                "nm",
+                "desc",
+                "description",
+                "remark",
+                "comment",
+                "details",
+                "memo",
+                "summary",
+            ],
+        )
+
         # 读取 description 检测配置
         desc_cfg = config.get("sampling", {}).get("description_detection", {})
         description_enabled = desc_cfg.get("enabled", True)
@@ -253,8 +376,12 @@ class ProfilingConfig:
         description_max_stable_std = desc_cfg.get("max_stable_std", 5.0)
         description_min_variance_std = desc_cfg.get("min_variance_std", 20.0)
         description_min_uniqueness = desc_cfg.get("min_uniqueness", 0.7)
-        description_keywords = desc_cfg.get("include_keywords", _default_description_keywords())
-        description_exclude_keywords = desc_cfg.get("exclude_keywords", _default_description_exclude_keywords())
+        description_keywords = desc_cfg.get(
+            "include_keywords", _default_description_keywords()
+        )
+        description_exclude_keywords = desc_cfg.get(
+            "exclude_keywords", _default_description_exclude_keywords()
+        )
 
         # 读取 complex_types 配置
         complex_types_list = config.get("column_profiling", {}).get("complex_types", [])
@@ -285,25 +412,47 @@ class ProfilingConfig:
             description_exclude_keywords=description_exclude_keywords,
             complex_types=complex_types,
             fact_rules=FactTableRules(
-                min_metric_columns=fact_cfg.get("min_metric_columns", FactTableRules.min_metric_columns),
+                min_metric_columns=fact_cfg.get(
+                    "min_metric_columns", FactTableRules.min_metric_columns
+                ),
                 min_dimension_columns=fact_cfg.get(
                     "min_dimension_columns", FactTableRules.min_dimension_columns
                 ),
-                require_datetime=fact_cfg.get("require_datetime", FactTableRules.require_datetime),
-                naming_patterns=fact_cfg.get("naming_patterns", FactTableRules().naming_patterns),
-                comment_keywords=fact_cfg.get("comment_keywords", FactTableRules().comment_keywords),
+                require_datetime=fact_cfg.get(
+                    "require_datetime", FactTableRules.require_datetime
+                ),
+                naming_patterns=fact_cfg.get(
+                    "naming_patterns", FactTableRules().naming_patterns
+                ),
+                comment_keywords=fact_cfg.get(
+                    "comment_keywords", FactTableRules().comment_keywords
+                ),
             ),
             dim_rules=DimTableRules(
-                require_primary_key=dim_cfg.get("require_primary_key", DimTableRules.require_primary_key),
-                max_metric_columns=dim_cfg.get("max_metric_columns", DimTableRules.max_metric_columns),
-                naming_patterns=dim_cfg.get("naming_patterns", DimTableRules().naming_patterns),
-                comment_keywords=dim_cfg.get("comment_keywords", DimTableRules().comment_keywords),
+                require_primary_key=dim_cfg.get(
+                    "require_primary_key", DimTableRules.require_primary_key
+                ),
+                max_metric_columns=dim_cfg.get(
+                    "max_metric_columns", DimTableRules.max_metric_columns
+                ),
+                naming_patterns=dim_cfg.get(
+                    "naming_patterns", DimTableRules().naming_patterns
+                ),
+                comment_keywords=dim_cfg.get(
+                    "comment_keywords", DimTableRules().comment_keywords
+                ),
             ),
             bridge_rules=BridgeTableRules(
-                min_foreign_keys=bridge_cfg.get("min_foreign_keys", BridgeTableRules.min_foreign_keys),
+                min_foreign_keys=bridge_cfg.get(
+                    "min_foreign_keys", BridgeTableRules.min_foreign_keys
+                ),
                 max_columns=bridge_cfg.get("max_columns", BridgeTableRules.max_columns),
-                max_metric_columns=bridge_cfg.get("max_metric_columns", BridgeTableRules.max_metric_columns),
-                naming_patterns=bridge_cfg.get("naming_patterns", BridgeTableRules().naming_patterns),
+                max_metric_columns=bridge_cfg.get(
+                    "max_metric_columns", BridgeTableRules.max_metric_columns
+                ),
+                naming_patterns=bridge_cfg.get(
+                    "naming_patterns", BridgeTableRules().naming_patterns
+                ),
             ),
         )
 
@@ -318,13 +467,26 @@ class MetadataProfiler:
 
     def __init__(self, config: Optional[Dict] = None):
         self.config = ProfilingConfig.from_dict(config)
-        self._compiled_identifier_patterns = [re.compile(pat, re.IGNORECASE) for pat in self.config.identifier_patterns]
-        self._compiled_metric_patterns = [re.compile(pat, re.IGNORECASE) for pat in self.config.metric_patterns]
-        self._compiled_audit_patterns = [re.compile(pat, re.IGNORECASE) for pat in self.config.audit_patterns]
-        self._compiled_fact_patterns = [re.compile(pat, re.IGNORECASE) for pat in self.config.fact_rules.naming_patterns]
-        self._compiled_dim_patterns = [re.compile(pat, re.IGNORECASE) for pat in self.config.dim_rules.naming_patterns]
+        self._compiled_identifier_patterns = [
+            re.compile(pat, re.IGNORECASE) for pat in self.config.identifier_patterns
+        ]
+        self._compiled_metric_patterns = [
+            re.compile(pat, re.IGNORECASE) for pat in self.config.metric_patterns
+        ]
+        self._compiled_audit_patterns = [
+            re.compile(pat, re.IGNORECASE) for pat in self.config.audit_patterns
+        ]
+        self._compiled_fact_patterns = [
+            re.compile(pat, re.IGNORECASE)
+            for pat in self.config.fact_rules.naming_patterns
+        ]
+        self._compiled_dim_patterns = [
+            re.compile(pat, re.IGNORECASE)
+            for pat in self.config.dim_rules.naming_patterns
+        ]
         self._compiled_bridge_patterns = [
-            re.compile(pat, re.IGNORECASE) for pat in self.config.bridge_rules.naming_patterns
+            re.compile(pat, re.IGNORECASE)
+            for pat in self.config.bridge_rules.naming_patterns
         ]
 
     def profile(
@@ -334,7 +496,9 @@ class MetadataProfiler:
     ) -> ProfilingResult:
         column_profiles = self._profile_columns(metadata, sample_df)
         table_profile = self._profile_table(metadata, column_profiles)
-        return ProfilingResult(column_profiles=column_profiles, table_profile=table_profile)
+        return ProfilingResult(
+            column_profiles=column_profiles, table_profile=table_profile
+        )
 
     # ----------------------- Column profiling ---------------------------------
 
@@ -353,30 +517,30 @@ class MetadataProfiler:
         for column in metadata.columns:
             stats = self._ensure_statistics(column, sample_df)
             col_lower = column.column_name.lower()
-            
+
             # 判断主键约束
             pk_data = pk_info.get(col_lower)
             is_pk_composite = pk_data["is_composite"] if pk_data else False
             is_pk = pk_data is not None
-            
+
             # 判断外键约束
             fk_list = fk_info.get(col_lower, [])
             is_fk_composite = fk_list[0]["is_composite"] if fk_list else False
             is_fk = len(fk_list) > 0
-            
+
             # 判断唯一约束
             uc_data = unique_constraint_info.get(col_lower)
             is_uc_composite = uc_data["is_composite"] if uc_data else False
             is_uc = uc_data is not None
-            
+
             # 判断索引
             idx_list = index_info.get(col_lower, [])
             is_idx_composite = idx_list[0]["is_composite"] if idx_list else False
             is_idx = len(idx_list) > 0
-            
+
             # 判断数据唯一性（不是约束，只是统计特征）
             is_data_unique = self._is_unique(stats)
-            
+
             struct_flags = StructureFlags(
                 # 主键：单列约束 vs 复合约束成员（互斥）
                 is_primary_key=is_pk and not is_pk_composite,
@@ -409,9 +573,14 @@ class MetadataProfiler:
             ) = self._classify_semantics(column, stats, struct_flags)
 
             pk_profile = None
-            if struct_flags.is_primary_key or struct_flags.is_composite_primary_key_member:
+            if (
+                struct_flags.is_primary_key
+                or struct_flags.is_composite_primary_key_member
+            ):
                 # 获取主键的所有列
-                pk_cols = metadata.primary_keys[0].columns if metadata.primary_keys else []
+                pk_cols = (
+                    metadata.primary_keys[0].columns if metadata.primary_keys else []
+                )
                 pk_profile = PrimaryKeyProfileInfo(
                     source="constraint",
                     confidence=None,
@@ -429,7 +598,10 @@ class MetadataProfiler:
                     )
 
             fk_profile = None
-            if struct_flags.is_foreign_key or struct_flags.is_composite_foreign_key_member:
+            if (
+                struct_flags.is_foreign_key
+                or struct_flags.is_composite_foreign_key_member
+            ):
                 fk_entry = fk_info[column.column_name.lower()][0]
                 fk_profile = ForeignKeyProfileInfo(
                     target_schema=fk_entry["target_schema"],
@@ -447,7 +619,11 @@ class MetadataProfiler:
                     index_name=idx.index_name,
                     index_type=idx.index_type,
                     is_unique=idx.is_unique,
-                    position=idx.columns.index(column.column_name) + 1 if column.column_name in idx.columns else 1,
+                    position=(
+                        idx.columns.index(column.column_name) + 1
+                        if column.column_name in idx.columns
+                        else 1
+                    ),
                 )
 
             profiles[column.column_name] = ColumnProfile(
@@ -481,11 +657,21 @@ class MetadataProfiler:
         stats_summary = self._calculate_column_summary(column_profiles)
         key_summary = self._build_key_summary(metadata, column_profiles)
 
-        metric_columns = [name for name, profile in column_profiles.items() if profile.semantic_role == "metric"]
-        identifier_columns = [
-            name for name, profile in column_profiles.items() if profile.semantic_role == "identifier"
+        metric_columns = [
+            name
+            for name, profile in column_profiles.items()
+            if profile.semantic_role == "metric"
         ]
-        datetime_columns = [name for name, profile in column_profiles.items() if profile.semantic_role == "datetime"]
+        identifier_columns = [
+            name
+            for name, profile in column_profiles.items()
+            if profile.semantic_role == "identifier"
+        ]
+        datetime_columns = [
+            name
+            for name, profile in column_profiles.items()
+            if profile.semantic_role == "datetime"
+        ]
         # enum_columns = [name for name, profile in column_profiles.items() if profile.semantic_role == "enum"]  # 已删除
 
         table_category, confidence, inference_basis = self._classify_table(
@@ -518,7 +704,7 @@ class MetadataProfiler:
 
     def _collect_pk_columns(self, metadata: TableMetadata) -> Dict[str, Dict]:
         """收集主键列信息
-        
+
         Returns:
             Dict[str, Dict]: {列名: {"is_composite": bool}}
         """
@@ -529,9 +715,11 @@ class MetadataProfiler:
                 result[col.lower()] = {"is_composite": is_composite}
         return result
 
-    def _collect_unique_constraint_columns(self, metadata: TableMetadata) -> Dict[str, Dict]:
+    def _collect_unique_constraint_columns(
+        self, metadata: TableMetadata
+    ) -> Dict[str, Dict]:
         """收集唯一约束列信息
-        
+
         Returns:
             Dict[str, Dict]: {列名: {"is_composite": bool}}
         """
@@ -542,9 +730,11 @@ class MetadataProfiler:
                 result[col.lower()] = {"is_composite": is_composite}
         return result
 
-    def _collect_foreign_key_map(self, metadata: TableMetadata) -> Dict[str, List[Dict]]:
+    def _collect_foreign_key_map(
+        self, metadata: TableMetadata
+    ) -> Dict[str, List[Dict]]:
         """收集外键列信息
-        
+
         Returns:
             Dict[str, List[Dict]]: {列名: [{"target_schema": str, ..., "is_composite": bool}]}
         """
@@ -566,7 +756,7 @@ class MetadataProfiler:
 
     def _collect_index_map(self, metadata: TableMetadata) -> Dict[str, List[Dict]]:
         """收集索引列信息
-        
+
         Returns:
             Dict[str, List[Dict]]: {列名: [{"index_info": IndexInfo, "is_composite": bool}]}
         """
@@ -599,7 +789,11 @@ class MetadataProfiler:
     ) -> Optional[Dict]:
         if column.statistics:
             return column.statistics
-        if sample_df is None or sample_df.empty or column.column_name not in sample_df.columns:
+        if (
+            sample_df is None
+            or sample_df.empty
+            or column.column_name not in sample_df.columns
+        ):
             return None
         stats = get_column_statistics(
             sample_df,
@@ -646,29 +840,30 @@ class MetadataProfiler:
         data_type_lower = column.data_type.lower()
         # 检查1: 直接匹配 complex_types 配置（如 json, jsonb, hstore, xml, bytea, tsvector, tsquery, point, line, etc.）
         # 检查2: 特殊处理数组类型 - 如果配置中包含 "array"，则匹配 ARRAY 类型或 xxx[] 后缀
-        is_complex = (
-            data_type_lower in self.config.complex_types or
-            ("array" in self.config.complex_types and data_type_lower.endswith("[]"))
+        is_complex = data_type_lower in self.config.complex_types or (
+            "array" in self.config.complex_types and data_type_lower.endswith("[]")
         )
         if is_complex:
             inference_basis.append(f"complex_type:{data_type_lower}")
             return (
-                "complex",                 # semantic_role
-                0.95,                      # confidence
-                None,                      # identifier_info
-                None,                      # metric_info
-                None,                      # datetime_info
-                None,                      # enum_info
-                None,                      # audit_info
-                None,                      # description_info
-                inference_basis,           # List[str]
+                "complex",  # semantic_role
+                0.95,  # confidence
+                None,  # identifier_info
+                None,  # metric_info
+                None,  # datetime_info
+                None,  # enum_info
+                None,  # audit_info
+                None,  # description_info
+                inference_basis,  # List[str]
             )
 
         # audit detection
         audit_pattern = self._match_pattern(self._compiled_audit_patterns, lower_name)
         if audit_pattern:
             inference_basis.append(f"audit_pattern:{audit_pattern.pattern}")
-            audit_type, description = self._determine_audit_type(lower_name, column.data_type)
+            audit_type, description = self._determine_audit_type(
+                lower_name, column.data_type
+            )
             return (
                 "audit",
                 0.95,
@@ -682,16 +877,27 @@ class MetadataProfiler:
             )
 
         # datetime detection
-        if column.data_type.lower() in self.config.datetime_types or self._matches_datetime_name(lower_name):
-            inference_basis.append("datetime_type_match" if column.data_type.lower() in self.config.datetime_types else "datetime_name_match")
-            confidence = 1.0 if column.data_type.lower() in self.config.datetime_types else 0.85
+        if (
+            column.data_type.lower() in self.config.datetime_types
+            or self._matches_datetime_name(lower_name)
+        ):
+            inference_basis.append(
+                "datetime_type_match"
+                if column.data_type.lower() in self.config.datetime_types
+                else "datetime_name_match"
+            )
+            confidence = (
+                1.0 if column.data_type.lower() in self.config.datetime_types else 0.85
+            )
             grain = self._infer_datetime_grain(lower_name)
             return (
                 "datetime",
                 confidence,
                 None,
                 None,
-                DateTimeInfo(datetime_type=column.data_type.lower(), datetime_grain=grain),
+                DateTimeInfo(
+                    datetime_type=column.data_type.lower(), datetime_grain=grain
+                ),
                 None,
                 None,
                 None,
@@ -699,7 +905,9 @@ class MetadataProfiler:
             )
 
         # identifier detection (新规则体系)
-        is_id, id_confidence, matched_pattern, id_basis = self._is_identifier(column, stats, struct_flags)
+        is_id, id_confidence, matched_pattern, id_basis = self._is_identifier(
+            column, stats, struct_flags
+        )
         if is_id:
             inference_basis.extend(id_basis)
             # 使用匹配的模式或关键词作为命名模式
@@ -707,7 +915,10 @@ class MetadataProfiler:
             return (
                 "identifier",
                 id_confidence,
-                IdentifierInfo(naming_pattern=naming_pattern, is_surrogate=not struct_flags.is_foreign_key),
+                IdentifierInfo(
+                    naming_pattern=naming_pattern,
+                    is_surrogate=not struct_flags.is_foreign_key,
+                ),
                 None,
                 None,
                 None,
@@ -752,7 +963,9 @@ class MetadataProfiler:
                 None,
                 None,
                 None,
-                EnumInfo(cardinality=cardinality, cardinality_level="low", values=values),
+                EnumInfo(
+                    cardinality=cardinality, cardinality_level="low", values=values
+                ),
                 None,
                 None,
                 inference_basis,
@@ -777,14 +990,20 @@ class MetadataProfiler:
         if metric_pattern:
             inference_basis.append(f"metric_pattern:{metric_pattern.pattern}")
         if numeric_type or metric_pattern:
-            confidence = 0.95 if numeric_type and metric_pattern else (0.7 if numeric_type else 0.6)
+            confidence = (
+                0.95
+                if numeric_type and metric_pattern
+                else (0.7 if numeric_type else 0.6)
+            )
             category = self._determine_metric_category(lower_name)
             aggregations = self._suggest_metric_aggregations(category)
             return (
                 "metric",
                 confidence,
                 None,
-                MetricInfo(metric_category=category, suggested_aggregations=aggregations),
+                MetricInfo(
+                    metric_category=category, suggested_aggregations=aggregations
+                ),
                 None,
                 None,
                 None,
@@ -803,7 +1022,7 @@ class MetadataProfiler:
         struct_flags: StructureFlags,
     ) -> bool:
         """判断是否为简单的两值枚举
-        
+
         条件：
         0. 命名排除规则（描述性字段不应该是枚举）
         1. 唯一值数量恰好为 2
@@ -815,86 +1034,102 @@ class MetadataProfiler:
         """
         if not stats:
             return False
-        
+
         # 条件0: 命名排除规则 - 描述性字段不应该是枚举
         lower_name = column.column_name.lower()
-        exclude_keywords = ["name", "nm", "desc", "description", "remark", "comment", "details", "memo", "summary"]
+        exclude_keywords = [
+            "name",
+            "nm",
+            "desc",
+            "description",
+            "remark",
+            "comment",
+            "details",
+            "memo",
+            "summary",
+        ]
         for keyword in exclude_keywords:
             if keyword in lower_name:
                 return False
-        
+
         # 条件1: 唯一值数量必须恰好为 2
         unique_count = stats.get("unique_count")
         if unique_count != 2:
             return False
-        
+
         # 条件2: 数据类型检查
         data_type_lower = column.data_type.lower()
         is_string_type = data_type_lower in {
-            "character varying", "varchar", "text", "char", "character"
+            "character varying",
+            "varchar",
+            "text",
+            "char",
+            "character",
         }
         is_small_int = data_type_lower in {"integer", "smallint", "boolean"}
-        
+
         if not (is_string_type or is_small_int):
             return False
-        
+
         # 条件3: 非主键、非外键、非唯一约束（包括复合约束成员）
-        if (struct_flags.is_primary_key or 
-            struct_flags.is_composite_primary_key_member or
-            struct_flags.is_foreign_key or 
-            struct_flags.is_composite_foreign_key_member or
-            struct_flags.is_unique or
-            struct_flags.is_unique_constraint or
-            struct_flags.is_composite_unique_constraint_member):
+        if (
+            struct_flags.is_primary_key
+            or struct_flags.is_composite_primary_key_member
+            or struct_flags.is_foreign_key
+            or struct_flags.is_composite_foreign_key_member
+            or struct_flags.is_unique
+            or struct_flags.is_unique_constraint
+            or struct_flags.is_composite_unique_constraint_member
+        ):
             return False
-        
+
         # 条件4: 非空比例较低
         null_rate = stats.get("null_rate", 0)
         if null_rate >= 0.3:
             return False
-        
+
         # 条件5: 每个值至少出现2次（避免数据稀疏）
         value_distribution = stats.get("value_distribution", {})
         if not value_distribution or len(value_distribution) != 2:
             return False
-        
+
         for count in value_distribution.values():
             if count < 2:
                 return False
-        
+
         # 条件6: 字符串值长度检查
         if is_string_type:
             for value in value_distribution.keys():
                 if value and len(str(value)) > 20:
                     return False
-        
+
         return True
 
     def _is_identifier_type(self, column: ColumnInfo) -> bool:
         """规则0：数据类型白名单检查（配置驱动）
-        
+
         从配置文件读取 allowed_data_types 白名单。
-        
+
         允许的类型（默认）：
         - 整数类型：integer, bigint, smallint, serial 等
         - 字符串类型：varchar, char 等
         - UUID类型：uuid
         - 数值类型（无小数）：numeric(scale=0), decimal(scale=0)
-        
+
         排除的类型（所有不在白名单中的）：
         - boolean, text, float, timestamp, json, jsonb, array, bytea
         - geometry, geography, hstore, xml, inet, cidr, macaddr
         - 范围类型、位串类型等
         """
         data_type_lower = column.data_type.lower()
-        
+
         # 从配置获取白名单
         allowed_types = set(self.config.allowed_identifier_types)
-        
+
         # 检查是否在白名单中
         if data_type_lower not in allowed_types:
             return False
-        
+
         # numeric/decimal 类型：需要额外检查 scale=0（无小数位）
         if data_type_lower in {"numeric", "decimal"}:
             scale = column.numeric_scale
@@ -903,98 +1138,113 @@ class MetadataProfiler:
                 return False
             # scale=0 或无 scale 信息，允许
             return True
-        
+
         # 其他在白名单中的类型，直接允许
         return True
 
-    def _has_physical_constraint(self, struct_flags: StructureFlags) -> Tuple[bool, float, str]:
+    def _has_physical_constraint(
+        self, struct_flags: StructureFlags
+    ) -> Tuple[bool, float, str]:
         """规则1：物理约束检查
-        
+
         检查字段是否有 PRIMARY KEY、FOREIGN KEY 或 UNIQUE 约束
         （包括单列约束和复合约束成员）
-        
+
         返回: (是否有约束, 置信度, 约束类型)
         """
         if struct_flags.is_primary_key or struct_flags.is_composite_primary_key_member:
             return (True, 1.0, "primary_key")
         if struct_flags.is_foreign_key or struct_flags.is_composite_foreign_key_member:
             return (True, 1.0, "foreign_key")
-        if struct_flags.is_unique_constraint or struct_flags.is_composite_unique_constraint_member:
+        if (
+            struct_flags.is_unique_constraint
+            or struct_flags.is_composite_unique_constraint_member
+        ):
             return (True, 1.0, "unique_constraint")
         return (False, 0.0, "")
 
     def _has_high_uniqueness(self, stats: Optional[Dict]) -> Tuple[bool, float, str]:
         """规则2：统计特征检查
-        
+
         条件：唯一性 > high_uniqueness_threshold AND 非空率 > min_non_null_rate
-        
+
         返回: (是否满足, 置信度, 原因)
         """
         if not stats:
             return (False, 0.0, "")
-        
+
         uniqueness = stats.get("uniqueness")
         null_rate = stats.get("null_rate", 0)
-        
+
         if uniqueness is None:
             return (False, 0.0, "")
-        
+
         try:
             uniqueness_val = float(uniqueness)
             null_rate_val = float(null_rate)
             non_null_rate = 1.0 - null_rate_val
-            
+
             # 使用配置的阈值
-            if uniqueness_val > self.config.high_uniqueness_threshold and non_null_rate > self.config.min_non_null_rate:
+            if (
+                uniqueness_val > self.config.high_uniqueness_threshold
+                and non_null_rate > self.config.min_non_null_rate
+            ):
                 return (True, 0.95, "high_uniqueness")
         except (TypeError, ValueError):
             pass
-        
+
         return (False, 0.0, "")
 
     def _has_identifier_naming(
-        self, 
-        column_name: str, 
-        stats: Optional[Dict]
+        self, column_name: str, stats: Optional[Dict]
     ) -> Tuple[bool, float, str, str]:
         """规则3：命名特征检查
-        
+
         条件：字段名包含标识关键词 AND 唯一性 > low_uniqueness_threshold
-        
+
         返回: (是否满足, 置信度, 匹配的关键词, 原因)
         """
         lower_name = column_name.lower()
-        
+
         # 8大类关键词
         identifier_keywords = [
             # ID类
-            "id", "uid",
+            "id",
+            "uid",
             # Code类
             "code",
             # Key类
-            "key", "pk", "fk",
+            "key",
+            "pk",
+            "fk",
             # Number类
-            "no", "num", "number",
+            "no",
+            "num",
+            "number",
             # 序列类
-            "sn", "serial", "seq",
+            "sn",
+            "serial",
+            "seq",
             # UUID类
-            "uuid", "guid",
+            "uuid",
+            "guid",
             # 引用类
-            "ref", "reference",
+            "ref",
+            "reference",
             # 标识类
             "identifier",
         ]
-        
+
         # 查找匹配的关键词
         matched_keyword = None
         for keyword in identifier_keywords:
             if keyword in lower_name:
                 matched_keyword = keyword
                 break
-        
+
         if not matched_keyword:
             return (False, 0.0, "", "")
-        
+
         # 检查唯一性 > low_uniqueness_threshold（排除枚举）
         if stats:
             uniqueness = stats.get("uniqueness")
@@ -1006,7 +1256,7 @@ class MetadataProfiler:
                         return (True, 0.85, matched_keyword, "naming_with_uniqueness")
                 except (TypeError, ValueError):
                     pass
-        
+
         # 如果没有统计数据，仅基于命名判断（降低置信度）
         return (True, 0.75, matched_keyword, "naming_only")
 
@@ -1017,18 +1267,18 @@ class MetadataProfiler:
         struct_flags: StructureFlags,
     ) -> Tuple[bool, float, Optional[str], List[str]]:
         """综合判断是否为 identifier
-        
+
         按优先级依次检查：
         0. 命名排除规则（name/desc 等描述性字段）
         1. 数据类型白名单（前置过滤）
         2. 物理约束（PK/FK/UNIQUE）
         3. 统计特征（唯一性>high_uniqueness_threshold + 非空率>min_non_null_rate）
         4. 命名特征（关键词 + 唯一性>low_uniqueness_threshold）
-        
+
         返回: (是否identifier, 置信度, 匹配的模式/关键词, 推断依据列表)
         """
         inference_basis = []
-        
+
         # 规则0a：命名排除规则 - 描述性字段不应该是 identifier
         # 即使它们唯一，也应该是 attribute
         lower_name = column.column_name.lower()
@@ -1036,19 +1286,21 @@ class MetadataProfiler:
         for keyword in self.config.identifier_exclude_keywords:
             if keyword in lower_name:
                 return (False, 0.0, None, [])
-        
+
         # 规则0b：类型白名单检查（前置过滤）
         if not self._is_identifier_type(column):
             return (False, 0.0, None, [])
-        
+
         inference_basis.append("type_whitelist_passed")
-        
+
         # 规则1：物理约束检查（最高优先级，100%确定）
-        has_constraint, constraint_conf, constraint_type = self._has_physical_constraint(struct_flags)
+        has_constraint, constraint_conf, constraint_type = (
+            self._has_physical_constraint(struct_flags)
+        )
         if has_constraint:
             inference_basis.append(f"physical_constraint:{constraint_type}")
             return (True, constraint_conf, constraint_type, inference_basis)
-        
+
         # 规则2：统计特征检查（逻辑主键候选）
         has_high_uniq, uniq_conf, uniq_reason = self._has_high_uniqueness(stats)
         if has_high_uniq:
@@ -1073,13 +1325,15 @@ class MetadataProfiler:
             if not any(kw in lower_name for kw in metric_naming_keywords):
                 inference_basis.append(uniq_reason)
                 return (True, uniq_conf, "logical_primary_key", inference_basis)
-        
+
         # 规则3：命名特征检查（逻辑外键候选或命名规范的标识字段）
-        has_naming, naming_conf, matched_kw, naming_reason = self._has_identifier_naming(column.column_name, stats)
+        has_naming, naming_conf, matched_kw, naming_reason = (
+            self._has_identifier_naming(column.column_name, stats)
+        )
         if has_naming:
             inference_basis.append(naming_reason)
             return (True, naming_conf, matched_kw, inference_basis)
-        
+
         # 都不满足
         return (False, 0.0, None, [])
 
@@ -1090,81 +1344,84 @@ class MetadataProfiler:
         struct_flags: StructureFlags,
     ) -> Tuple[bool, str]:
         """判断是否为 description 角色
-        
+
         判断顺序：
         1. 排除有物理约束的字段
         2. 数据类型检查（text 或 长 varchar）
         3. 命名模式强匹配（优先于平均长度检查）
         4. 统计特征检查（平均长度、唯一性、长度离散度）
-        
+
         Args:
             column: 列信息
             stats: 统计信息
             struct_flags: 结构标志
-            
+
         Returns:
             (是否为 description, 推断依据)
         """
         # 1. 排除：有物理约束或被索引的字段
-        if (struct_flags.is_primary_key or
-            struct_flags.is_composite_primary_key_member or
-            struct_flags.is_foreign_key or
-            struct_flags.is_composite_foreign_key_member or
-            struct_flags.is_indexed or
-            struct_flags.is_composite_indexed_member):
+        if (
+            struct_flags.is_primary_key
+            or struct_flags.is_composite_primary_key_member
+            or struct_flags.is_foreign_key
+            or struct_flags.is_composite_foreign_key_member
+            or struct_flags.is_indexed
+            or struct_flags.is_composite_indexed_member
+        ):
             return (False, "")
-        
+
         data_type = column.data_type.lower()
         lower_name = column.column_name.lower()
-        
+
         # 2. 数据类型检查
         is_text_type = data_type == "text"
         is_long_varchar = (
             data_type in ("varchar", "character varying", "char", "character")
             and column.character_maximum_length
-            and column.character_maximum_length >= self.config.description_min_varchar_length
+            and column.character_maximum_length
+            >= self.config.description_min_varchar_length
         )
-        
+
         if not (is_text_type or is_long_varchar):
             return (False, "")
-        
+
         # 3. 命名模式强匹配（优先于平均长度检查）
         # 如果字段名包含 description 关键词，直接判定为 description
         if any(kw in lower_name for kw in self.config.description_keywords):
             return (True, "description_keyword_match")
-        
+
         # 4. 排除：包含 identifier 关键词的字段
         if any(kw in lower_name for kw in self.config.description_exclude_keywords):
             return (False, "")
-        
+
         # 以下是统计特征检查，需要 stats
         if not stats:
             return (False, "")
-        
+
         # 5. 平均长度检查
         avg_length = stats.get("avg_length", 0)
         if avg_length < self.config.description_min_avg_length:
             return (False, "")
-        
+
         # 6. 唯一性检查
         uniqueness = stats.get("uniqueness", 0)
         if uniqueness < self.config.description_min_uniqueness:
             return (False, "")
-        
+
         # 7. 长度稳定性检查
         length_std = stats.get("length_std", 0)
         max_length = stats.get("max_length", 0)
         min_length = stats.get("min_length", 0)
-        
+
         # 如果长度非常稳定，可能是固定格式的编码，排除
         if length_std < self.config.description_max_stable_std:
             return (False, "")
-        
+
         # 8. 如果长度离散度高，判定为 description
         length_range = max_length - min_length
         if length_std > self.config.description_min_variance_std or length_range > 100:
             return (True, "description_high_variance")
-        
+
         return (False, "")
 
     def _matches_datetime_name(self, column_name: str) -> bool:
@@ -1196,7 +1453,9 @@ class MetadataProfiler:
                 return grain
         return None
 
-    def _match_pattern(self, patterns: List[re.Pattern], text: str) -> Optional[re.Pattern]:
+    def _match_pattern(
+        self, patterns: List[re.Pattern], text: str
+    ) -> Optional[re.Pattern]:
         for pattern in patterns:
             if pattern.search(text):
                 return pattern
@@ -1218,49 +1477,122 @@ class MetadataProfiler:
             return ["AVG"]
         return ["SUM", "AVG", "MIN", "MAX"]
 
-    def _determine_audit_type(self, column_name: str, data_type: str) -> Tuple[str, str]:
+    def _determine_audit_type(
+        self, column_name: str, data_type: str
+    ) -> Tuple[str, str]:
         """判断审计字段的类型和用途"""
         lower_name = column_name.lower()
-        
+
         # 时间戳类型
-        if any(keyword in lower_name for keyword in ["created_at", "create_time", "insert_time", "added_at"]):
+        if any(
+            keyword in lower_name
+            for keyword in ["created_at", "create_time", "insert_time", "added_at"]
+        ):
             return ("timestamp", "记录创建时间")
-        if any(keyword in lower_name for keyword in ["updated_at", "update_time", "modified_at", "changed_at", "last_modified", "last_updated"]):
+        if any(
+            keyword in lower_name
+            for keyword in [
+                "updated_at",
+                "update_time",
+                "modified_at",
+                "changed_at",
+                "last_modified",
+                "last_updated",
+            ]
+        ):
             return ("timestamp", "记录更新时间")
-        if any(keyword in lower_name for keyword in ["deleted_at", "delete_time", "removed_at"]):
+        if any(
+            keyword in lower_name
+            for keyword in ["deleted_at", "delete_time", "removed_at"]
+        ):
             return ("timestamp", "记录删除时间")
-        if any(keyword in lower_name for keyword in ["etl_", "load_", "batch_", "effective_", "valid_from", "valid_to"]):
+        if any(
+            keyword in lower_name
+            for keyword in [
+                "etl_",
+                "load_",
+                "batch_",
+                "effective_",
+                "valid_from",
+                "valid_to",
+            ]
+        ):
             return ("etl", "ETL时间戳")
-        
+
         # 操作人类型
-        if any(keyword in lower_name for keyword in ["_by", "_user", "creator", "updater", "modifier", "operator"]):
+        if any(
+            keyword in lower_name
+            for keyword in [
+                "_by",
+                "_user",
+                "creator",
+                "updater",
+                "modifier",
+                "operator",
+            ]
+        ):
             return ("actor", "操作人标识")
-        
+
         # 软删除标志
-        if any(keyword in lower_name for keyword in ["is_deleted", "is_active", "is_valid", "del_flag", "delete_flag"]):
+        if any(
+            keyword in lower_name
+            for keyword in [
+                "is_deleted",
+                "is_active",
+                "is_valid",
+                "del_flag",
+                "delete_flag",
+            ]
+        ):
             return ("flag", "软删除标志")
-        
+
         # 版本控制
         if any(keyword in lower_name for keyword in ["version", "_ver", "revision"]):
             return ("version", "版本号")
-        
+
         # 默认
         return ("timestamp", "审计时间戳")
 
-    def _calculate_column_summary(self, column_profiles: Dict[str, ColumnProfile]) -> ColumnStatisticsSummary:
-        identifier_count = sum(1 for profile in column_profiles.values() if profile.semantic_role == "identifier")
-        metric_count = sum(1 for profile in column_profiles.values() if profile.semantic_role == "metric")
-        datetime_count = sum(1 for profile in column_profiles.values() if profile.semantic_role == "datetime")
-        audit_count = sum(1 for profile in column_profiles.values() if profile.semantic_role == "audit")
+    def _calculate_column_summary(
+        self, column_profiles: Dict[str, ColumnProfile]
+    ) -> ColumnStatisticsSummary:
+        identifier_count = sum(
+            1
+            for profile in column_profiles.values()
+            if profile.semantic_role == "identifier"
+        )
+        metric_count = sum(
+            1
+            for profile in column_profiles.values()
+            if profile.semantic_role == "metric"
+        )
+        datetime_count = sum(
+            1
+            for profile in column_profiles.values()
+            if profile.semantic_role == "datetime"
+        )
+        audit_count = sum(
+            1
+            for profile in column_profiles.values()
+            if profile.semantic_role == "audit"
+        )
         # enum_count = sum(1 for profile in column_profiles.values() if profile.semantic_role == "enum")  # 已删除
-        attribute_count = sum(1 for profile in column_profiles.values() if profile.semantic_role == "attribute")
+        attribute_count = sum(
+            1
+            for profile in column_profiles.values()
+            if profile.semantic_role == "attribute"
+        )
         primary_key_count = sum(
-            1 for profile in column_profiles.values() 
-            if profile.structure_flags.is_primary_key or profile.structure_flags.is_composite_primary_key_member
+            1
+            for profile in column_profiles.values()
+            if profile.structure_flags.is_primary_key
+            or profile.structure_flags.is_composite_primary_key_member
         )
         foreign_key_count = sum(
-            1 for profile in column_profiles.values() 
-            if profile.structure_flags.is_foreign_key or profile.structure_flags.is_composite_foreign_key_member
+            1
+            for profile in column_profiles.values()
+            if profile.structure_flags.is_foreign_key
+            or profile.structure_flags.is_composite_foreign_key_member
         )
 
         return ColumnStatisticsSummary(
@@ -1281,10 +1613,18 @@ class MetadataProfiler:
         column_profiles: Dict[str, ColumnProfile],
     ) -> KeyColumnsSummary:
         primary_keys = metadata.primary_keys[0].columns if metadata.primary_keys else []
-        logical_primary_keys = metadata.candidate_logical_primary_keys[0].columns if metadata.candidate_logical_primary_keys else []
+        logical_primary_keys = (
+            metadata.candidate_logical_primary_keys[0].columns
+            if metadata.candidate_logical_primary_keys
+            else []
+        )
         foreign_keys = sorted(
-            {name for name, profile in column_profiles.items() 
-             if profile.structure_flags.is_foreign_key or profile.structure_flags.is_composite_foreign_key_member}
+            {
+                name
+                for name, profile in column_profiles.items()
+                if profile.structure_flags.is_foreign_key
+                or profile.structure_flags.is_composite_foreign_key_member
+            }
         )
         return KeyColumnsSummary(
             primary_keys=primary_keys,
@@ -1328,20 +1668,37 @@ class MetadataProfiler:
                 inference_basis.append("fact_datetime")
         if conditions_met >= 2:
             confidence = 0.6
-            confidence += 0.15 if len(metric_columns) >= self.config.fact_rules.min_metric_columns else 0
-            confidence += 0.1 if len(identifier_columns) >= self.config.fact_rules.min_dimension_columns else 0
+            confidence += (
+                0.15
+                if len(metric_columns) >= self.config.fact_rules.min_metric_columns
+                else 0
+            )
+            confidence += (
+                0.1
+                if len(identifier_columns)
+                >= self.config.fact_rules.min_dimension_columns
+                else 0
+            )
             confidence += 0.1 if datetime_columns else 0
-            if self._matches_table_pattern(metadata.table_name, self._compiled_fact_patterns):
+            if self._matches_table_pattern(
+                metadata.table_name, self._compiled_fact_patterns
+            ):
                 confidence += 0.05
                 inference_basis.append("fact_name_pattern")
-            if self._matches_comment_keyword(metadata.comment, self.config.fact_rules.comment_keywords):
+            if self._matches_comment_keyword(
+                metadata.comment, self.config.fact_rules.comment_keywords
+            ):
                 confidence += 0.05
                 inference_basis.append("fact_comment_keyword")
             return ("fact", min(confidence, 0.98), inference_basis)
 
         # Dimension detection
         if (
-            (metadata.primary_keys or metadata.candidate_logical_primary_keys or not self.config.dim_rules.require_primary_key)
+            (
+                metadata.primary_keys
+                or metadata.candidate_logical_primary_keys
+                or not self.config.dim_rules.require_primary_key
+            )
             and len(metric_columns) <= self.config.dim_rules.max_metric_columns
             and identifier_columns
         ):
@@ -1352,10 +1709,14 @@ class MetadataProfiler:
                 inference_basis.append("dim_has_primary_key")
             if not metric_columns:
                 confidence += 0.1
-            if self._matches_table_pattern(metadata.table_name, self._compiled_dim_patterns):
+            if self._matches_table_pattern(
+                metadata.table_name, self._compiled_dim_patterns
+            ):
                 confidence += 0.05
                 inference_basis.append("dim_name_pattern")
-            if self._matches_comment_keyword(metadata.comment, self.config.dim_rules.comment_keywords):
+            if self._matches_comment_keyword(
+                metadata.comment, self.config.dim_rules.comment_keywords
+            ):
                 confidence += 0.05
                 inference_basis.append("dim_comment_keyword")
             return ("dim", min(confidence, 0.95), inference_basis)
@@ -1363,7 +1724,9 @@ class MetadataProfiler:
         # Unknown
         return ("unknown", 0.5, inference_basis)
 
-    def _matches_table_pattern(self, table_name: str, patterns: List[re.Pattern]) -> bool:
+    def _matches_table_pattern(
+        self, table_name: str, patterns: List[re.Pattern]
+    ) -> bool:
         return any(pattern.search(table_name) for pattern in patterns)
 
     def _matches_comment_keyword(self, comment: str, keywords: List[str]) -> bool:
@@ -1378,4 +1741,3 @@ class MetadataProfiler:
         for idx in range(0, len(foreign_keys) - 1, 2):
             pairs.append((foreign_keys[idx], foreign_keys[idx + 1]))
         return pairs
-

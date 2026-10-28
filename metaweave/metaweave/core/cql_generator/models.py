@@ -10,6 +10,7 @@ from typing import List, Optional, Dict, Any
 @dataclass
 class ForeignKeyConstraint:
     """外键约束"""
+
     constraint_name: str
     source_columns: List[str]
     target_schema: str
@@ -23,6 +24,7 @@ class TableNode:
 
     对应 Neo4j 中的 Table 节点，包含表的所有属性。
     """
+
     # 必需属性
     full_name: str  # schema.table（唯一键）
     schema: str
@@ -81,6 +83,7 @@ class ColumnNode:
 
     对应 Neo4j 中的 Column 节点，包含列的所有属性。
     """
+
     # 必需属性
     full_name: str  # schema.table.column（唯一键）
     schema: str
@@ -131,7 +134,7 @@ class ColumnNode:
             "is_measure": self.is_measure,
             "pk_position": self.pk_position,
             "uniqueness": self.uniqueness,
-            "null_rate": self.null_rate
+            "null_rate": self.null_rate,
         }
 
 
@@ -141,6 +144,7 @@ class HASColumnRelation:
 
     表示 Table -> Column 的包含关系。
     """
+
     table_full_name: str
     column_full_name: str
 
@@ -148,7 +152,7 @@ class HASColumnRelation:
         """转换为 Cypher 参数字典"""
         return {
             "table_full_name": self.table_full_name,
-            "column_full_name": self.column_full_name
+            "column_full_name": self.column_full_name,
         }
 
 
@@ -158,6 +162,7 @@ class JOINOnRelation:
 
     表示 Table -> Table 的关联关系。
     """
+
     # 关系身份（doc 18：JOIN_ON 边的身份属性，来自 rel 产物的 relationship_id）
     relationship_id: str
 
@@ -194,7 +199,7 @@ class JOINOnRelation:
             "join_type": self.join_type,
             "on": self.on,
             "source_columns": self.source_columns,
-            "target_columns": self.target_columns
+            "target_columns": self.target_columns,
         }
 
 
@@ -206,17 +211,18 @@ class RelationshipFilterStats:
     都获得稳定结构。
     """
 
-    candidate_count: int = 0              # 候选关系数 = 全部条目
-    threshold_passed_count: int = 0       # 通过阈值数 = FK 直通豁免 + 达标推断
-    threshold_filtered_count: int = 0     # 被阈值过滤数 = 不达标推断
-    duplicate_group_count: int = 0        # 重复 relationship_id 组数
-    duplicate_discarded_count: int = 0    # 重复 ID 去重丢弃数
-    final_count: int = 0                  # 最终 JOIN_ON 数
+    candidate_count: int = 0  # 候选关系数 = 全部条目
+    threshold_passed_count: int = 0  # 通过阈值数 = FK 直通豁免 + 达标推断
+    threshold_filtered_count: int = 0  # 被阈值过滤数 = 不达标推断
+    duplicate_group_count: int = 0  # 重复 relationship_id 组数
+    duplicate_discarded_count: int = 0  # 重复 ID 去重丢弃数
+    final_count: int = 0  # 最终 JOIN_ON 数
 
 
 @dataclass
 class CQLGenerationResult:
     """CQL 生成结果"""
+
     success: bool
     output_files: List[str] = field(default_factory=list)
     tables_count: int = 0

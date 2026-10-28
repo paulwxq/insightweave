@@ -300,12 +300,13 @@ def _run_generate_sql_rag(
     "--source-id",
     multiple=True,
     help="--step db 必填、--step ddl 可选（受管模式）、--step cql 必填"
-    "（doc 4 实体键身份）：平台库中已登记的数据源 UUID（仅允许传入一次）",
+    "（doc 4 实体键身份）：平台库中已登记的数据源短 ID db_src_N（仅允许传入一次）",
 )
 @click.option(
-    "--job-id",
+    "--workspace-id",
     multiple=True,
-    help="仅 --step db / 受管 --step ddl 可选：复用已登记的工作区 UUID；省略则新建工作区（仅允许传入一次）",
+    help="仅 --step db / 受管 --step ddl 必填（doc 6 §2）：定位 output/<source_id>/<workspace_id>/ 工作区"
+    "（仅允许传入一次）",
 )
 @click.option(
     "--domain",
@@ -388,7 +389,7 @@ def metadata_command(
     clean: bool,
     step: Tuple[str, ...],
     source_id: Tuple[str, ...],
-    job_id: Tuple[str, ...],
+    workspace_id: Tuple[str, ...],
     domain: Optional[str],
     domains_config: str,
     generate_domains: bool,
@@ -432,27 +433,27 @@ def metadata_command(
         raise click.UsageError(
             "--source-id 仅适用于 --step db、受管 --step ddl 或 --step cql"
         )
-    if len(job_id) > 1:
-        raise click.UsageError("--job-id 仅允许传入一次")
-    if step not in ("db", "ddl") and job_id:
-        raise click.UsageError("--job-id 仅适用于 --step db 或受管 --step ddl")
+    if len(workspace_id) > 1:
+        raise click.UsageError("--workspace-id 仅允许传入一次")
+    if step not in ("db", "ddl") and workspace_id:
+        raise click.UsageError("--workspace-id 仅适用于 --step db 或受管 --step ddl")
     if step == "db":
         if not source_id:
             raise click.UsageError("--step db 必须指定 --source-id")
+        if not workspace_id:
+            raise click.UsageError("--step db 必须指定 --workspace-id（doc 6 §2）")
         if generate_domains or generate_dim_config or generate_sql_rag:
             raise click.UsageError("--step db 不能与 --generate-* 模式同时使用")
-        from metaweave.utils.source_id import normalize_source_id
+        from metaweave.utils.source_id import (
+            normalize_source_id,
+            normalize_workspace_id,
+        )
 
         try:
-            source_uuid = normalize_source_id(source_id[0])
+            source_arg = normalize_source_id(source_id[0])
+            workspace_arg = normalize_workspace_id(workspace_id[0])
         except ValueError as exc:
             raise click.UsageError(str(exc)) from None
-        job_uuid_arg = None
-        if job_id:
-            try:
-                job_uuid_arg = normalize_source_id(job_id[0])
-            except ValueError:
-                raise click.UsageError("--job-id 不是合法 UUID") from None
         ctx = click.get_current_context()
         excluded = {
             "schemas",
@@ -472,10 +473,8 @@ def metadata_command(
             if origin is not None and origin.name == "COMMANDLINE":
                 raise click.UsageError(f"--step db 不接受 {_PARAM_DISPLAY[name]}")
         try:
-            from backend.data_sources.db_step_service import (
-                DbStepConfigError,
-                run_db_step,
-            )
+            from backend.data_sources.db_step_service import run_db_step
+            from backend.data_sources.step_context import DbStepConfigError
         except ModuleNotFoundError as exc:
             if exc.name in {"sqlalchemy", "cryptography"}:
                 raise click.UsageError(
@@ -484,37 +483,52 @@ def metadata_command(
             raise
         config_path = resolve_project_path(config)
         try:
-            result = run_db_step(config_path, source_uuid, clean, job_id=job_uuid_arg)
+            from backend.data_sources.step_context import load_step_context
+            from backend.persistence.platform_db import (
+                load_platform_settings_from_env,
+            )
+
+            step_ctx = load_step_context(
+                load_platform_settings_from_env(),
+                source_id=source_arg,
+                workspace_id=workspace_arg,
+                run_id=None,
+                step_name="db",
+                step_params=None,
+                config_path=config_path,
+            )
+            outcome = run_db_step(step_ctx)
         except DbStepConfigError as exc:
             raise click.UsageError(str(exc)) from None
-        result_job = result.get("job_id")
-        job_suffix = f"（job_id: {result_job}）" if result_job else ""
-        if not result["success"]:
-            click.echo(f"❌ 错误: {result['message']}{job_suffix}", err=True)
+        job_suffix = f"（workspace: {workspace_arg}）"
+        if not outcome.success:
+            click.echo(f"❌ 错误: {outcome.message}{job_suffix}", err=True)
             raise click.Abort()
-        click.echo(f"✅ {result['message']}{job_suffix}")
+        click.echo(f"✅ {outcome.message}{job_suffix}")
         return
 
     if step == "ddl":
         # 受管 DDL（doc 16 §4）：带 --source-id 进入受管模式，产物落在
-        # output/<source_id>/<job_id>/ddl/；不带则保持未受管行为不变。
-        if job_id and not source_id:
-            raise click.UsageError("--job-id 仅在受管模式（--source-id）下可用")
+        # output/<source_id>/<workspace_id>/ddl/；不带则保持未受管行为不变。
+        if workspace_id and not source_id:
+            raise click.UsageError("--workspace-id 仅在受管模式（--source-id）下可用")
         if source_id:
+            if not workspace_id:
+                raise click.UsageError(
+                    "受管 --step ddl 必须同时指定 --workspace-id（doc 6 §2）"
+                )
             if generate_domains or generate_dim_config or generate_sql_rag:
                 raise click.UsageError("--step ddl 不能与 --generate-* 模式同时使用")
-            from metaweave.utils.source_id import normalize_source_id
+            from metaweave.utils.source_id import (
+                normalize_source_id,
+                normalize_workspace_id,
+            )
 
             try:
-                source_uuid = normalize_source_id(source_id[0])
+                source_arg = normalize_source_id(source_id[0])
+                workspace_arg = normalize_workspace_id(workspace_id[0])
             except ValueError as exc:
                 raise click.UsageError(str(exc)) from None
-            job_uuid_arg = None
-            if job_id:
-                try:
-                    job_uuid_arg = normalize_source_id(job_id[0])
-                except ValueError:
-                    raise click.UsageError("--job-id 不是合法 UUID") from None
             ctx = click.get_current_context()
             # 受管组合硬校验（doc 16 §4）：--schemas/--tables 缩小采集范围、
             # --clean 与受管模式每次自动清理重复；显式传入即拒绝，且必须
@@ -534,10 +548,8 @@ def metadata_command(
                 else None
             )
             try:
-                from backend.data_sources.ddl_step_service import (
-                    DbStepConfigError,
-                    run_ddl_step,
-                )
+                from backend.data_sources.ddl_step_service import run_ddl_step
+                from backend.data_sources.step_context import DbStepConfigError
             except ModuleNotFoundError as exc:
                 if exc.name in {"sqlalchemy", "cryptography"}:
                     raise click.UsageError(
@@ -546,16 +558,25 @@ def metadata_command(
                 raise
             config_path = resolve_project_path(config)
             try:
-                result = run_ddl_step(
-                    config_path,
-                    source_uuid,
-                    job_id=job_uuid_arg,
-                    max_workers=workers_arg,
+                from backend.data_sources.step_context import load_step_context
+                from backend.persistence.platform_db import (
+                    load_platform_settings_from_env,
                 )
+
+                step_ctx = load_step_context(
+                    load_platform_settings_from_env(),
+                    source_id=source_arg,
+                    workspace_id=workspace_arg,
+                    run_id=None,
+                    step_name="ddl",
+                    step_params=None,
+                    config_path=config_path,
+                )
+                outcome = run_ddl_step(step_ctx, max_workers=workers_arg)
             except DbStepConfigError as exc:
                 raise click.UsageError(str(exc)) from None
-            result_job = result.get("job_id")
-            job_suffix = f"（job_id: {result_job}）" if result_job else ""
+            result = {"success": outcome.success, "message": outcome.message}
+            job_suffix = f"（workspace: {workspace_arg}）"
             if not result["success"]:
                 click.echo(f"❌ 错误: {result['message']}{job_suffix}", err=True)
                 raise click.Abort()
@@ -839,7 +860,9 @@ def metadata_command(
                 try:
                     _cql_source_arg = str(normalize_source_id(source_id[0]))
                 except ValueError:
-                    raise click.UsageError("--source-id 不是合法 UUID") from None
+                    raise click.UsageError(
+                        "--source-id 不是合法短 ID（形如 db_src_1）"
+                    ) from None
             _cql_result = execute_cql(
                 MetadataExecutionRequest(
                     config_path=config_path,

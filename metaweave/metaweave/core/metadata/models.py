@@ -12,9 +12,7 @@ from metaweave.utils.data_utils import format_data_type
 from metaweave.utils.time_utils import utc_isoformat
 
 
-SUPPORTED_DATABASE_OBJECT_TYPES = frozenset(
-    {"table", "view", "materialized_view"}
-)
+SUPPORTED_DATABASE_OBJECT_TYPES = frozenset({"table", "view", "materialized_view"})
 
 
 def normalize_database_object_types(configured: Any) -> List[str]:
@@ -50,6 +48,7 @@ class DatabaseObjectRef:
 @dataclass
 class ColumnInfo:
     """字段信息"""
+
     column_name: str
     ordinal_position: int
     data_type: str
@@ -70,6 +69,7 @@ class ColumnInfo:
 @dataclass
 class PrimaryKey:
     """主键约束"""
+
     constraint_name: str
     columns: List[str] = field(default_factory=list)
 
@@ -81,6 +81,7 @@ class PrimaryKey:
 @dataclass
 class ForeignKey:
     """外键约束"""
+
     constraint_name: str
     source_columns: List[str] = field(default_factory=list)
     target_schema: str = ""
@@ -97,6 +98,7 @@ class ForeignKey:
 @dataclass
 class UniqueConstraint:
     """唯一约束"""
+
     constraint_name: str
     columns: List[str] = field(default_factory=list)
     is_partial: bool = False
@@ -109,6 +111,7 @@ class UniqueConstraint:
 @dataclass
 class IndexInfo:
     """索引信息"""
+
     index_name: str
     index_type: str = "btree"  # btree, hash, gist, gin, etc.
     columns: List[str] = field(default_factory=list)
@@ -148,6 +151,7 @@ class IndexInfo:
 @dataclass
 class LogicalKey:
     """逻辑主键"""
+
     columns: List[str] = field(default_factory=list)
     confidence_score: float = 0.0
     uniqueness: float = 0.0
@@ -161,6 +165,7 @@ class LogicalKey:
 @dataclass
 class TableMetadata:
     """表元数据"""
+
     schema_name: str
     table_name: str
     database: Optional[str] = None  # 数据库名称
@@ -304,12 +309,13 @@ class TableMetadata:
 @dataclass
 class CommentTask:
     """LLM 注释生成任务"""
+
     task_type: str  # 'table' or 'column'
     schema_name: str
     table_name: str
     column_name: Optional[str] = None
     context: Dict[str, Any] = field(default_factory=dict)
-    
+
     def get_cache_key(self) -> str:
         """获取缓存键"""
         if self.task_type == "table":
@@ -321,6 +327,7 @@ class CommentTask:
 @dataclass
 class GenerationResult:
     """元数据生成结果"""
+
     success: bool
     processed_tables: int = 0
     failed_tables: int = 0
@@ -347,15 +354,15 @@ class GenerationResult:
     llm_classification_success_count: int = 0
     llm_classification_failure_count: int = 0
     table_category_counts: Dict[str, int] = field(default_factory=dict)
-    
+
     def to_dict(self) -> Dict[str, Any]:
         """转换为字典"""
         return asdict(self)
-    
+
     def add_error(self, error: str):
         """添加错误信息"""
         self.errors.append(error)
-    
+
     def add_output_file(self, file_path: str):
         """添加输出文件"""
         self.output_files.append(file_path)
@@ -364,12 +371,13 @@ class GenerationResult:
 @dataclass
 class SampleData:
     """样本数据"""
+
     schema_name: str
     table_name: str
     columns: List[str]
     rows: List[List[Any]]
     row_count: int
-    
+
     def to_dict(self) -> Dict[str, Any]:
         """转换为字典"""
         return {
@@ -444,6 +452,7 @@ class EnumInfo:
 @dataclass
 class AuditInfo:
     """审计字段信息"""
+
     audit_type: str  # timestamp, actor, flag, version, etl
     description: str  # 字段用途描述
 
@@ -454,6 +463,7 @@ class AuditInfo:
 @dataclass
 class DescriptionInfo:
     """描述字段信息"""
+
     avg_length: float  # 平均长度
     max_length: int  # 最大长度
     length_variance: float  # 长度标准差
@@ -519,16 +529,16 @@ class ColumnProfile:
         result = {
             "column_name": self.column_name,
         }
-        
+
         # 添加 semantic_analysis 分组
         result["semantic_analysis"] = {
             "semantic_role": self.semantic_role,
             "semantic_confidence": self.semantic_confidence,
             "inference_basis": self.inference_basis,
         }
-        
+
         result["structure_flags"] = self.structure_flags.to_dict()
-        
+
         # 将所有 *_info 字段归类到 role_specific_info 下
         role_specific_info = {}
         if self.identifier_info:
@@ -549,9 +559,9 @@ class ColumnProfile:
             role_specific_info["foreign_key_info"] = self.foreign_key_info.to_dict()
         if self.index_info:
             role_specific_info["index_info"] = self.index_info.to_dict()
-        
+
         result["role_specific_info"] = role_specific_info
-        
+
         return result
 
 
@@ -624,37 +634,45 @@ class TableProfile:
     inference_basis: List[str] = field(default_factory=list)
     candidate_logical_primary_keys: List["LogicalKey"] = field(default_factory=list)
 
-    def to_dict(self, metadata: Optional['TableMetadata'] = None) -> Dict[str, Any]:
+    def to_dict(self, metadata: Optional["TableMetadata"] = None) -> Dict[str, Any]:
         result = {
             "table_category": self.table_category,
             "confidence": self.confidence,
             "inference_basis": self.inference_basis,
         }
-        
+
         # 添加 physical_constraints（从 metadata 获取，不包含 indexes）
         if metadata:
             result["physical_constraints"] = {
-                "primary_key": metadata.primary_keys[0].to_dict() if metadata.primary_keys else None,
+                "primary_key": (
+                    metadata.primary_keys[0].to_dict()
+                    if metadata.primary_keys
+                    else None
+                ),
                 "foreign_keys": [fk.to_dict() for fk in metadata.foreign_keys],
-                "unique_constraints": [uc.to_dict() for uc in metadata.unique_constraints],
+                "unique_constraints": [
+                    uc.to_dict() for uc in metadata.unique_constraints
+                ],
             }
-            
+
             # indexes 提升到 table_profile 层级
             result["indexes"] = [idx.to_dict() for idx in metadata.indexes]
-        
+
         # column_statistics
         result["column_statistics"] = self.column_statistics.to_dict()
-        
+
         # unique_column_sets 替代 logical_keys
         if self.candidate_logical_primary_keys:
-            result["unique_column_sets"] = [lk.to_dict() for lk in self.candidate_logical_primary_keys]
+            result["unique_column_sets"] = [
+                lk.to_dict() for lk in self.candidate_logical_primary_keys
+            ]
 
         # 已移除：表类型特定信息（fact_table_info/dim_table_info/bridge_table_info）
         # 这些字段在项目中未被使用，已于 2025-12-26 移除以减少维护成本
 
         return result
 
-    def to_json_dict(self, metadata: 'TableMetadata') -> Dict[str, Any]:
+    def to_json_dict(self, metadata: "TableMetadata") -> Dict[str, Any]:
         """转换为当前 JSON 元数据格式的表画像结构。"""
         result = {
             "table_category": self.table_category,

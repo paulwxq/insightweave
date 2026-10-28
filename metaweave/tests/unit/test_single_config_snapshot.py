@@ -64,7 +64,11 @@ class _DummyGenerator:
         from metaweave.core.metadata.models import GenerationResult
 
         return GenerationResult(
-            success=True, processed_tables=1, failed_tables=0, output_files=[], errors=[]
+            success=True,
+            processed_tables=1,
+            failed_tables=0,
+            output_files=[],
+            errors=[],
         )
 
 
@@ -94,7 +98,9 @@ class TestSharedFunctionSnapshot:
         assert len(spy_load_config) == 1
 
     @pytest.mark.parametrize("step", ["ddl", "json"])
-    def test_ddl_json_reads_config_once(self, step, tmp_path, spy_load_config, monkeypatch):
+    def test_ddl_json_reads_config_once(
+        self, step, tmp_path, spy_load_config, monkeypatch
+    ):
         cfg_path = tmp_path / "metadata_config.yaml"
         cfg_path.write_text("database:\n  database: demo\n", encoding="utf-8")
         monkeypatch.setattr(
@@ -163,7 +169,9 @@ class TestSqlRagStructuredFailure:
         """端到端：domains 文件缺失 → CLI 报错含具体原因（非空消息）。"""
         # md 目录存在、domains 缺失
         (tmp_path / "output" / "md").mkdir(parents=True)
-        (tmp_path / "output" / "md" / "demo.public.t.md").write_text("# t\n", encoding="utf-8")
+        (tmp_path / "output" / "md" / "demo.public.t.md").write_text(
+            "# t\n", encoding="utf-8"
+        )
         cfg = tmp_path / "metadata_config.yaml"
         cfg.write_text(
             yaml.safe_dump(
@@ -176,10 +184,12 @@ class TestSqlRagStructuredFailure:
             encoding="utf-8",
         )
         monkeypatch.setattr(
-            "services.config_loader.load_config", lambda _p: _cfg_dict() | {
+            "services.config_loader.load_config",
+            lambda _p: _cfg_dict()
+            | {
                 "output": {"markdown_directory": "output/md"},
                 "sql_rag": {"generation": {"output_dir": "output/sql-rag"}},
-            }
+            },
         )
         monkeypatch.setattr(
             "metaweave.services.llm_config_resolver._validate_declared_module_llm_paths",
@@ -199,6 +209,7 @@ class TestSqlRagStructuredFailure:
         )
         assert result.exit_code == 1
         assert "未找到业务域配置" in result.output
+
 
 class TestMaxWorkersValidation:
     """--max-workers 0/负数处理（用户审核第 5 条）：入口拒绝 + 执行层防御。"""
@@ -231,7 +242,9 @@ class TestMaxWorkersValidation:
         assert result.exit_code == 0, result.output
 
     @pytest.mark.parametrize("bad", [0, -1, True])
-    def test_execution_layer_rejects_non_positive(self, bad, tmp_path, spy_load_config, monkeypatch):
+    def test_execution_layer_rejects_non_positive(
+        self, bad, tmp_path, spy_load_config, monkeypatch
+    ):
         """共享层防御：0/负数/布尔 → 结构化失败（不再被 `or 4` 假值重置）。"""
         cfg_path = tmp_path / "metadata_config.yaml"
         cfg_path.write_text("database:\n  database: demo\n", encoding="utf-8")
@@ -250,7 +263,9 @@ class TestMaxWorkersValidation:
         assert result["success"] is False
         assert "max_workers 必须为正整数" in result["message"]
 
-    def test_execution_layer_none_uses_default_4(self, tmp_path, spy_load_config, monkeypatch):
+    def test_execution_layer_none_uses_default_4(
+        self, tmp_path, spy_load_config, monkeypatch
+    ):
         """未覆盖 → 4（默认不变）。"""
         cfg_path = tmp_path / "metadata_config.yaml"
         cfg_path.write_text("database:\n  database: demo\n", encoding="utf-8")
@@ -308,7 +323,9 @@ class TestParamGuardBeforeCleanOrder:
         ), mock.patch("click.echo"):
             result = execute_ddl_json_md(
                 MetadataExecutionRequest(
-                    config_path=cfg, operation="ddl", clean=True,
+                    config_path=cfg,
+                    operation="ddl",
+                    clean=True,
                     max_workers_override=bad,
                 )
             )
@@ -332,7 +349,9 @@ class TestParamGuardBeforeCleanOrder:
         ), mock.patch("click.echo"):
             result = execute_ddl_json_md(
                 MetadataExecutionRequest(
-                    config_path=cfg, operation="ddl", clean=True,
+                    config_path=cfg,
+                    operation="ddl",
+                    clean=True,
                     max_workers_override=1,
                 )
             )

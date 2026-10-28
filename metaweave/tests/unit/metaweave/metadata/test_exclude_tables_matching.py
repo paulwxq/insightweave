@@ -6,7 +6,9 @@ from metaweave.core.metadata.models import DatabaseObjectRef
 class TestExcludeTablesMatching:
     @patch("metaweave.core.metadata.generator.MetadataGenerator._init_components")
     @patch("metaweave.core.metadata.generator.MetadataGenerator._load_config")
-    def test_plain_table_name_matches_all_schemas(self, mock_load_config, mock_init_components):
+    def test_plain_table_name_matches_all_schemas(
+        self, mock_load_config, mock_init_components
+    ):
         from metaweave.core.metadata.generator import MetadataGenerator
 
         mock_load_config.return_value = {
@@ -38,7 +40,9 @@ class TestExcludeTablesMatching:
 
     @patch("metaweave.core.metadata.generator.MetadataGenerator._init_components")
     @patch("metaweave.core.metadata.generator.MetadataGenerator._load_config")
-    def test_schema_table_only_matches_specific_schema(self, mock_load_config, mock_init_components):
+    def test_schema_table_only_matches_specific_schema(
+        self, mock_load_config, mock_init_components
+    ):
         from metaweave.core.metadata.generator import MetadataGenerator
 
         mock_load_config.return_value = {
@@ -71,7 +75,9 @@ class TestExcludeTablesMatching:
 
     @patch("metaweave.core.metadata.generator.MetadataGenerator._init_components")
     @patch("metaweave.core.metadata.generator.MetadataGenerator._load_config")
-    def test_schema_star_matches_all_tables_in_schema(self, mock_load_config, mock_init_components):
+    def test_schema_star_matches_all_tables_in_schema(
+        self, mock_load_config, mock_init_components
+    ):
         from metaweave.core.metadata.generator import MetadataGenerator
 
         mock_load_config.return_value = {
@@ -103,7 +109,9 @@ class TestExcludeTablesMatching:
 
     @patch("metaweave.core.metadata.generator.MetadataGenerator._init_components")
     @patch("metaweave.core.metadata.generator.MetadataGenerator._load_config")
-    def test_schema_prefix_matches_only_specific_schema(self, mock_load_config, mock_init_components):
+    def test_schema_prefix_matches_only_specific_schema(
+        self, mock_load_config, mock_init_components
+    ):
         from metaweave.core.metadata.generator import MetadataGenerator
 
         mock_load_config.return_value = {
@@ -139,7 +147,9 @@ class TestExcludeTablesMatching:
 
     @patch("metaweave.core.metadata.generator.MetadataGenerator._init_components")
     @patch("metaweave.core.metadata.generator.MetadataGenerator._load_config")
-    def test_unsupported_three_part_pattern_is_ignored(self, mock_load_config, mock_init_components, caplog):
+    def test_unsupported_three_part_pattern_is_ignored(
+        self, mock_load_config, mock_init_components, caplog
+    ):
         from metaweave.core.metadata.generator import MetadataGenerator
 
         mock_load_config.return_value = {

@@ -14,13 +14,13 @@ logger = logging.getLogger("metaweave.llm")
 
 class LLMService:
     """LLM 服务
-    
+
     使用 LangChain 封装 LLM 调用，支持多种 LLM 提供商。
     """
-    
+
     def __init__(self, config: Dict[str, Any]):
         """初始化 LLM 服务
-        
+
         Args:
             config: LLM 配置字典
                 - active: 当前激活的提供商名称
@@ -30,7 +30,7 @@ class LLMService:
         """
         # 1. 读取激活的 LLM 配置名称
         self.provider_type = config.get("active", "qwen")
-        
+
         # 2. 获取对应的配置段
         providers = config.get("providers", {})
         if self.provider_type not in providers:
@@ -39,9 +39,9 @@ class LLMService:
                 f"可用配置: {list(providers.keys())}\n"
                 f"请检查 metadata_config.yaml 中的 llm.active 和 llm.providers 配置"
             )
-        
+
         provider_config = providers[self.provider_type]
-        
+
         # 3. 提取通用参数
         self.model = provider_config.get("model")
         self.api_key = provider_config.get("api_key")
@@ -50,24 +50,24 @@ class LLMService:
         # max_tokens 未配置时不传，使用服务端默认（避免长输出被截断）
         self.max_tokens = provider_config.get("max_tokens")
         self.timeout = provider_config.get("timeout", 30)
-        
+
         # 早期校验：API Key 必须存在
         if not self.api_key:
             raise ValueError(
                 f"LLM API Key 未配置: {self.provider_type}\n"
                 f"请在 .env 文件中设置相应的 API Key 环境变量"
             )
-        
+
         # 早期校验：model 必须存在
         if not self.model:
             raise ValueError(
                 f"LLM 模型未配置: {self.provider_type}\n"
                 f"请在 metadata_config.yaml 中设置 llm.providers.{self.provider_type}.model"
             )
-        
+
         # 4. 提取特定参数
         self.extra_params = provider_config.get("extra_params", {})
-        
+
         # 5. 提取批量配置
         self.batch_size = config.get("batch_size", 10)
         # 应用层重试次数：用于 batch_call_llm_async 的失败重试（不依赖底层 SDK 的 max_retries）
@@ -82,7 +82,9 @@ class LLMService:
         # SDK 内部网络重试次数（用于 LangChain client / SDK），不要影响应用层重试次数
         self.sdk_max_retries = langchain_config.get("max_retries", self.retry_times)
         # 可选：允许在 langchain_config 覆盖应用层 retry_delay
-        self.retry_delay = float(langchain_config.get("retry_delay", self.retry_delay) or self.retry_delay)
+        self.retry_delay = float(
+            langchain_config.get("retry_delay", self.retry_delay) or self.retry_delay
+        )
 
         logger.info(
             "LLM 服务已初始化: %s (%s), 异步模式: %s, 并发限制: %s",
@@ -94,7 +96,7 @@ class LLMService:
 
         # 7. 初始化 LLM 客户端
         self.llm: BaseChatModel = self._init_llm()
-    
+
     def _init_llm(self) -> BaseChatModel:
         """初始化 LLM 客户端（根据 provider_type 判断）"""
         if self.provider_type == "qwen":
@@ -106,7 +108,7 @@ class LLMService:
                 f"不支持的 LLM 提供商: '{self.provider_type}'\n"
                 f"当前支持: qwen, deepseek"
             )
-    
+
     def _init_qwen(self) -> BaseChatModel:
         """初始化通义千问（DashScope OpenAI 兼容模式）
 
@@ -134,12 +136,14 @@ class LLMService:
                 init_params["max_tokens"] = self.max_tokens
 
             # 可选：api_base（默认 DashScope OpenAI 兼容模式入口）
-            api_base = self.api_base or "https://dashscope.aliyuncs.com/compatible-mode/v1"
+            api_base = (
+                self.api_base or "https://dashscope.aliyuncs.com/compatible-mode/v1"
+            )
             init_params["openai_api_base"] = api_base
 
             # 处理 extra_params（区分顶层参数和 extra_body 参数）
             extra_body_params = {}  # 需要放入 extra_body 的参数
-            top_level_params = {}   # 顶层参数
+            top_level_params = {}  # 顶层参数
 
             # 定义需要放入 extra_body 的参数列表
             extra_body_keys = {"enable_thinking"}
@@ -185,12 +189,12 @@ class LLMService:
         except Exception as e:
             logger.error("初始化通义千问失败（%s）", type(e).__name__)
             raise
-    
+
     def _init_deepseek(self) -> BaseChatModel:
         """初始化 DeepSeek"""
         try:
             from langchain_openai import ChatOpenAI
-            
+
             # 基础参数
             init_params = {
                 "model": self.model,
@@ -207,17 +211,17 @@ class LLMService:
             # 可选：api_base（默认值）
             api_base = self.api_base or "https://api.deepseek.com/v1"
             init_params["openai_api_base"] = api_base
-            
+
             # 添加特定参数（过滤 None 值）
             for key, value in self.extra_params.items():
                 if value is not None:
                     init_params[key] = value
                     # 参数值不进日志：额外参数可能包含凭据类配置
                     logger.debug(f"DeepSeek 额外参数: {key}")
-            
+
             logger.info(f"初始化 DeepSeek LLM: {self.model}")
             logger.debug(f"DeepSeek 初始化参数: {list(init_params.keys())}")
-            
+
             return ChatOpenAI(**init_params)
         except ImportError as e:
             logger.error("导入 ChatOpenAI 失败（%s）", type(e).__name__)
@@ -225,25 +229,25 @@ class LLMService:
         except Exception as e:
             logger.error("初始化 DeepSeek 失败（%s）", type(e).__name__)
             raise
-    
+
     def generate_table_comment(
         self,
         table_name: str,
         columns: List[Dict[str, str]],
-        sample_data: Optional[List[Dict]] = None
+        sample_data: Optional[List[Dict]] = None,
     ) -> str:
         """生成表注释
-        
+
         Args:
             table_name: 表名
             columns: 字段信息列表 [{"name": "...", "type": "..."}]
             sample_data: 样本数据（可选）
-            
+
         Returns:
             生成的表注释
         """
         prompt = self._build_table_comment_prompt(table_name, columns, sample_data)
-        
+
         try:
             response = self._call_llm(prompt)
             comment = self._clean_response(response)
@@ -254,25 +258,25 @@ class LLMService:
             # （doc 16 §4：样例值不进日志），只记对象名与错误类别。
             logger.error("生成表注释失败 (%s): %s", table_name, type(e).__name__)
             return ""
-    
+
     def generate_column_comments(
         self,
         table_name: str,
         columns: List[Dict[str, Any]],
-        sample_data: Optional[List[Dict]] = None
+        sample_data: Optional[List[Dict]] = None,
     ) -> Dict[str, str]:
         """批量生成字段注释
-        
+
         Args:
             table_name: 表名
             columns: 字段信息列表 [{"name": "...", "type": "...", "sample_values": [...]}]
             sample_data: 样本数据（可选）
-            
+
         Returns:
             字段注释字典 {column_name: comment}
         """
         prompt = self._build_column_comments_prompt(table_name, columns, sample_data)
-        
+
         try:
             response = self._call_llm(prompt)
             comments = self._parse_column_comments(response, columns)
@@ -293,21 +297,21 @@ class LLMService:
 
     def _call_llm(self, prompt: str, system_message: Optional[str] = None) -> str:
         """调用 LLM
-        
+
         Args:
             prompt: 用户提示词
             system_message: 系统消息（可选）
-            
+
         Returns:
             LLM 响应文本
         """
         messages = []
-        
+
         if system_message:
             messages.append(SystemMessage(content=system_message))
-        
+
         messages.append(HumanMessage(content=prompt))
-        
+
         try:
             response = self.llm.invoke(messages)
             return response.content
@@ -371,7 +375,9 @@ class LLMService:
                 for attempt in range(self.retry_times + 1):
                     try:
                         async with semaphore:
-                            response = await self._call_llm_async(prompt, system_message)
+                            response = await self._call_llm_async(
+                                prompt, system_message
+                            )
                         if attempt > 0:
                             logger.info(
                                 "Prompt %s 重试后成功（第 %s/%s 次尝试）",
@@ -411,12 +417,12 @@ class LLMService:
 
         # 确保按原始顺序返回，方便调用方映射
         return sorted(results, key=lambda item: item[0])
-    
+
     def _build_table_comment_prompt(
         self,
         table_name: str,
         columns: List[Dict[str, str]],
-        sample_data: Optional[List[Dict]] = None
+        sample_data: Optional[List[Dict]] = None,
     ) -> str:
         """构建表注释生成的提示词"""
         prompt = f"""请为数据库表生成简洁的中文注释（一句话描述，不超过50字）。
@@ -427,12 +433,12 @@ class LLMService:
 """
         for col in columns:
             prompt += f"- {col.get('name')}: {col.get('type')}\n"
-        
+
         if sample_data and len(sample_data) > 0:
             prompt += "\n样本数据（前3行）:\n"
             for i, row in enumerate(sample_data[:3], 1):
                 prompt += f"{i}. {row}\n"
-        
+
         prompt += """
 请根据表名、字段信息和样本数据，分析这张表的业务用途，然后生成一句话的表注释。
 要求：
@@ -448,12 +454,12 @@ class LLMService:
 请直接输出注释内容，不要有其他解释：
 """
         return prompt
-    
+
     def _build_column_comments_prompt(
         self,
         table_name: str,
         columns: List[Dict[str, Any]],
-        sample_data: Optional[List[Dict]] = None
+        sample_data: Optional[List[Dict]] = None,
     ) -> str:
         """构建字段注释生成的提示词"""
         prompt = f"""请为数据库表的字段生成简洁的中文注释。
@@ -463,16 +469,16 @@ class LLMService:
 字段信息:
 """
         for col in columns:
-            col_name = col.get('name')
-            col_type = col.get('type')
-            sample_values = col.get('sample_values', [])
-            
+            col_name = col.get("name")
+            col_type = col.get("type")
+            sample_values = col.get("sample_values", [])
+
             prompt += f"\n字段: {col_name}\n"
             prompt += f"类型: {col_type}\n"
-            
+
             if sample_values:
                 prompt += f"样本值: {', '.join(map(str, sample_values[:5]))}\n"
-        
+
         prompt += """
 请为每个字段生成简洁的中文注释（10-30字）。
 要求：
@@ -493,51 +499,49 @@ status: 用户状态（1-正常，0-禁用）
 请直接输出结果，不要有其他解释：
 """
         return prompt
-    
+
     def _clean_response(self, response: str) -> str:
         """清理 LLM 响应"""
         # 去除首尾空白
         response = response.strip()
-        
+
         # 去除可能的引号
         if response.startswith('"') and response.endswith('"'):
             response = response[1:-1]
         if response.startswith("'") and response.endswith("'"):
             response = response[1:-1]
-        
+
         # 去除多余的句号
-        if response.endswith('。'):
+        if response.endswith("。"):
             response = response[:-1]
-        
+
         return response
-    
+
     def _parse_column_comments(
-        self,
-        response: str,
-        columns: List[Dict[str, Any]]
+        self, response: str, columns: List[Dict[str, Any]]
     ) -> Dict[str, str]:
         """解析字段注释响应"""
         comments = {}
-        
+
         # 按行分割响应
-        lines = response.strip().split('\n')
-        
+        lines = response.strip().split("\n")
+
         for line in lines:
             line = line.strip()
-            if not line or ':' not in line:
+            if not line or ":" not in line:
                 continue
-            
+
             # 解析 "字段名: 注释" 格式
-            parts = line.split(':', 1)
+            parts = line.split(":", 1)
             if len(parts) == 2:
                 col_name = parts[0].strip()
                 comment = parts[1].strip()
-                
+
                 # 清理注释
                 comment = self._clean_response(comment)
-                
+
                 # 验证字段名是否在列表中
-                if any(col.get('name') == col_name for col in columns):
+                if any(col.get("name") == col_name for col in columns):
                     comments[col_name] = comment
-        
+
         return comments

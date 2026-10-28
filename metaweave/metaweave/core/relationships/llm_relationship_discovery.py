@@ -288,8 +288,7 @@ class LLMRelationshipDiscovery:
             )
 
             batch_prompts = [
-                self._build_prompt(tables[t1], tables[t2])
-                for t1, t2 in batch_pairs
+                self._build_prompt(tables[t1], tables[t2]) for t1, t2 in batch_pairs
             ]
 
             def on_progress(completed: int, total: int):
@@ -315,7 +314,9 @@ class LLMRelationshipDiscovery:
                 if response:
                     self.success_pairs += 1
                     pair_candidates = self._parse_llm_response(response)
-                    pair_candidates = self._filter_invalid_candidates(pair_candidates, t1, t2)
+                    pair_candidates = self._filter_invalid_candidates(
+                        pair_candidates, t1, t2
+                    )
                     candidates.extend(pair_candidates)
                 else:
                     self.failed_pairs += 1
@@ -356,7 +357,12 @@ class LLMRelationshipDiscovery:
             table2_json=json.dumps(table2, ensure_ascii=False, indent=2),
         )
         if logger.isEnabledFor(logging.DEBUG):
-            logger.debug("LLM 提示词（已裁剪 JSON） - 表对: %s <-> %s\n%s", table1_name, table2_name, prompt)
+            logger.debug(
+                "LLM 提示词（已裁剪 JSON） - 表对: %s <-> %s\n%s",
+                table1_name,
+                table2_name,
+                prompt,
+            )
         return prompt
 
     @staticmethod
@@ -438,11 +444,21 @@ class LLMRelationshipDiscovery:
             c_type = c.get("type", "single_column")
             if c_type == "single_column":
                 from_col = c.get("from_column", "")
-                if from_col and ft_key_lower in column_canonical_maps and from_col.lower() in column_canonical_maps[ft_key_lower]:
-                    c["from_column"] = column_canonical_maps[ft_key_lower][from_col.lower()]
+                if (
+                    from_col
+                    and ft_key_lower in column_canonical_maps
+                    and from_col.lower() in column_canonical_maps[ft_key_lower]
+                ):
+                    c["from_column"] = column_canonical_maps[ft_key_lower][
+                        from_col.lower()
+                    ]
 
                 to_col = c.get("to_column", "")
-                if to_col and tt_key_lower in column_canonical_maps and to_col.lower() in column_canonical_maps[tt_key_lower]:
+                if (
+                    to_col
+                    and tt_key_lower in column_canonical_maps
+                    and to_col.lower() in column_canonical_maps[tt_key_lower]
+                ):
                     c["to_column"] = column_canonical_maps[tt_key_lower][to_col.lower()]
             else:
                 from_cols = c.get("from_columns", [])
@@ -497,7 +513,10 @@ class LLMRelationshipDiscovery:
             # 规则 1: 同表自环（同表 + 完全相同列）
             if from_full == to_full:
                 if c.get("type") == "single_column":
-                    same_cols = str(c.get("from_column", "")).lower() == str(c.get("to_column", "")).lower()
+                    same_cols = (
+                        str(c.get("from_column", "")).lower()
+                        == str(c.get("to_column", "")).lower()
+                    )
                 else:
                     from_c = [str(n).lower() for n in c.get("from_columns", [])]
                     to_c = [str(n).lower() for n in c.get("to_columns", [])]
@@ -566,7 +585,9 @@ class LLMRelationshipDiscovery:
                         f"✓ LLM 调用成功（重试 {attempt} 次后）: {table1_name} <-> {table2_name}"
                     )
 
-                logger.debug(f"LLM 返回 {len(candidates)} 个候选: {table1_name} <-> {table2_name}")
+                logger.debug(
+                    f"LLM 返回 {len(candidates)} 个候选: {table1_name} <-> {table2_name}"
+                )
                 return candidates
 
             except Exception as e:
@@ -603,7 +624,9 @@ class LLMRelationshipDiscovery:
         import re
 
         try:
-            logger.debug(f"LLM 原始返回（前500字符）: {response[:500] if response else '(空响应)'}")
+            logger.debug(
+                f"LLM 原始返回（前500字符）: {response[:500] if response else '(空响应)'}"
+            )
 
             response = response.strip()
             if not response:
@@ -611,28 +634,36 @@ class LLMRelationshipDiscovery:
                 return []
 
             # === 方法 1: 提取 ```json ... ``` 代码块 ===
-            json_block_pattern = r'```json\s*\n(.*?)\n```'
+            json_block_pattern = r"```json\s*\n(.*?)\n```"
             match = re.search(json_block_pattern, response, re.DOTALL | re.IGNORECASE)
             if match:
                 try:
                     json_text = match.group(1).strip()
                     data = json.loads(json_text)
                     if self._validate_response_structure(data):
-                        logger.debug(f"✅ 方法1成功: 解析 ```json 代码块，得到 {len(data.get('relationships', []))} 个关系")
-                        return self._normalize_relationships(data.get("relationships", []))
+                        logger.debug(
+                            f"✅ 方法1成功: 解析 ```json 代码块，得到 {len(data.get('relationships', []))} 个关系"
+                        )
+                        return self._normalize_relationships(
+                            data.get("relationships", [])
+                        )
                 except json.JSONDecodeError as e:
                     logger.warning(f"方法1失败: ```json 代码块解析失败: {e}")
 
             # === 方法 2: 提取 ``` ... ``` 无语言标签代码块 ===
-            generic_block_pattern = r'```\s*\n(.*?)\n```'
+            generic_block_pattern = r"```\s*\n(.*?)\n```"
             match = re.search(generic_block_pattern, response, re.DOTALL)
             if match:
                 try:
                     json_text = match.group(1).strip()
                     data = json.loads(json_text)
                     if self._validate_response_structure(data):
-                        logger.debug(f"✅ 方法2成功: 解析 ``` 通用代码块，得到 {len(data.get('relationships', []))} 个关系")
-                        return self._normalize_relationships(data.get("relationships", []))
+                        logger.debug(
+                            f"✅ 方法2成功: 解析 ``` 通用代码块，得到 {len(data.get('relationships', []))} 个关系"
+                        )
+                        return self._normalize_relationships(
+                            data.get("relationships", [])
+                        )
                 except json.JSONDecodeError as e:
                     logger.warning(f"方法2失败: 通用代码块解析失败: {e}")
 
@@ -642,20 +673,30 @@ class LLMRelationshipDiscovery:
                 try:
                     data = json.loads(json_obj)
                     if self._validate_response_structure(data):
-                        logger.debug(f"✅ 方法3成功: 状态机提取 JSON，得到 {len(data.get('relationships', []))} 个关系")
-                        return self._normalize_relationships(data.get("relationships", []))
+                        logger.debug(
+                            f"✅ 方法3成功: 状态机提取 JSON，得到 {len(data.get('relationships', []))} 个关系"
+                        )
+                        return self._normalize_relationships(
+                            data.get("relationships", [])
+                        )
                 except json.JSONDecodeError as e:
                     logger.warning(f"方法3失败: 状态机提取的 JSON 解析失败: {e}")
 
             # === 方法 4: Fallback 到简单 brace_count（向后兼容，但不处理字符串内花括号）===
-            logger.warning("⚠️  前3种方法均失败，降级到方法4: 简单 brace_count（可能不准确）")
+            logger.warning(
+                "⚠️  前3种方法均失败，降级到方法4: 简单 brace_count（可能不准确）"
+            )
 
             cleaned_response = response
-            cleaned_response = re.sub(r'^```(?:json)?\s*', '', cleaned_response, flags=re.MULTILINE)
-            cleaned_response = re.sub(r'\s*```\s*$', '', cleaned_response, flags=re.MULTILINE)
+            cleaned_response = re.sub(
+                r"^```(?:json)?\s*", "", cleaned_response, flags=re.MULTILINE
+            )
+            cleaned_response = re.sub(
+                r"\s*```\s*$", "", cleaned_response, flags=re.MULTILINE
+            )
             cleaned_response = cleaned_response.strip()
 
-            start_idx = cleaned_response.find('{')
+            start_idx = cleaned_response.find("{")
             if start_idx == -1:
                 logger.warning("方法4失败: 未找到 JSON 对象起始 {")
                 return []
@@ -663,9 +704,9 @@ class LLMRelationshipDiscovery:
             brace_count = 0
             end_idx = start_idx
             for i in range(start_idx, len(cleaned_response)):
-                if cleaned_response[i] == '{':
+                if cleaned_response[i] == "{":
                     brace_count += 1
-                elif cleaned_response[i] == '}':
+                elif cleaned_response[i] == "}":
                     brace_count -= 1
                     if brace_count == 0:
                         end_idx = i + 1
@@ -680,7 +721,9 @@ class LLMRelationshipDiscovery:
 
             data = json.loads(json_text)
             if self._validate_response_structure(data):
-                logger.debug(f"✅ 方法4成功: 简单 brace_count，得到 {len(data.get('relationships', []))} 个关系")
+                logger.debug(
+                    f"✅ 方法4成功: 简单 brace_count，得到 {len(data.get('relationships', []))} 个关系"
+                )
                 return self._normalize_relationships(data.get("relationships", []))
             else:
                 logger.warning("方法4失败: 结构验证失败")
@@ -697,7 +740,9 @@ class LLMRelationshipDiscovery:
     @staticmethod
     def _normalize_relationships(relationships: List[Dict]) -> List[Dict]:
         """对每条关系执行 confidence 归一化（见 3.14）"""
-        return [LLMRelationshipDiscovery._normalize_confidence(r) for r in relationships]
+        return [
+            LLMRelationshipDiscovery._normalize_confidence(r) for r in relationships
+        ]
 
     @staticmethod
     def _normalize_confidence(rel: Dict) -> Dict:
@@ -747,7 +792,7 @@ class LLMRelationshipDiscovery:
                 escape_next = False
                 continue
 
-            if char == '\\' and in_string:
+            if char == "\\" and in_string:
                 escape_next = True
                 continue
 
@@ -756,14 +801,14 @@ class LLMRelationshipDiscovery:
                 continue
 
             if not in_string:
-                if char == '{':
+                if char == "{":
                     if brace_count == 0:
                         start_idx = i
                     brace_count += 1
-                elif char == '}':
+                elif char == "}":
                     brace_count -= 1
                     if brace_count == 0 and start_idx is not None:
-                        return text[start_idx:i + 1]
+                        return text[start_idx : i + 1]
 
         return None
 
@@ -783,11 +828,15 @@ class LLMRelationshipDiscovery:
             return False
 
         if "relationships" not in data:
-            logger.debug(f"结构验证失败: 缺少 'relationships' 键，实际键: {list(data.keys())}")
+            logger.debug(
+                f"结构验证失败: 缺少 'relationships' 键，实际键: {list(data.keys())}"
+            )
             return False
 
         if not isinstance(data["relationships"], list):
-            logger.debug(f"结构验证失败: 'relationships' 不是 list，而是 {type(data['relationships'])}")
+            logger.debug(
+                f"结构验证失败: 'relationships' 不是 list，而是 {type(data['relationships'])}"
+            )
             return False
 
         return True

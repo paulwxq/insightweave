@@ -82,8 +82,11 @@ class CypherWriter:
             raise ValueError("provenance 必须是 (source_id, publish_id) 二元组")
         source_id, publish_id = provenance
         try:
+            from metaweave.utils.source_id import normalize_run_uuid
+
             source_str = str(normalize_source_id(source_id))
-            publish_str = str(normalize_source_id(publish_id))
+            # 第二元素为发布运行 UUID（doc 6 §1），不得按短 ID 校验
+            publish_str = str(normalize_run_uuid(publish_id))
         except (ValueError, TypeError) as exc:
             raise ValueError(f"provenance 校验失败: {exc}") from exc
         return source_str, publish_str
