@@ -21,12 +21,15 @@ from backend.api.schemas import (
     DimValueConfigUpdateRequest,
     DimValueConfigUpdateResponse,
     DimValueObjectsResponse,
+    DimValueRecommendationsResponse,
     JobCreateRequest,
     JobItem,
     JobListResponse,
     GlobalJobListResponse,
     JobPatchRequest,
     PublishCheckResponse,
+    PublishJobPrecheckRequest,
+    PublishJobPrecheckResponse,
     PublishRunDetail,
     RelConfigColumnsResponse,
     RelConfigGetResponse,
@@ -72,6 +75,7 @@ from backend.profile_loading.dim_value_config_api import (
     list_dim_value_objects,
     read_dim_value_config,
     read_dim_value_object_columns,
+    read_dim_value_recommendations,
     write_dim_value_config,
 )
 from backend.profile_loading.domain_config_api import (
@@ -88,6 +92,7 @@ from backend.publishing.publish_service import (
     check_publication,
     create_publish_run,
     execute_publish_run,
+    precheck_publish_job,
 )
 from backend.workspaces.service import (
     create_workspace,
@@ -427,6 +432,26 @@ async def create_publish_run_route(
     return result
 
 
+@router.post(
+    "/publish-jobs/{job_id}/precheck", response_model=PublishJobPrecheckResponse
+)
+async def precheck_publish_job_route(
+    job_id: str,
+    payload: PublishJobPrecheckRequest,
+    settings: PlatformSettings = Depends(get_platform_settings),
+):
+    """作业级预检（doc 7.2 §5.2）：有效参数校验，不创建运行。"""
+    return await asyncio.to_thread(
+        precheck_publish_job,
+        settings,
+        job_id,
+        revision_no=payload.revision_no,
+        mode=payload.mode,
+        steps=payload.steps,
+        step_config=payload.step_config,
+    )
+
+
 def _run_in_thread(func, settings, run_id, *args):
     """BackgroundTasks 对同步函数自动使用线程池（doc 6.2 §6.3：同进程线程执行）。"""
     func(settings, run_id, *args)
@@ -586,6 +611,17 @@ def get_dim_value_objects_route(
     workspace_id: str, settings: PlatformSettings = Depends(get_platform_settings)
 ):
     return list_dim_value_objects(settings, workspace_id)
+
+
+@router.get(
+    "/workspaces/{workspace_id}/dim-config/recommendations",
+    response_model=DimValueRecommendationsResponse,
+)
+def get_dim_value_recommendations_route(
+    workspace_id: str, settings: PlatformSettings = Depends(get_platform_settings)
+):
+    """独立推荐读取（doc 7.2 §4）：与被编辑 YAML 解耦。"""
+    return read_dim_value_recommendations(settings, workspace_id)
 
 
 @router.get(

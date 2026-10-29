@@ -129,6 +129,23 @@ def _validate_config(
     step_config = validate_step_config(
         payload.step_config, steps, _PARAMS_BY_KIND[kind]
     )
+    if kind == "publish":
+        # doc 7.2 §6/§7.3：选择 dim_value/domain 的版本必须保存完整清单，
+        # 缺少必需配置直接报配置错误，不提供 YAML 回退或旧版本兼容。
+        if "dim_value" in steps:
+            tables = (step_config or {}).get("dim_value", {}).get("tables")
+            if not isinstance(tables, list) or not tables:
+                raise JobValidationError(
+                    "选择 dim_value 步骤必须保存完整的 step_config.dim_value.tables "
+                    "配置：请为 dim_value 添加表并指定值向量化字段，或取消勾选 dim_value"
+                )
+        if "domain" in steps:
+            domains = (step_config or {}).get("domain", {}).get("domains")
+            if not isinstance(domains, list) or not domains:
+                raise JobValidationError(
+                    "选择 domain 步骤必须保存完整的 step_config.domain.domains "
+                    "配置：请配置业务域清单，或取消勾选 domain"
+                )
     return steps, step_config
 
 

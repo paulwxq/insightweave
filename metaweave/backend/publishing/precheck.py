@@ -1,10 +1,14 @@
-"""发布集中预检（doc 6.2 §6.3.2、§8.2）：marker + 必要文件 + 内容与配置。
+"""发布集中预检（doc 6.2 §6.3.2、§8.2；doc 7.2 §5.2.1 准入最小集）。
 
-同一套检查供两处使用：
+同一套检查供三处使用：
 - `GET /api/workspaces/{workspace_id}/publish-check`：固定返回全部 8 个
-  发布步骤的条件、原因与输入目录采集时间（doc 6.2 §8.2.2）；
-- `create_publish_run`：创建运行前对本次所选步骤集中预检，任一步骤不
-  合格整单 400，不生成运行、不写业务记录（§6.4）。
+  发布步骤的条件、原因与输入目录采集时间（doc 6.2 §8.2.2）；dim_value/
+  domain 只做准入最小集的文件侧核对（marker + 候选来源可读），不冒充
+  对有效配置的校验；
+- `POST /api/publish-jobs/{job_id}/precheck`：按"引用版本默认值 + 本次
+  允许的覆盖"解析有效参数后逐部骤校验（doc 7.2 §5.2），不创建运行；
+- `create_publish_run` 与执行期复查：同一份有效配置整单校验，任一步骤
+  不合格整单 400 / 记 blocked（§6.4；doc 7.2 §5.1/§5.3）。
 
 跨步骤采集完成时间的新鲜度检查已取消（doc 6 §4.3）；采集时间只用于
 页面展示，不参与判定。
@@ -16,12 +20,6 @@ import logging
 from dataclasses import dataclass
 
 from backend.profile_loading.ddl_loader import check_ddl_output_ready
-from backend.profile_loading.dim_value_config_api import classify_dim_tables_yaml
-from backend.profile_loading.dim_value_loader import (
-    DIM_CONFIG_ARTIFACT_NAME,
-    check_dim_value_output_ready,
-)
-from backend.profile_loading.domain_loader import check_domain_output_ready
 from backend.profile_loading.json_loader import check_json_output_ready
 from backend.profile_loading.rel_loader import (
     RelPrecheckError,
@@ -70,6 +68,22 @@ _NO_MARKER = "目录没有采集 marker，产物不可用"
 _FAILED_MARKER = "目录最近一次采集未成功，产物不可用"
 
 
+def _marker_run_id(source_id: str, workspace_id: str, name: str) -> "str | None":
+    """读取某采集目录 marker 的 run_id（输入清单归属用；无 marker 归 None）。"""
+    resolver_by_dir = {
+        "db": resolve_db_output_dir,
+        "ddl": resolve_ddl_output_dir,
+        "json": resolve_json_output_dir,
+        "md": resolve_md_output_dir,
+        "domain": resolve_domain_output_dir,
+        "dim": resolve_dim_output_dir,
+        "rel": resolve_rel_output_dir,
+        "sql": resolve_sql_output_dir,
+    }
+    marker, _error = read_collection_marker(resolver_by_dir[name](source_id, workspace_id))
+    return marker.run_id if marker else None
+
+
 class PublishPrecheckError(ValueError):
     """集中预检不合格：整单 400；携带逐步骤原因（doc 6.2 §6.4）。"""
 
@@ -86,9 +100,11 @@ class StepPrecheckResult:
     step: str
     ready: bool
     reason: str | None = None
+    # 既有业务错误码（如 dim_value_empty_tables），供上层透传到 details
+    code: str | None = None
     # 实际读取的文件（workspace 相对路径 + 所在目录 marker 的采集运行）
     input_files: tuple[tuple[str, "str | None"], ...] = ()
-    # 步骤附加载荷（如 dim_value 的归一配置、rel 的锚点快照）
+    # 步骤附加载荷（如 dim_value 的归一配置、domain 的有效清单、rel 的锚点快照）
     payload: object = None
 
 
@@ -167,9 +183,86 @@ def _json_files(source_id: str, workspace_id: str, markers, db_name: str | None)
 
 
 def _domain_files(source_id: str, workspace_id: str, markers):
-    if not check_domain_output_ready(source_id, workspace_id):
-        return False, "domain/db_domains.yaml 缺失或不可读", []
-    return True, None, [("domain/db_domains.yaml", markers["domain"].run_id)]
+    """工作区只读检查（publish-check GET，doc 7.2 §5.2.1 准入最小集）。
+
+    domain marker 已由调用方核验；这里只复核同工作区 MD 清单合法可读
+    （domain 发布的实际依赖），不再要求 db_domains.yaml 存在或可解析。
+    """
+    from backend.profile_loading.domain_loader import (
+        DomainPublishInputError,
+        _read_md_manifest,
+    )
+
+    try:
+        _read_md_manifest(source_id, workspace_id)
+    except DomainPublishInputError as exc:
+        return False, f"MD 采集清单不可用（{exc}）", []
+    return True, None, [
+        ("md/manifest.json", _marker_run_id(source_id, workspace_id, "md"))
+    ]
+
+
+def _domain_effective_check(
+    session,
+    source_id: str,
+    workspace_id: str,
+    effective_params: "dict | None",
+):
+    """有效清单校验（doc 7.2 §7.4）：版本默认/运行覆盖，与 YAML 解耦。
+
+    校验规则与文件路径完全相同（domain_rows_from_config 复用同一映射）；
+    成功时 payload 为规范化 domains 清单，供执行期在锁下重算发布行。
+    """
+    from backend.jobs.job_params import StepConfigError, _validate_domains_param
+    from backend.profile_loading.domain_loader import (
+        DomainPublishInputError,
+        domain_rows_from_config,
+    )
+    from backend.profile_loading.json_loader import read_registration_snapshot
+
+    params = effective_params.get("domain")
+    if not isinstance(params, dict) or "domains" not in params:
+        return (
+            False,
+            "domain 缺少必需配置 step_config.domain.domains："
+            "请编辑作业并保存新版本后重新运行",
+            None,
+            [],
+            None,
+        )
+    try:
+        domains = _validate_domains_param(params.get("domains"))
+    except StepConfigError as exc:
+        return False, str(exc), None, [], None
+    if not domains:
+        return (
+            False,
+            "domain 未配置任何业务域：请为 domain 添加业务域并指定表归属，"
+            "或取消勾选 domain",
+            None,
+            [],
+            None,
+        )
+    registration = read_registration_snapshot(session, source_id)
+    try:
+        rows = domain_rows_from_config(domains, source_id, workspace_id, registration)
+    except DomainPublishInputError as exc:
+        return False, str(exc), None, [], None
+    if not rows:
+        return (
+            False,
+            "Domain 配置没有任何有效表归属，请为业务域指定表或取消勾选 domain",
+            None,
+            [],
+            None,
+        )
+    md_run_id = _marker_run_id(source_id, workspace_id, "md")
+    files = [("md/manifest.json", md_run_id)]
+    files.extend(
+        (f"md/{row['db_name']}.{row['schema_name']}.{row['table_name']}.md", md_run_id)
+        for row in rows
+    )
+    return True, None, None, files, {"domains": domains}
 
 
 def _table_schema_files(
@@ -201,36 +294,54 @@ def _table_schema_files(
     return True, None, files
 
 
-def _dim_value_check(source_id: str, workspace_id: str, markers, db_name: str | None):
-    """dim_value 三态拦截（doc 22.2 §6.2；A15）：配置无效/零表/未配置。"""
-    if not check_dim_value_output_ready(source_id, workspace_id):
-        return False, "dim/dim_tables.yaml 缺失或不可读", [], None
+def _dim_value_check(
+    session,
+    source_id: str,
+    workspace_id: str,
+    markers,
+    db_name: str | None,
+    effective_params: "dict | None",
+):
+    """dim_value 预检（doc 7.2 §5.2.1 准入最小集）。
+
+    - effective_params 非 None（创建运行/执行期复查）：校验本次有效清单
+      （版本默认 + 允许覆盖），构造可注入的 DimTablesConfig 载荷；不再读取
+      dim_tables.yaml；画像库名/schema 须落在登记边界内；
+    - effective_params 为 None（publish-check GET 工作区只读检查）：只核对
+      JSON 画像候选来源可读，不冒充对有效配置的校验。
+    dim 目录成功 marker 均由 require_success_markers 先行核验。
+    """
+    if effective_params is None:
+        from backend.profile_loading.dim_value_config_api import _iter_json_products
+
+        json_dir = resolve_json_output_dir(source_id, workspace_id)
+        if not json_dir.is_dir() or not any(_iter_json_products(json_dir)):
+            return False, "当前工作区没有可配置的维表候选（JSON 画像缺失）", None, [], None
+        return True, None, None, [], None
     if db_name is None:
         return False, "登记不可用", [], None
-    yaml_path = resolve_dim_output_dir(source_id, workspace_id) / (
-        DIM_CONFIG_ARTIFACT_NAME
+    from backend.profile_loading.dim_value_config_api import (
+        build_dim_tables_from_params,
     )
-    state, reason, cfg = classify_dim_tables_yaml(yaml_path, db_name)
-    if state == "invalid":
+    from backend.profile_loading.json_loader import read_registration_snapshot
+
+    params = effective_params.get("dim_value")
+    if not isinstance(params, dict) or "tables" not in params:
         return (
             False,
-            f"dim_tables.yaml 配置文件无效（{reason or '配置文件无效'}）",
+            "dim_value 缺少必需配置 step_config.dim_value.tables："
+            "请编辑作业并保存新版本后重新运行",
+            None,
             [],
             None,
         )
-    if state == "empty":
-        return False, "dim_tables.yaml 没有任何维度表", [], None
-    unconfigured = sorted(
-        name for name, table in cfg.tables.items() if table.embedding_col is None
+    registration = read_registration_snapshot(session, source_id)
+    cfg, reason, code, files = build_dim_tables_from_params(
+        params.get("tables"), source_id, workspace_id, registration
     )
-    if unconfigured:
-        return (
-            False,
-            "以下维度表未配置有效 embedding_col: " + "、".join(unconfigured),
-            [],
-            None,
-        )
-    return True, None, [("dim/dim_tables.yaml", markers["dim"].run_id)], cfg
+    if cfg is None:
+        return False, reason, code, [], None
+    return True, None, None, files, cfg
 
 
 def _rel_check(session, source_id: str, workspace_id: str):
@@ -275,8 +386,14 @@ def check_step(
     step: str,
     *,
     db_name: str | None,
+    effective_params: "dict | None" = None,
 ) -> StepPrecheckResult:
-    """检查单个发布步骤的全部输入（marker + 文件 + 内容/配置）。"""
+    """检查单个发布步骤的全部输入（marker + 文件 + 内容/配置）。
+
+    effective_params 非 None 时（创建运行、执行期复查、作业级预检），
+    dim_value/domain 按本次有效清单校验并产出可注入载荷；为 None 时
+    （publish-check GET 工作区只读检查）只做准入最小集的文件侧核对。
+    """
     dirs = STEP_INPUT_DIRS[step]
     markers, failure = require_success_markers(source_id, workspace_id, dirs)
     if failure is not None:
@@ -289,24 +406,30 @@ def check_step(
     elif step == "json":
         ready, reason, files = _json_files(source_id, workspace_id, markers, db_name)
     elif step == "domain":
-        ready, reason, files = _domain_files(source_id, workspace_id, markers)
+        if effective_params is None:
+            ready, reason, files = _domain_files(source_id, workspace_id, markers)
+            return StepPrecheckResult(step, ready, reason, None, tuple(files))
+        ready, reason, code, files, payload = _domain_effective_check(
+            session, source_id, workspace_id, effective_params
+        )
+        return StepPrecheckResult(step, ready, reason, code, tuple(files), payload)
     elif step == "table_schema":
         ready, reason, files = _table_schema_files(
             source_id, workspace_id, markers, db_name
         )
     elif step == "dim_value":
-        ready, reason, files, payload = _dim_value_check(
-            source_id, workspace_id, markers, db_name
+        ready, reason, code, files, payload = _dim_value_check(
+            session, source_id, workspace_id, markers, db_name, effective_params
         )
-        return StepPrecheckResult(step, ready, reason, tuple(files), payload)
+        return StepPrecheckResult(step, ready, reason, code, tuple(files), payload)
     elif step == "rel":
         ready, reason, files, payload = _rel_check(session, source_id, workspace_id)
-        return StepPrecheckResult(step, ready, reason, tuple(files), payload)
+        return StepPrecheckResult(step, ready, reason, None, tuple(files), payload)
     elif step == "sql":
         ready, reason, files = _sql_files(source_id, workspace_id, markers)
     else:  # pragma: no cover - 固定白名单
         return StepPrecheckResult(step, False, f"未知发布步骤: {step}")
-    return StepPrecheckResult(step, ready, reason, tuple(files))
+    return StepPrecheckResult(step, ready, reason, None, tuple(files))
 
 
 def precheck_steps(
@@ -316,12 +439,18 @@ def precheck_steps(
     steps: "list[str] | tuple[str, ...]",
     *,
     db_name: str | None,
+    effective_params: "dict | None" = None,
 ) -> dict[str, StepPrecheckResult]:
     """对所选步骤集中预检；任一失败由调用方整单 400（doc 6.2 §6.4）。"""
     results = {}
     for step in steps:
         results[step] = check_step(
-            session, source_id, workspace_id, step, db_name=db_name
+            session,
+            source_id,
+            workspace_id,
+            step,
+            db_name=db_name,
+            effective_params=effective_params,
         )
     return results
 

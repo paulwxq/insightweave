@@ -1,17 +1,31 @@
 <script setup lang="ts">
 /**
- * 新建作业（采集/发布共用，doc 6.2 §9.1.2）：只保存作业与版本 1，不执行；
- * 步骤依赖仅作交互提示，最终校验与排序由后端完成。
+ * 新建作业（采集/发布共用，doc 6.2 §9.1.2；doc 7.2 §3.2 改造）：只保存作业与
+ * 版本 1，不执行；步骤依赖仅作交互提示，最终校验与排序由后端完成。
+ *
+ * 发布作业的 dim_value/domain 编辑的是首版本草稿：弹窗确认只回传清单，
+ * 不写工作区配置文件；保存时完整清单随作业写入版本 1 默认配置（完整替换）。
+ * 新建时自动读取 YAML 初始化草稿（非运行时回退）；勾选 dim_value/domain 时对应草稿必须完整才能保存。
+ * Rel 不再提供编辑入口（doc 7.2 §7.6，保留 rel 步骤选择与执行）。
  */
 import { computed, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ApiError } from '../api/http'
-import type { JobKind, PublishCheckResponse, PublishCheckStep } from '../api/types'
-import { createJob, getPublishCheck } from '../api/workspaces'
+import type {
+  DimValueTableParam,
+  DomainParam,
+  JobKind,
+  PublishCheckResponse,
+  PublishCheckStep,
+} from '../api/types'
+import {
+  createJob,
+  getPublishCheck,
+} from '../api/workspaces'
 import DimValueConfigDialog from '../components/DimValueConfigDialog.vue'
 import DomainConfigDialog from '../components/DomainConfigDialog.vue'
 import DomainDescriptionDialog from '../components/DomainDescriptionDialog.vue'
-import RelEditDialog from '../components/RelEditDialog.vue'
+import { usePublishConfigInitialization } from '../composables/usePublishConfigInitialization'
 import StepGrid from '../components/StepGrid.vue'
 import { useWorkspaceContext } from '../composables/useWorkspaceContext'
 import { allSteps, unchosenDeps } from '../utils/steps'
@@ -67,17 +81,28 @@ const descCount = computed(() => [...jobDesc.value].length)
 const savedDescription = ref<string | null>(null)
 const descriptionOpen = ref(false)
 
-// 发布：Domain/Rel/Dim 配置文件编辑入口（doc 6.3 §4.1）。编辑写工作区配置
-// 文件，不进入作业版本；保存作业仍只提交名称/说明/步骤。
+// 发布：Domain/Dim 首版本草稿编辑（doc 7.2 §3.2）。草稿随作业保存写入版本 1，
+// 不写工作区配置文件；null = 尚未配置，自动读取 YAML 初值，读取失败可手工配置。
 const domainOpen = ref(false)
-const relOpen = ref(false)
 const dimOpen = ref(false)
+const dimDraft = ref<DimValueTableParam[] | null>(null)
+const domainDraft = ref<DomainParam[] | null>(null)
 
-function closeConfigDialogs() {
-  domainOpen.value = false
-  relOpen.value = false
+function onDimApply(tables: DimValueTableParam[]) {
+  dimDraft.value = tables
   dimOpen.value = false
 }
+
+function onDomainApply(domains: DomainParam[]) {
+  domainDraft.value = domains
+  domainOpen.value = false
+}
+
+const { initializing, initError } = usePublishConfigInitialization(
+  () => [props.kind, workspaceId.value] as const,
+  dimDraft,
+  domainDraft,
+)
 
 // 发布校验（设计稿 32/33，与详情页/执行页同一 publish-check 接口）：发布步骤
 // 须通过校验才可勾选、编辑与保存；结果反映点击时刻的产物状态，保存前会复查。
@@ -118,12 +143,6 @@ async function runPublishCheck(): Promise<boolean> {
   }
 }
 
-// 配置文件保存后校验标记可能过期，静默复查一次
-function onConfigSaved() {
-  closeConfigDialogs()
-  if (checkRan.value) void runPublishCheck()
-}
-
 const chosenSteps = computed(() =>
   Object.keys(selected.value).filter((step) => selected.value[step]),
 )
@@ -132,18 +151,37 @@ const depHints = computed(() =>
   props.kind === 'collection' ? unchosenDeps(chosenSteps.value) : [],
 )
 
+/** 版本保存完整性（doc 7.2 §5.1）：勾选 dim_value/domain 必须携带完整清单 */
+const dimIncomplete = computed(
+  () =>
+    props.kind === 'publish' &&
+    chosenSteps.value.includes('dim_value') &&
+    (!dimDraft.value ||
+      dimDraft.value.length === 0 ||
+      dimDraft.value.some((table) => table.embedding_col.length === 0)),
+)
+const domainIncomplete = computed(
+  () =>
+    props.kind === 'publish' &&
+    chosenSteps.value.includes('domain') &&
+    (!domainDraft.value || domainDraft.value.length === 0),
+)
+
 const canSave = computed(
   () =>
     !ctxLoading.value &&
     !ctxError.value &&
     !saving.value &&
+    !initializing.value &&
     jobName.value.trim().length > 0 &&
     nameCount.value <= NAME_MAX &&
     descCount.value <= DESC_MAX &&
     chosenSteps.value.length > 0 &&
     // 发布：勾选步骤必须全部通过校验（未校验时 chosenSteps 恒为空，保存置灰）
     (props.kind !== 'publish' ||
-      chosenSteps.value.every((step) => stepCheck(step)?.ready === true)),
+      (chosenSteps.value.every((step) => stepCheck(step)?.ready === true) &&
+        !dimIncomplete.value &&
+        !domainIncomplete.value)),
 )
 
 function toggleStep(step: string) {
@@ -185,13 +223,26 @@ async function save() {
       }
     }
     const steps = chosenSteps.value
-    const useDescription = props.kind === 'collection' && steps.includes('domain') && savedDescription.value !== null
+    const stepConfig: Record<string, Record<string, unknown>> = {}
+    if (props.kind === 'collection') {
+      if (steps.includes('domain') && savedDescription.value !== null) {
+        stepConfig.domain = { description: savedDescription.value }
+      }
+    } else {
+      // 完整清单随保存写入版本 1（完整替换语义；不做增量合并）
+      if (steps.includes('dim_value') && dimDraft.value) {
+        stepConfig.dim_value = { tables: dimDraft.value }
+      }
+      if (steps.includes('domain') && domainDraft.value) {
+        stepConfig.domain = { domains: domainDraft.value }
+      }
+    }
     const job = await createJob(props.kind, workspaceId.value, {
       job_name: jobName.value.trim(),
       job_desc: jobDesc.value.trim() || null,
       config: {
         steps,
-        step_config: useDescription ? { domain: { description: savedDescription.value! } } : null,
+        step_config: Object.keys(stepConfig).length > 0 ? stepConfig : null,
       },
     })
     await router.push(`${basePath.value}/jobs/${job.job_id}`)
@@ -207,6 +258,9 @@ watch(
   () => {
     selected.value = {}
     savedDescription.value = null
+    dimDraft.value = null
+    domainDraft.value = null
+    initError.value = ''
     check.value = null
     checkError.value = ''
   },
@@ -332,7 +386,7 @@ function goBack() {
           :kind="kind"
           :selected="selected"
           :available="kind === 'publish' ? passedSteps : undefined"
-          :disabled="saving || checking"
+          :disabled="saving || checking || initializing"
           @toggle="toggleStep"
         >
           <template #after-step="{ step }">
@@ -368,39 +422,49 @@ function goBack() {
               >
                 {{ stepCheck(step)?.reason ?? '原因未知' }}
               </em>
-              <button
-                v-if="step === 'domain'"
-                type="button"
-                class="nj-step-edit"
-                :disabled="saving || checking || stepCheck(step)?.ready !== true"
-                @click="domainOpen = true"
-              >
-                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20h9" /><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L8 18l-4 1 1-4Z" /></svg>
-                编辑
-              </button>
-              <button
-                v-if="step === 'rel'"
-                type="button"
-                class="nj-step-edit"
-                :disabled="saving || checking || stepCheck(step)?.ready !== true"
-                @click="relOpen = true"
-              >
-                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20h9" /><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L8 18l-4 1 1-4Z" /></svg>
-                编辑
-              </button>
-              <button
-                v-if="step === 'dim_value'"
-                type="button"
-                class="nj-step-edit"
-                :disabled="saving || checking || stepCheck(step)?.ready !== true"
-                @click="dimOpen = true"
-              >
-                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20h9" /><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L8 18l-4 1 1-4Z" /></svg>
-                编辑
-              </button>
+              <!-- 首版本草稿编辑（doc 7.2 §3.2）：只改将保存进版本 1 的清单，
+                   不写工作区配置文件；rel 无编辑入口 -->
+              <template v-if="step === 'domain'">
+                <em v-if="domainDraft !== null" class="cj-draft-mark">
+                  已配置 {{ domainDraft.length }} 个域
+                </em>
+                <button
+                  type="button"
+                  class="nj-step-edit"
+                  :disabled="saving || checking || initializing"
+                  @click="domainOpen = true"
+                >
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20h9" /><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L8 18l-4 1 1-4Z" /></svg>
+                  编辑
+                </button>
+              </template>
+              <template v-if="step === 'dim_value'">
+                <em v-if="dimDraft !== null" class="cj-draft-mark">
+                  已配置 {{ dimDraft.length }} 张表
+                </em>
+                <button
+                  type="button"
+                  class="nj-step-edit"
+                  :disabled="saving || checking || initializing"
+                  @click="dimOpen = true"
+                >
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20h9" /><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L8 18l-4 1 1-4Z" /></svg>
+                  编辑
+                </button>
+              </template>
             </template>
           </template>
         </StepGrid>
+
+        <p v-if="initError" class="status-message" role="alert">{{ initError }}</p>
+        <p v-if="dimIncomplete" class="status-message" role="alert">
+          dim_value 需要完整的版本配置：请为至少一张表指定值向量化字段（自动读取配置后编辑），
+          或取消勾选 dim_value。
+        </p>
+        <p v-if="domainIncomplete" class="status-message" role="alert">
+          domain 需要完整的版本配置：请配置至少一个业务域（自动读取配置后编辑），
+          或取消勾选 domain。
+        </p>
       </section>
 
       <div class="cj-footer">
@@ -418,21 +482,25 @@ function goBack() {
       @cancel="descriptionOpen = false"
     />
 
-    <!-- 发布配置文件编辑（工作区定位；doc 6.3 §4.1，与发布执行页/详情页同款弹窗）。
-         Domain/Rel/Dim 编辑需该步骤发布校验通过；保存后静默复查校验状态。 -->
-    <DomainConfigDialog v-if="domainOpen" :workspace-id="workspaceId" @close="onConfigSaved" />
-    <RelEditDialog
-      v-if="relOpen"
+    <!-- 首版本草稿编辑（doc 7.2 §3.2：确认只回传清单，随保存写入版本 1；
+         rel 无编辑入口） -->
+    <DomainConfigDialog
+      v-if="domainOpen"
       :workspace-id="workspaceId"
-      @close="closeConfigDialogs"
-      @saved="onConfigSaved"
+      :db-name="source?.db_name || ''"
+      :initial-domains="domainDraft ?? []"
+      purpose="version"
+      @close="domainOpen = false"
+      @apply="onDomainApply"
     />
     <DimValueConfigDialog
       v-if="dimOpen"
       :workspace-id="workspaceId"
       :db-name="source?.db_name || ''"
-      @close="closeConfigDialogs"
-      @saved="onConfigSaved"
+      :initial-tables="dimDraft ?? []"
+      purpose="version"
+      @close="dimOpen = false"
+      @apply="onDimApply"
     />
   </div>
 </template>
@@ -558,6 +626,19 @@ function goBack() {
   color: #dc4a4a;
   font-size: 11px;
 }
+/* 版本草稿状态与自动初始化（doc 7.2 §3.2） */
+.cj-draft-mark {
+  font-style: normal;
+  font-size: 9px;
+  font-weight: 400;
+  padding: 1px 6px;
+  border-radius: 6px;
+  background: #e3eefb;
+  border: 1px solid #c5d7ee;
+  color: #2e7cd6;
+  white-space: nowrap;
+}
+
 @media (max-width: 1100px) {
   .cj-source-facts {
     grid-template-columns: repeat(2, minmax(0, 1fr));

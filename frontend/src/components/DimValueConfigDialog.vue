@@ -1,42 +1,57 @@
 <script setup lang="ts">
+// doc 7.2 §3.1.1/§4：dim_value 草稿编辑弹窗（运行草稿 / 版本草稿两种用途）。
+// 仅从 props 初始化并深拷贝为独立编辑状态；确认只回传父组件，不调用
+// 配置 YAML GET/PUT。候选表与字段取自当前工作区 JSON 画像；推荐经独立
+// 只读接口按全部 props 表统一读取（0/1 校验口径不变）。人工可为每表
+// 配置一个或多个字段（数组形态），不限制最多一个。
 import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
 
 import {
-  getDimValueConfig,
   getDimValueObjectColumns,
   getDimValueObjects,
-  putDimValueConfig,
+  getDimValueRecommendations,
 } from '../api/workspaces'
-import { ApiError } from '../api/http'
-import type { DimValueColumn, DimValueObject } from '../api/types'
+import type {
+  DimValueColumn,
+  DimValueObject,
+  DimValueTableParam,
+} from '../api/types'
 
 interface Row {
   schema_name: string
   object_name: string
-  embedding_col: string | null
+  /** 已选字段（数组形态；空数组 = 未指定） */
+  embedding_col: string[]
+  /** 推荐展示三态（doc 7.1 §4.4）：已加载 / 会话内新增未加载 / 画像不可用 */
+  recState: 'loaded' | 'unloaded' | 'unavailable'
+  recColumns: string[]
+  recConfidence: number | null
 }
 
 const props = defineProps<{
   workspaceId: string
   dbName: string
+  /** 当前草稿或引用版本默认配置（数组形态）；弹窗深拷贝为独立编辑状态 */
+  initialTables: DimValueTableParam[]
+  /** run = 本次运行草稿；version = 作业版本草稿 */
+  purpose: 'run' | 'version'
 }>()
 
 const emit = defineEmits<{
   close: []
-  saved: [tables: Row[]]
+  apply: [tables: DimValueTableParam[]]
 }>()
 
-const loading = ref(true)
-const fatal = ref('')
 const rows = ref<Row[]>([])
-const version = ref('')
 const objects = ref<DimValueObject[]>([])
+/** 候选表接口失败：草稿仍可查看/应用，仅禁用新增（doc 7.2 §4 局部降级） */
+const objectsError = ref('')
+const recError = ref('')
 const selectedKey = ref('')
 const columns = ref<DimValueColumn[]>([])
 const columnsLoading = ref(false)
 const columnsError = ref('')
-const saving = ref(false)
-const saveError = ref('')
+const applyError = ref('')
 const addOpen = ref(false)
 const addSearch = ref('')
 const addInput = ref<HTMLInputElement | null>(null)
@@ -46,11 +61,47 @@ const keyOf = (row: { schema_name: string; object_name: string }) =>
 
 const selectedRow = computed(() => rows.value.find((r) => keyOf(r) === selectedKey.value) || null)
 
-const unsetCount = computed(() => rows.value.filter((r) => !r.embedding_col).length)
+const unsetCount = computed(() => rows.value.filter((r) => !r.embedding_col.length).length)
 
-const canSave = computed(
-  () => !loading.value && !fatal.value && unsetCount.value === 0 && !saving.value,
+const confirmText = computed(() =>
+  props.purpose === 'run' ? '应用到本次执行' : '应用到作业配置',
 )
+const scopeNote = computed(() =>
+  props.purpose === 'run'
+    ? '仅应用到本次运行，不修改工作区配置文件'
+    : '随作业保存写入新版本，不直接修改工作区文件',
+)
+
+function recText(row: Row): string {
+  if (row.recState === 'unloaded') return '推荐未加载'
+  if (row.recState === 'unavailable') return '推荐信息不可用'
+  return row.recColumns[0] || '无推荐'
+}
+
+function recConf(row: Row): string {
+  if (row.recState !== 'loaded' || !row.recColumns[0]) return ''
+  return row.recConfidence === null ? '· —' : `· ${row.recConfidence.toFixed(2)}`
+}
+
+function recTitle(row: Row): string | undefined {
+  if (row.recState === 'unloaded') return '推荐未加载，应用后重新打开可查看'
+  if (row.recState !== 'loaded' || !row.recColumns[0]) return undefined
+  const conf = row.recConfidence === null ? '—' : row.recConfidence.toFixed(2)
+  return `模型推荐：${row.recColumns[0]}（置信度 ${conf}）`
+}
+
+function recMuted(row: Row): boolean {
+  return row.recState !== 'loaded' || row.recColumns.length === 0
+}
+
+/** 与推荐的差异按字段集合判断（doc 7.2 §3.1.1）：多选其他字段也算不同 */
+const differsFromRec = (row: Row) => {
+  if (row.recState !== 'loaded' || row.recColumns.length === 0) return false
+  if (row.embedding_col.length !== row.recColumns.length) return true
+  return row.recColumns.some((name) => !row.embedding_col.includes(name))
+}
+
+const canApply = computed(() => unsetCount.value === 0)
 
 const searchHits = computed(() => {
   if (!addOpen.value) return []
@@ -82,27 +133,31 @@ function typeKind(objectTypeName: string) {
   return 'table'
 }
 
-async function load() {
-  loading.value = true
-  fatal.value = ''
+/** 打开时对 props 的全部表统一读取推荐；失败只局部降级（doc 7.2 §4）。 */
+async function loadRecommendations() {
+  recError.value = ''
+  if (!rows.value.length) return
   try {
-    const [config, objectsResp] = await Promise.all([
-      getDimValueConfig(props.workspaceId),
-      getDimValueObjects(props.workspaceId),
-    ])
-    rows.value = config.tables.map((t) => ({ ...t }))
-    version.value = config.version
-    objects.value = objectsResp.objects
-    selectedKey.value = rows.value.length ? keyOf(rows.value[0]) : ''
-    if (selectedRow.value) void loadColumns(selectedRow.value)
-  } catch (error) {
-    if (error instanceof ApiError && error.code === 'dim_value_config_invalid') {
-      fatal.value = `${error.message}（请重跑该作业的 dim_config 步骤重新生成后再编辑）`
-    } else {
-      fatal.value = error instanceof ApiError ? error.message : '读取 dim_value 配置失败'
+    const resp = await getDimValueRecommendations(props.workspaceId)
+    const byKey = new Map(resp.tables.map((t) => [keyOf(t), t]))
+    for (const row of rows.value) {
+      if (row.recState === 'unloaded') continue // 会话内新增未应用的行
+      const rec = byKey.get(keyOf(row))
+      if (!rec) {
+        row.recState = 'unavailable'
+        row.recColumns = []
+        row.recConfidence = null
+      } else {
+        row.recState = 'loaded'
+        row.recColumns = rec.dimension_value_columns
+        row.recConfidence = rec.dimension_value_confidence
+      }
     }
-  } finally {
-    loading.value = false
+  } catch {
+    recError.value = '推荐信息读取失败，仅影响推荐列展示'
+    for (const row of rows.value) {
+      if (row.recState !== 'unloaded') row.recState = 'unavailable'
+    }
   }
 }
 
@@ -131,8 +186,11 @@ function selectRow(row: Row) {
   if (!same) void loadColumns(row)
 }
 
-function chooseColumn(row: Row, columnName: string) {
-  row.embedding_col = columnName
+/** 多选切换：再次点击已选字段即移除（doc 7.2 §6.1，不以单选覆盖其他字段） */
+function toggleColumn(row: Row, columnName: string) {
+  const index = row.embedding_col.indexOf(columnName)
+  if (index >= 0) row.embedding_col.splice(index, 1)
+  else row.embedding_col.push(columnName)
 }
 
 async function toggleAdd() {
@@ -160,7 +218,10 @@ function addObject(obj: DimValueObject) {
   const row: Row = {
     schema_name: obj.schema_name,
     object_name: obj.object_name,
-    embedding_col: null,
+    embedding_col: [],
+    recState: 'unloaded',
+    recColumns: [],
+    recConfidence: null,
   }
   rows.value.push(row)
   addOpen.value = false
@@ -168,25 +229,21 @@ function addObject(obj: DimValueObject) {
   selectRow(row)
 }
 
-async function save() {
-  if (!canSave.value) return
-  saving.value = true
-  saveError.value = ''
-  try {
-    await putDimValueConfig(props.workspaceId, {
-      tables: rows.value.map((r) => ({ ...r })),
-      version: version.value,
-    })
-    emit('saved', rows.value.map((r) => ({ ...r })))
-  } catch (error) {
-    if (error instanceof ApiError && error.code === 'dim_config_regenerated') {
-      saveError.value = '配置已被重新生成（作业可能已重跑），请刷新后重新编辑'
-    } else {
-      saveError.value = error instanceof ApiError ? error.message : '保存 dim_value 配置失败'
-    }
-  } finally {
-    saving.value = false
+function apply() {
+  applyError.value = ''
+  if (unsetCount.value > 0) {
+    applyError.value = `无法应用：${unsetCount.value} 张表未指定 embedding_col`
+    return
   }
+  // 只回传执行配置字段，推荐信息不进入（doc 7.1 §4.4 / doc 7.2 §3.1）
+  emit(
+    'apply',
+    rows.value.map((r) => ({
+      schema_name: r.schema_name,
+      object_name: r.object_name,
+      embedding_col: [...r.embedding_col],
+    })),
+  )
 }
 
 function close() {
@@ -204,7 +261,27 @@ function onKeydown(event: KeyboardEvent) {
 }
 
 onMounted(() => {
-  void load()
+  // props 深拷贝为独立编辑状态（§4 第 1 项）
+  rows.value = props.initialTables.map((t) => ({
+    schema_name: t.schema_name,
+    object_name: t.object_name,
+    embedding_col: [...t.embedding_col],
+    recState: 'loaded',
+    recColumns: [],
+    recConfidence: null,
+  }))
+  selectedKey.value = rows.value.length ? keyOf(rows.value[0]) : ''
+  if (selectedRow.value) void loadColumns(selectedRow.value)
+  // 候选表与推荐异步加载，失败只局部降级，不阻断草稿展示
+  getDimValueObjects(props.workspaceId)
+    .then((resp) => {
+      objects.value = resp.objects
+    })
+    .catch(() => {
+      objects.value = []
+      objectsError.value = '候选表列表读取失败，暂不能新增表；已有草稿仍可编辑和应用'
+    })
+  void loadRecommendations()
   window.addEventListener('keydown', onKeydown)
 })
 onUnmounted(() => window.removeEventListener('keydown', onKeydown))
@@ -218,10 +295,13 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
           <p class="dimcfg-kicker">DIM VALUE EMBEDDING CONFIG</p>
           <div class="dimcfg-title-row">
             <h2 id="dimcfg-title">维表值向量化配置</h2>
-            <span class="dimcfg-file">dim_tables.yaml</span>
+            <span class="dimcfg-file">
+              {{ purpose === 'run' ? '本次执行草稿' : '版本配置草稿' }}
+            </span>
           </div>
           <p class="dimcfg-lead">
-            为每张表 / 视图 / 物化视图指定唯一的 embedding_col（值向量化字段），保存后写回 dim_tables.yaml。
+            为每张表 / 视图 / 物化视图选择一个或多个 embedding_col（值向量化字段）；
+            {{ scopeNote }}。
           </p>
         </div>
         <button type="button" class="dimcfg-x" aria-label="关闭" @click="close">
@@ -229,160 +309,174 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
         </button>
       </header>
 
-      <p v-if="loading" class="dimcfg-status">正在读取配置…</p>
-      <p v-else-if="fatal" class="dimcfg-status alert" role="alert">{{ fatal }}</p>
+      <div class="dimcfg-body">
+        <section class="dimcfg-side">
+          <div class="dimcfg-side-head">
+            <strong>表列表</strong>
+            <span class="dimcfg-count">
+              {{ rows.length }} 张表
+              <template v-if="unsetCount"> · {{ unsetCount }} 张未指定</template>
+              <template v-else-if="rows.length"> · 全部已指定</template>
+              <template v-if="pendingAddCount"> · 新增 {{ pendingAddCount }} 张待选择</template>
+            </span>
+          </div>
+          <div class="dimcfg-card">
+            <div class="dimcfg-scroll">
+              <div class="dimcfg-grid dimcfg-grid-head">
+                <span>表 / 视图 / 物化视图</span>
+                <span>值向量化字段名</span>
+                <span>模型推荐</span>
+                <span>操作</span>
+              </div>
+              <div
+                v-for="row in rows"
+                :key="keyOf(row)"
+                class="dimcfg-grid dimcfg-item"
+                :class="{ active: keyOf(row) === selectedKey }"
+                @click="selectRow(row)"
+              >
+                <div class="dimcfg-object">
+                  <strong>{{ keyOf(row) }}</strong>
+                  <em class="dimcfg-type-tag" :class="typeKind(objectType(row))">
+                    {{ typeLabel(objectType(row)) }}
+                  </em>
+                </div>
+                <span class="dimcfg-col" :class="{ unset: !row.embedding_col.length }">
+                  {{ row.embedding_col.length ? row.embedding_col.join('、') : '未指定' }}
+                </span>
+                <span
+                  class="dimcfg-rec"
+                  :class="{ muted: recMuted(row) }"
+                  :title="recTitle(row)"
+                >
+                  <span class="dimcfg-rec-text">{{ recText(row) }}</span>
+                  <span v-if="recConf(row)" class="dimcfg-rec-conf">{{ recConf(row) }}</span>
+                  <em v-if="differsFromRec(row)" class="dimcfg-diff">与推荐不同</em>
+                </span>
+                <div class="dimcfg-ops">
+                  <button type="button" class="dimcfg-delete" @click.stop="removeRow(row)">
+                    <svg viewBox="0 0 24 24" aria-hidden="true">
+                      <path d="M4 7h16" />
+                      <path d="M9 7V5h6v2" />
+                      <path d="M7 7l1 13h8l1-13" />
+                    </svg>
+                    删除表
+                  </button>
+                </div>
+              </div>
+              <p v-if="!rows.length" class="dimcfg-empty">尚未添加任何表</p>
+            </div>
+            <div v-if="addOpen" class="dimcfg-finder">
+              <label class="dimcfg-finder-input">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6" /><path d="m20 20-3.5-3.5" /></svg>
+                <input
+                  ref="addInput"
+                  v-model="addSearch"
+                  type="search"
+                  placeholder="输入关键字搜索 schema.table，支持表 / 视图 / 物化视图"
+                  aria-label="搜索要新增的表"
+                />
+                <button type="button" aria-label="关闭搜索" @click="toggleAdd">×</button>
+              </label>
+              <ul v-if="searchHits.length" class="dimcfg-menu">
+                <li v-for="obj in searchHits" :key="keyOf(obj)">
+                  <button type="button" @click="pickSearchHit(obj)">
+                    <span>{{ keyOf(obj) }}</span>
+                    <em class="dimcfg-type-tag" :class="typeKind(obj.object_type)">
+                      {{ typeLabel(obj.object_type) }}
+                    </em>
+                  </button>
+                </li>
+              </ul>
+              <p v-else class="dimcfg-finder-empty">没有匹配的对象</p>
+            </div>
+          </div>
+          <button
+            type="button"
+            class="dimcfg-add"
+            :class="{ on: addOpen }"
+            :disabled="!!objectsError"
+            @click="toggleAdd"
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>
+            新增表
+          </button>
+          <p v-if="objectsError" class="dimcfg-hint alert" role="alert">
+            {{ objectsError }}
+          </p>
+          <p v-else-if="recError" class="dimcfg-hint alert" role="alert">
+            {{ recError }}
+          </p>
+        </section>
 
-      <template v-else>
-        <div class="dimcfg-body">
-          <section class="dimcfg-side">
+        <section class="dimcfg-structure">
+          <template v-if="selectedRow">
             <div class="dimcfg-side-head">
-              <strong>表列表</strong>
-              <span class="dimcfg-count">
-                {{ rows.length }} 张表
-                <template v-if="unsetCount"> · {{ unsetCount }} 张未指定</template>
-                <template v-else-if="rows.length"> · 全部已指定</template>
-                <template v-if="pendingAddCount"> · 新增 {{ pendingAddCount }} 张待选择</template>
+              <strong>表结构</strong>
+              <span class="dimcfg-object-tag">{{ keyOf(selectedRow) }}</span>
+              <span v-if="!columnsLoading && !columnsError" class="dimcfg-field-count">
+                {{ columns.length }} 个字段
               </span>
             </div>
-            <div class="dimcfg-card">
+            <p v-if="columnsLoading" class="dimcfg-status">读取表结构…</p>
+            <p v-else-if="columnsError" class="dimcfg-status alert">{{ columnsError }}</p>
+            <div v-else class="dimcfg-card dimcfg-card-fill">
               <div class="dimcfg-scroll">
-                <div class="dimcfg-grid dimcfg-grid-head">
-                  <span>表 / 视图 / 物化视图</span>
-                  <span>值向量化字段名</span>
+                <div class="dimcfg-cols dimcfg-cols-head">
+                  <span>column_name</span>
+                  <span>column_type</span>
+                  <span>字段注释</span>
+                  <span>样例数据</span>
                   <span>操作</span>
                 </div>
-                <div
-                  v-for="row in rows"
-                  :key="keyOf(row)"
-                  class="dimcfg-grid dimcfg-item"
-                  :class="{ active: keyOf(row) === selectedKey }"
-                  @click="selectRow(row)"
-                >
-                  <div class="dimcfg-object">
-                    <strong>{{ keyOf(row) }}</strong>
-                    <em class="dimcfg-type-tag" :class="typeKind(objectType(row))">
-                      {{ typeLabel(objectType(row)) }}
-                    </em>
-                  </div>
-                  <span class="dimcfg-col" :class="{ unset: !row.embedding_col }">
-                    {{ row.embedding_col || '未指定' }}
-                  </span>
-                  <div class="dimcfg-ops">
-                    <button type="button" class="dimcfg-delete" @click.stop="removeRow(row)">
-                      <svg viewBox="0 0 24 24" aria-hidden="true">
-                        <path d="M4 7h16" />
-                        <path d="M9 7V5h6v2" />
-                        <path d="M7 7l1 13h8l1-13" />
-                      </svg>
-                      删除表
-                    </button>
-                  </div>
+                <div v-for="col in columns" :key="col.name" class="dimcfg-cols dimcfg-col-row">
+                  <strong>{{ col.name }}</strong>
+                  <span class="dimcfg-type">{{ col.data_type }}</span>
+                  <span class="dimcfg-comment">{{ col.comment || '—' }}</span>
+                  <span class="dimcfg-sample">{{ col.sample_value || '—' }}</span>
+                  <button
+                    type="button"
+                    class="dimcfg-plus"
+                    :class="{ on: selectedRow.embedding_col.includes(col.name) }"
+                    @click="selectedRow && toggleColumn(selectedRow, col.name)"
+                  >
+                    <svg viewBox="0 0 24 24" aria-hidden="true">
+                      <path v-if="selectedRow.embedding_col.includes(col.name)" d="M5 12.5 9.5 17 19 7" />
+                      <path v-else d="M12 5v14M5 12h14" />
+                    </svg>
+                    {{ selectedRow.embedding_col.includes(col.name) ? '已选择' : '添加' }}
+                  </button>
                 </div>
-                <p v-if="!rows.length" class="dimcfg-empty">尚未添加任何表</p>
-              </div>
-              <div v-if="addOpen" class="dimcfg-finder">
-                <label class="dimcfg-finder-input">
-                  <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6" /><path d="m20 20-3.5-3.5" /></svg>
-                  <input
-                    ref="addInput"
-                    v-model="addSearch"
-                    type="search"
-                    placeholder="输入关键字搜索 schema.table，支持表 / 视图 / 物化视图"
-                    aria-label="搜索要新增的表"
-                  />
-                  <button type="button" aria-label="关闭搜索" @click="toggleAdd">×</button>
-                </label>
-                <ul v-if="searchHits.length" class="dimcfg-menu">
-                  <li v-for="obj in searchHits" :key="keyOf(obj)">
-                    <button type="button" @click="pickSearchHit(obj)">
-                      <span>{{ keyOf(obj) }}</span>
-                      <em class="dimcfg-type-tag" :class="typeKind(obj.object_type)">
-                        {{ typeLabel(obj.object_type) }}
-                      </em>
-                    </button>
-                  </li>
-                </ul>
-                <p v-else class="dimcfg-finder-empty">没有匹配的对象</p>
+                <p v-if="!columns.length" class="dimcfg-empty">该对象没有字段</p>
               </div>
             </div>
-            <button type="button" class="dimcfg-add" :class="{ on: addOpen }" @click="toggleAdd">
-              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>
-              新增表
-            </button>
-          </section>
+          </template>
+          <template v-else>
+            <div class="dimcfg-side-head">
+              <strong>表结构</strong>
+              <span class="dimcfg-field-count">未选择</span>
+            </div>
+            <div class="dimcfg-card dimcfg-placeholder">
+              <span class="dimcfg-placeholder-mark" aria-hidden="true">
+                <svg viewBox="0 0 24 24"><rect x="4" y="5" width="16" height="14" rx="2" /><path d="M4 10h16M9 5v14" /></svg>
+              </span>
+              <p>选择或新增表后，此处展示该表的字段列表</p>
+              <small>新增的表需要先指定值向量化字段（embedding_col）后才能应用；其模型推荐在应用后重新打开时展示</small>
+            </div>
+          </template>
+        </section>
+      </div>
 
-          <section class="dimcfg-structure">
-            <template v-if="selectedRow">
-              <div class="dimcfg-side-head">
-                <strong>表结构</strong>
-                <span class="dimcfg-object-tag">{{ keyOf(selectedRow) }}</span>
-                <span v-if="!columnsLoading && !columnsError" class="dimcfg-field-count">
-                  {{ columns.length }} 个字段
-                </span>
-              </div>
-              <p v-if="columnsLoading" class="dimcfg-status">读取表结构…</p>
-              <p v-else-if="columnsError" class="dimcfg-status alert">{{ columnsError }}</p>
-              <div v-else class="dimcfg-card dimcfg-card-fill">
-                <div class="dimcfg-scroll">
-                  <div class="dimcfg-cols dimcfg-cols-head">
-                    <span>column_name</span>
-                    <span>column_type</span>
-                    <span>字段注释</span>
-                    <span>样例数据</span>
-                    <span>操作</span>
-                  </div>
-                  <div v-for="col in columns" :key="col.name" class="dimcfg-cols dimcfg-col-row">
-                    <strong>{{ col.name }}</strong>
-                    <span class="dimcfg-type">{{ col.data_type }}</span>
-                    <span class="dimcfg-comment">{{ col.comment || '—' }}</span>
-                    <span class="dimcfg-sample">{{ col.sample_value || '—' }}</span>
-                    <button
-                      type="button"
-                      class="dimcfg-plus"
-                      :class="{ on: selectedRow.embedding_col === col.name }"
-                      @click="selectedRow && chooseColumn(selectedRow, col.name)"
-                    >
-                      <svg viewBox="0 0 24 24" aria-hidden="true">
-                        <path v-if="selectedRow.embedding_col === col.name" d="M5 12.5 9.5 17 19 7" />
-                        <path v-else d="M12 5v14M5 12h14" />
-                      </svg>
-                      {{ selectedRow.embedding_col === col.name ? '已选择' : '添加' }}
-                    </button>
-                  </div>
-                  <p v-if="!columns.length" class="dimcfg-empty">该对象没有字段</p>
-                </div>
-              </div>
-            </template>
-            <template v-else>
-              <div class="dimcfg-side-head">
-                <strong>表结构</strong>
-                <span class="dimcfg-field-count">未选择</span>
-              </div>
-              <div class="dimcfg-card dimcfg-placeholder">
-                <span class="dimcfg-placeholder-mark" aria-hidden="true">
-                  <svg viewBox="0 0 24 24"><rect x="4" y="5" width="16" height="14" rx="2" /><path d="M4 10h16M9 5v14" /></svg>
-                </span>
-                <p>选择或新增表后，此处展示该表的字段列表</p>
-                <small>新增的表需要先指定值向量化字段（embedding_col）后才能保存</small>
-              </div>
-            </template>
-          </section>
-        </div>
-
-        <footer class="dimcfg-foot">
-          <span class="dimcfg-path">databases › {{ dbName || '…' }} › tables</span>
-          <span v-if="saveError" class="dimcfg-save-error" role="alert">{{ saveError }}</span>
-          <span v-else-if="unsetCount" class="dimcfg-save-error">
-            无法保存：{{ unsetCount }} 张表未指定 embedding_col
-          </span>
-          <span v-else class="dimcfg-save-note">保存后写回 yaml 配置文件</span>
-          <button type="button" class="dimcfg-cancel" @click="close">取消</button>
-          <button type="button" class="dimcfg-save" :disabled="!canSave" @click="save">
-            <svg v-if="canSave" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12.5 9.5 17 19 7" /></svg>
-            {{ saving ? '保存中' : '保存' }}
-          </button>
-        </footer>
-      </template>
+      <footer class="dimcfg-foot">
+        <span class="dimcfg-path">databases › {{ dbName || '…' }} › tables</span>
+        <span v-if="applyError" class="dimcfg-save-error" role="alert">{{ applyError }}</span>
+        <span v-else class="dimcfg-save-note">{{ scopeNote }}</span>
+        <button type="button" class="dimcfg-cancel" @click="close">取消</button>
+        <button type="button" class="dimcfg-save" :disabled="!canApply" @click="apply">
+          <svg v-if="canApply" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12.5 9.5 17 19 7" /></svg>
+          {{ confirmText }}
+        </button>
+      </footer>
 
     </div>
   </div>
@@ -538,7 +632,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
   padding: 8px 12px;
 }
 .dimcfg-grid {
-  grid-template-columns: 190px 104px minmax(0, 1fr);
+  grid-template-columns: 190px 104px minmax(0, 1fr) 84px;
   gap: 0;
 }
 .dimcfg-cols {
@@ -556,7 +650,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
   font-weight: 700;
   flex-shrink: 0;
 }
-.dimcfg-grid.dimcfg-grid-head > span:nth-child(3) { text-align: right; }
+.dimcfg-grid.dimcfg-grid-head > span:nth-child(4) { text-align: right; }
 .dimcfg-cols-head > span:nth-child(5) { text-align: right; }
 .dimcfg-item {
   border-top: 1px solid #d9e3ef;
@@ -646,6 +740,47 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
   font-size: 10px;
   color: #c25454;
 }
+.dimcfg-rec {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: #0e9f8a;
+}
+.dimcfg-rec-text {
+  min-width: 0;
+  flex: 0 1 auto;
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-size: 10px;
+  font-weight: 700;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dimcfg-rec-conf {
+  flex-shrink: 0;
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-size: 10px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+.dimcfg-rec.muted .dimcfg-rec-text {
+  font-family: "Noto Sans SC", "PingFang SC", sans-serif;
+  font-weight: 600;
+  color: #8a99ac;
+}
+.dimcfg-diff {
+  flex-shrink: 0;
+  font-style: normal;
+  font-size: 9px;
+  font-weight: 700;
+  padding: 1px 6px;
+  border-radius: 6px;
+  background: #fdf3e3;
+  border: 1px solid #f0d9b5;
+  color: #a06a1a;
+  white-space: nowrap;
+}
 .dimcfg-ops { display: flex; justify-content: flex-end; gap: 6px; }
 .dimcfg-delete,
 .dimcfg-pick {
@@ -684,6 +819,12 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
 }
 .dimcfg-add svg { width: 12px; height: 12px; }
 .dimcfg-add:hover { background: #eef5ff; }
+.dimcfg-add:disabled {
+  background: #f2f6fa;
+  border-color: #d9e3ef;
+  color: #8a99ac;
+  cursor: not-allowed;
+}
 .dimcfg-hint {
   display: flex;
   align-items: flex-start;

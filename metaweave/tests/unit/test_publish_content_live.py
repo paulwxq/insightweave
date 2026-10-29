@@ -11,7 +11,7 @@ import json
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import delete, text
+from sqlalchemy import delete, select, text
 
 from backend.jobs.job_service import (
     JobConfigPayload,
@@ -122,7 +122,9 @@ def live_source_two_workspaces():
     from metaweave.core.clean_targets import resolve_source_workspace_dir
 
     with platform_session(SETTINGS) as session:
-        # 逆外键序：步骤 → 五张内容行（引用发布运行）→ 运行 → 版本 → 作业
+        # 逆外键序，且只清理本测试的数据（共享演练库可能有其他用例的行，
+        # 全表删除会被他源内容行的外键引用阻断）：步骤 → 五张内容行
+        # （引用发布运行）→ 运行 → 版本 → 作业
         from backend.persistence.models import (
             TableColumnProfile,
             TableDefinition,
@@ -130,7 +132,27 @@ def live_source_two_workspaces():
             TableProfile,
         )
 
-        session.execute(delete(PublishRunStep))
+        job_ids = session.execute(
+            select(PublishJobInfo.publish_job_id)
+            .join(
+                WorkspaceInfo,
+                WorkspaceInfo.workspace_id == PublishJobInfo.workspace_id,
+            )
+            .where(WorkspaceInfo.source_id == source_id)
+        ).scalars().all()
+        run_ids = (
+            session.execute(
+                select(PublishRunInfo.publish_run_id).where(
+                    PublishRunInfo.publish_job_id.in_(job_ids)
+                )
+            ).scalars().all()
+            if job_ids
+            else []
+        )
+        if run_ids:
+            session.execute(
+                delete(PublishRunStep).where(PublishRunStep.publish_run_id.in_(run_ids))
+            )
         session.execute(delete(DbProfile).where(DbProfile.source_id == source_id))
         session.execute(delete(TableDomain).where(TableDomain.source_id == source_id))
         session.execute(
@@ -140,9 +162,19 @@ def live_source_two_workspaces():
         session.execute(
             delete(TableColumnProfile).where(TableColumnProfile.source_id == source_id)
         )
-        session.execute(delete(PublishRunInfo))
-        session.execute(delete(PublishJobRevision))
-        session.execute(delete(PublishJobInfo))
+        if run_ids:
+            session.execute(
+                delete(PublishRunInfo).where(PublishRunInfo.publish_run_id.in_(run_ids))
+            )
+        if job_ids:
+            session.execute(
+                delete(PublishJobRevision).where(
+                    PublishJobRevision.publish_job_id.in_(job_ids)
+                )
+            )
+            session.execute(
+                delete(PublishJobInfo).where(PublishJobInfo.publish_job_id.in_(job_ids))
+            )
         session.execute(
             delete(WorkspaceInfo).where(WorkspaceInfo.source_id == source_id)
         )

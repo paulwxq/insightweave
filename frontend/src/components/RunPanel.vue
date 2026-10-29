@@ -38,10 +38,13 @@ function triggerText(trigger: string) {
 }
 
 function stepConfigText(step: { step_name: string; step_config: Record<string, unknown> | null }) {
-  if (!step.step_config) return ''
+  // 发布参数快照仅在步骤详情展示，避免完整数组挤占执行结果。
+  if (props.kind === 'publish' || !step.step_config) return ''
   const parts: string[] = []
   for (const [key, value] of Object.entries(step.step_config)) {
-    parts.push(`${key}=${String(value)}`)
+    // doc 7.2 §5.3：运行快照含 dim_value.tables / domain.domains 完整清单（数组），
+    // 非字符串值用 JSON 展示实际参数，避免 [object Object]
+    parts.push(`${key}=${typeof value === 'string' ? value : JSON.stringify(value)}`)
   }
   return parts.join(' · ')
 }

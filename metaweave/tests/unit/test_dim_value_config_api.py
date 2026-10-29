@@ -197,8 +197,8 @@ def test_a04_get_returns_tables_and_content_hash_version(tmp_path, monkeypatch):
     assert tables == {
         "public.a": "name",
         "public.b": None,
-        "public.multi": None,
-    }  # 多列归 null（§5.3）
+        "public.multi": ["x", "y"],
+    }  # doc 7.2 §3.1.1：人工多字段列表完整保留，不再归 null
 
 
 @pytest.mark.parametrize(
@@ -212,6 +212,37 @@ def test_a04_empty_variants_return_empty_list(tmp_path, monkeypatch, content):
 
     result = read_dim_value_config(SETTINGS, WORKSPACE_ID)
     assert result["tables"] == []
+    assert result["comma_string_tables"] == []
+
+
+def test_a04_comma_string_listed_as_warning(tmp_path, monkeypatch):
+    """逗号串读取仍归未指定（不拆分、不截取），同时经 comma_string_tables
+    独立告知显式初始化页改用字段列表（doc 7.2 §3.1.1/验收 25）。"""
+    root = _install(monkeypatch, tmp_path)
+    _write_yaml(
+        root,
+        yaml.safe_dump(
+            {
+                "databases": {
+                    DB_NAME: {
+                        "tables": {
+                            "public.legacy": {"embedding_col": "hall_id, screen_name"},
+                            "public.ok": {"embedding_col": "name"},
+                            "public.multi": {"embedding_col": ["x", "y"]},
+                        }
+                    }
+                }
+            }
+        ),
+    )
+
+    result = read_dim_value_config(SETTINGS, WORKSPACE_ID)
+
+    tables = {t["schema_name"] + "." + t["object_name"]: t for t in result["tables"]}
+    assert tables["public.legacy"]["embedding_col"] is None  # 逗号串按未指定
+    assert tables["public.ok"]["embedding_col"] == "name"
+    assert tables["public.multi"]["embedding_col"] == ["x", "y"]
+    assert result["comma_string_tables"] == ["public.legacy"]
 
 
 def test_a04_missing_artifact_raises_404(tmp_path, monkeypatch):
@@ -382,11 +413,59 @@ def test_a07_structural_violations_rejected(tmp_path, monkeypatch):
             WORKSPACE_ID,
             _payload([("public", "t", "a"), ("public", "t", "b")]),
         )
-    # 含逗号（多列形态）
+    # 含逗号（多列形态）→ 拒绝，提示改用字段列表（doc 7.2 §3.1.1）
     with pytest.raises(DimValueConfigInvalidError):
         write_dim_value_config(
             SETTINGS, WORKSPACE_ID, _payload([("public", "t", "a, b")])
         )
+    # 列表元素含逗号同样拒绝，不拆分
+    with pytest.raises(DimValueConfigInvalidError):
+        write_dim_value_config(
+            SETTINGS, WORKSPACE_ID, _payload([("public", "t", ["a, b"])])
+        )
+    # 空列表视为未配置（既有未配置规则）
+    with pytest.raises(DimValueColumnMissingError) as excinfo:
+        write_dim_value_config(
+            SETTINGS, WORKSPACE_ID, _payload([("public", "t", [])])
+        )
+    assert excinfo.value.details["tables"] == ["public.t"]
+
+
+def test_a07_multi_column_list_roundtrip(tmp_path, monkeypatch):
+    """doc 7.2 §3.1.1/验收 22：PUT 接受合法多字段列表并完整写回、读回。"""
+    root = _install(monkeypatch, tmp_path)
+    _write_yaml(root, "databases: {}\n")
+
+    result = write_dim_value_config(
+        SETTINGS,
+        WORKSPACE_ID,
+        _payload(
+            [
+                ("public", "a", ["hall_id", "hall_name", "hall_id"]),
+                ("public", "b", "name"),
+            ],
+            version=_version_of(root),
+        ),
+    )
+    # 列表按首次出现顺序去重；单字段字符串保持字符串形态
+    assert result["tables"] == [
+        {"schema_name": "public", "object_name": "a", "embedding_col": ["hall_id", "hall_name"]},
+        {"schema_name": "public", "object_name": "b", "embedding_col": "name"},
+    ]
+
+    written = (root / "dim" / "dim_tables.yaml").read_text(encoding="utf-8")
+    parsed = yaml.safe_load(written)
+    tables = parsed["databases"][DB_NAME]["tables"]
+    assert tables["public.a"]["embedding_col"] == ["hall_id", "hall_name"]
+    assert tables["public.b"]["embedding_col"] == "name"
+
+    # GET 完整读回列表，不归 null
+    got = read_dim_value_config(SETTINGS, WORKSPACE_ID)
+    got_map = {
+        t["schema_name"] + "." + t["object_name"]: t["embedding_col"]
+        for t in got["tables"]
+    }
+    assert got_map == {"public.a": ["hall_id", "hall_name"], "public.b": "name"}
 
 
 def test_a08_write_roundtrip_and_yaml_dump(tmp_path, monkeypatch):
@@ -588,3 +667,402 @@ def test_classify_tables_with_unconfigured(tmp_path):
     state, _, cfg = classify_dim_tables_yaml(path, DB_NAME)
     assert state == "tables"
     assert cfg.tables["public.b"].embedding_col is None
+
+
+# ---- doc 7.1 §4.4：GET 附带只读推荐信息 ----
+
+
+def _rec_profile(
+    root: Path,
+    table: str,
+    columns="missing",
+    confidence="missing",
+    column_profiles=None,
+):
+    json_dir = root / "json"
+    table_profile: dict = {"table_category": "dim"}
+    if columns != "missing":
+        table_profile["dimension_value_columns"] = columns
+    if confidence != "missing":
+        table_profile["dimension_value_confidence"] = confidence
+    payload = {
+        "object_info": {
+            "database": DB_NAME,
+            "schema_name": "public",
+            "object_name": table,
+            "object_type": "table",
+        },
+        "column_profiles": column_profiles
+        if column_profiles is not None
+        else {"name": {}, "id": {}},
+        "table_profile": table_profile,
+    }
+    (json_dir / f"{DB_NAME}.public.{table}.json").write_text(
+        json.dumps(payload), encoding="utf-8"
+    )
+
+
+def _rows_by_key(result):
+    return {t["schema_name"] + "." + t["object_name"]: t for t in result["tables"]}
+
+
+def test_get_attaches_valid_recommendation(tmp_path, monkeypatch):
+    root = _install(monkeypatch, tmp_path)
+    _write_yaml(
+        root,
+        yaml.safe_dump(
+            {
+                "databases": {
+                    DB_NAME: {
+                        "tables": {
+                            "public.t1": {"embedding_col": "name"},
+                            "public.t2": {"embedding_col": None},
+                        }
+                    }
+                }
+            }
+        ),
+    )
+    _rec_profile(root, "t1", ["name"], 0.8)
+
+    rows = _rows_by_key(read_dim_value_config(SETTINGS, WORKSPACE_ID))
+
+    assert rows["public.t1"]["dimension_value_columns"] == ["name"]
+    assert rows["public.t1"]["dimension_value_confidence"] == 0.8
+    assert rows["public.t1"]["recommendation_available"] is True
+    # 画像中不存在的表：推荐信息不可用，但不影响配置打开
+    assert rows["public.t2"]["recommendation_available"] is False
+    assert rows["public.t2"]["dimension_value_columns"] == []
+    assert rows["public.t2"]["dimension_value_confidence"] is None
+
+
+def test_get_missing_recommendation_attrs_is_no_recommendation(tmp_path, monkeypatch):
+    root = _install(monkeypatch, tmp_path)
+    _write_yaml(
+        root,
+        yaml.safe_dump(
+            {
+                "databases": {
+                    DB_NAME: {"tables": {"public.t1": {"embedding_col": "name"}}}
+                }
+            }
+        ),
+    )
+    _rec_profile(root, "t1")
+
+    rows = _rows_by_key(read_dim_value_config(SETTINGS, WORKSPACE_ID))
+
+    row = rows["public.t1"]
+    assert row["recommendation_available"] is True
+    assert row["dimension_value_columns"] == []
+    assert row["dimension_value_confidence"] is None
+
+
+@pytest.mark.parametrize(
+    "columns,confidence",
+    [
+        (["name", "id"], 0.9),
+        (["nope"], 0.9),
+        (["name"], "missing"),
+        (["name"], 2.0),
+    ],
+    ids=["multi", "unknown-col", "missing-confidence", "bad-confidence"],
+)
+def test_get_invalid_recommendation_treated_as_no_recommendation(
+    tmp_path, monkeypatch, columns, confidence
+):
+    root = _install(monkeypatch, tmp_path)
+    _write_yaml(
+        root,
+        yaml.safe_dump(
+            {
+                "databases": {
+                    DB_NAME: {"tables": {"public.t1": {"embedding_col": None}}}
+                }
+            }
+        ),
+    )
+    _rec_profile(root, "t1", columns, confidence)
+
+    rows = _rows_by_key(read_dim_value_config(SETTINGS, WORKSPACE_ID))
+
+    row = rows["public.t1"]
+    assert row["recommendation_available"] is True
+    assert row["dimension_value_columns"] == []
+    assert row["dimension_value_confidence"] is None
+
+
+def test_get_json_dir_missing_keeps_config_editable(tmp_path, monkeypatch):
+    root = _install(monkeypatch, tmp_path)
+    _write_yaml(
+        root,
+        yaml.safe_dump(
+            {
+                "databases": {
+                    DB_NAME: {"tables": {"public.t1": {"embedding_col": "name"}}}
+                }
+            }
+        ),
+    )
+    (root / "json").rmdir()
+
+    rows = _rows_by_key(read_dim_value_config(SETTINGS, WORKSPACE_ID))
+
+    assert rows["public.t1"]["recommendation_available"] is False
+
+
+def test_get_unreadable_profile_is_unavailable(tmp_path, monkeypatch):
+    root = _install(monkeypatch, tmp_path)
+    _write_yaml(
+        root,
+        yaml.safe_dump(
+            {
+                "databases": {
+                    DB_NAME: {"tables": {"public.t1": {"embedding_col": "name"}}}
+                }
+            }
+        ),
+    )
+    (root / "json" / f"{DB_NAME}.public.t1.json").write_text("{ not json", "utf-8")
+
+    rows = _rows_by_key(read_dim_value_config(SETTINGS, WORKSPACE_ID))
+
+    assert rows["public.t1"]["recommendation_available"] is False
+
+
+def test_get_invalid_yaml_still_raises_with_recommendations_present(
+    tmp_path, monkeypatch
+):
+    root = _install(monkeypatch, tmp_path)
+    _rec_profile(root, "t1", ["name"], 0.8)
+    _write_yaml(root, "not: [valid\n")
+
+    with pytest.raises(DimValueConfigInvalidError):
+        read_dim_value_config(SETTINGS, WORKSPACE_ID)
+
+
+def test_put_ignores_readonly_recommendation_fields(tmp_path, monkeypatch):
+    root = _install(monkeypatch, tmp_path)
+    _write_yaml(root, "databases: {}\n")
+
+    write_dim_value_config(
+        SETTINGS,
+        WORKSPACE_ID,
+        {
+            "tables": [
+                {
+                    "schema_name": "public",
+                    "object_name": "t1",
+                    "embedding_col": "name",
+                    "dimension_value_columns": ["name"],
+                    "dimension_value_confidence": 0.8,
+                    "recommendation_available": True,
+                }
+            ],
+            "version": _version_of(root),
+        },
+    )
+
+    written = (root / "dim" / "dim_tables.yaml").read_text(encoding="utf-8")
+    assert "dimension_value" not in written
+    assert "recommendation_available" not in written
+    # Web 保存文件头说明注释生命周期（doc 7.1 §4.4）
+    assert "配置弹窗" in written
+
+
+def _get_with_profile(root: Path, payload: dict):
+    _write_yaml(
+        root,
+        yaml.safe_dump(
+            {
+                "databases": {
+                    DB_NAME: {"tables": {"public.t1": {"embedding_col": "name"}}}
+                }
+            }
+        ),
+    )
+    (root / "json" / f"{DB_NAME}.public.t1.json").write_text(
+        json.dumps(payload), encoding="utf-8"
+    )
+    return _rows_by_key(read_dim_value_config(SETTINGS, WORKSPACE_ID))
+
+
+def test_get_broken_table_profile_degrades_to_unavailable(tmp_path, monkeypatch):
+    """doc 7.1 §4.4：画像 table_profile 结构异常只降级推荐，不阻断配置读取。"""
+    root = _install(monkeypatch, tmp_path)
+
+    rows = _get_with_profile(
+        root,
+        {
+            "object_info": {
+                "database": DB_NAME,
+                "schema_name": "public",
+                "object_name": "t1",
+                "object_type": "table",
+            },
+            "column_profiles": {"name": {}},
+            "table_profile": ["broken"],
+        },
+    )
+
+    assert rows["public.t1"]["recommendation_available"] is False
+
+
+def test_get_broken_column_profiles_degrades_to_unavailable(tmp_path, monkeypatch):
+    root = _install(monkeypatch, tmp_path)
+
+    rows = _get_with_profile(
+        root,
+        {
+            "object_info": {
+                "database": DB_NAME,
+                "schema_name": "public",
+                "object_name": "t1",
+                "object_type": "table",
+            },
+            "column_profiles": ["broken"],
+            "table_profile": {
+                "table_category": "dim",
+                "dimension_value_columns": ["name"],
+                "dimension_value_confidence": 0.8,
+            },
+        },
+    )
+
+    assert rows["public.t1"]["recommendation_available"] is False
+
+
+def test_get_json_path_resolution_failure_degrades(tmp_path, monkeypatch):
+    """doc 7.1 §4.4：json 路径解析异常（如符号链接）只降级推荐，不阻断 GET。"""
+    import backend.profile_loading.dim_value_config_api as api
+
+    root = _install(monkeypatch, tmp_path)
+    _write_yaml(
+        root,
+        yaml.safe_dump(
+            {
+                "databases": {
+                    DB_NAME: {"tables": {"public.t1": {"embedding_col": "name"}}}
+                }
+            }
+        ),
+    )
+    _rec_profile(root, "t1", ["name"], 0.8)
+    monkeypatch.setattr(
+        api,
+        "resolve_json_output_dir",
+        lambda _s, _w: (_ for _ in ()).throw(
+            ValueError("步骤产物目录路径包含符号链接")
+        ),
+    )
+
+    rows = _rows_by_key(read_dim_value_config(SETTINGS, WORKSPACE_ID))
+
+    assert rows["public.t1"]["embedding_col"] == "name"
+    assert rows["public.t1"]["recommendation_available"] is False
+
+
+# ---- doc 7.2 §3.1.1：读取口径（字符串/列表/null 保形） ----
+
+
+def test_classify_preserves_multi_column_list(tmp_path):
+    """人工多字段列表完整保留，不再归 null；去重按首次出现顺序。"""
+    path = tmp_path / "dim_tables.yaml"
+    path.write_text(
+        yaml.safe_dump(
+            {
+                "databases": {
+                    DB_NAME: {
+                        "tables": {
+                            "public.multi": {"embedding_col": ["x", "y", "x"]},
+                            "public.single": {"embedding_col": "name"},
+                        }
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    state, _, cfg = classify_dim_tables_yaml(path, DB_NAME)
+    assert state == "tables"
+    assert cfg.tables["public.multi"].embedding_col == ["x", "y"]
+    assert cfg.tables["public.single"].embedding_col == "name"
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["a, b", "a,b", "", "   ", ["a", "b,c"], ["a", ""], ["a", 1], 5, {"x": 1}],
+    ids=[
+        "comma-spaced",
+        "comma",
+        "empty-str",
+        "blank-str",
+        "list-comma-element",
+        "list-empty-element",
+        "list-non-str-element",
+        "int",
+        "dict",
+    ],
+)
+def test_classify_illegal_values_become_unset(tmp_path, value):
+    """含逗号字符串与含非法元素的列表读取为未指定；不拆分、不截取首项。"""
+    path = tmp_path / "dim_tables.yaml"
+    path.write_text(
+        yaml.safe_dump(
+            {"databases": {DB_NAME: {"tables": {"public.t": {"embedding_col": value}}}}}
+        ),
+        encoding="utf-8",
+    )
+    state, _, cfg = classify_dim_tables_yaml(path, DB_NAME)
+    assert state == "tables"
+    assert cfg.tables["public.t"].embedding_col is None
+
+
+# ---- doc 7.2 §4：独立推荐读取（与被编辑 YAML 解耦） ----
+
+
+def test_recommendations_endpoint_reads_profiles_without_yaml(tmp_path, monkeypatch):
+    """独立推荐读取不依赖 dim YAML：YAML 损坏/缺失时推荐仍按画像返回。"""
+    root = _install(monkeypatch, tmp_path)
+    (root / "dim" / "dim_tables.yaml").write_text("not: [valid\n", encoding="utf-8")
+    _rec_profile(root, "t1", ["name"], 0.8)
+    _rec_profile(root, "t2")  # 无推荐属性 → 合法无推荐
+
+    from backend.profile_loading.dim_value_config_api import (
+        read_dim_value_recommendations,
+    )
+
+    result = read_dim_value_recommendations(SETTINGS, WORKSPACE_ID)
+    rows = _rows_by_key(result)
+    assert rows["public.t1"]["dimension_value_columns"] == ["name"]
+    assert rows["public.t1"]["dimension_value_confidence"] == 0.8
+    assert rows["public.t1"]["recommendation_available"] is True
+    assert rows["public.t2"]["dimension_value_columns"] == []
+    assert rows["public.t2"]["recommendation_available"] is True
+
+
+def test_recommendations_endpoint_keeps_01_rule(tmp_path, monkeypatch):
+    """独立读取与文件 GET 共用 7.1 §5.2 校验器：非法多字段推荐整组清空。"""
+    root = _install(monkeypatch, tmp_path)
+    _rec_profile(root, "t1", ["name", "id"], 0.9)
+
+    from backend.profile_loading.dim_value_config_api import (
+        read_dim_value_recommendations,
+    )
+
+    result = read_dim_value_recommendations(SETTINGS, WORKSPACE_ID)
+    row = _rows_by_key(result)["public.t1"]
+    assert row["dimension_value_columns"] == []
+    assert row["dimension_value_confidence"] is None
+    assert row["recommendation_available"] is True
+
+
+def test_recommendations_endpoint_workspace_missing_404(monkeypatch, tmp_path):
+    from backend.profile_loading import dim_value_config_api as api
+
+    _install(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        "backend.workspaces.repository.get_workspace", lambda _s, _wid: None
+    )
+    with pytest.raises(DimConfigOutputMissingError):
+        api.read_dim_value_recommendations(SETTINGS, WORKSPACE_ID)

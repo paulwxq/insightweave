@@ -153,7 +153,40 @@ def read_domain_rows(
     source_id 与 publish_run_id 由发布事务补齐。任一结构非法整次失败。
     """
     document = _load_domain_document(source_id, workspace_id)
+    return domain_rows_from_document(document, source_id, workspace_id, registration)
 
+
+def domain_rows_from_config(
+    domains: "list[dict]",
+    source_id: str,
+    workspace_id: str,
+    registration: RegistrationSnapshot,
+) -> "list[dict]":
+    """运行路径（doc 7.2 §7.4）：由版本/运行配置构造 Domain 文档并映射发布行。
+
+    不读取共享 YAML；database.name 直接用数据源登记库名（必然通过一致性
+    校验），domains 清单仍走与文件路径完全相同的校验与映射规则。
+    """
+    document = {
+        "database": {"name": registration.db_name},
+        "domains": domains,
+    }
+    return domain_rows_from_document(document, source_id, workspace_id, registration)
+
+
+def domain_rows_from_document(
+    document: dict,
+    source_id: str,
+    workspace_id: str,
+    registration: RegistrationSnapshot,
+) -> "list[dict]":
+    """校验并映射 Domain 文档为 `table_domain` 待插入行（doc 21.2 §4 + 7.2 §7.4）。
+
+    校验、MD 清单交叉核对与映射规则对文件路径与配置注入路径完全一致；
+    任一结构非法整次抛 DomainPublishInputError。
+    """
+    if not isinstance(document, dict) or not isinstance(document.get("domains"), list):
+        raise DomainPublishInputError("Domain 配置 domains 必须是列表")
     database = document.get("database")
     if not isinstance(database, dict):
         raise DomainPublishInputError("Domain 产物 database 必须是对象")

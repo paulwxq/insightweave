@@ -1,18 +1,28 @@
 <script setup lang="ts">
 /**
- * 执行页（doc 6.3 §4 编号 29/31）：`.../jobs/:jobId/run?revision_no=<n>&mode=default|custom`。
+ * 执行页（doc 6.3 §4 编号 29/31；doc 7.2 §3.1/§5.2 改造）：
+ * `.../jobs/:jobId/run?revision_no=<n>&mode=default|custom`。
  *
  * - 从 query 读取并展示 revision_no 与执行模式；提交固定使用页面展示的版本，
  *   不自动切换最新版本（doc 6.2 §6.2）。地址栏携带的 revision_no 不能对应到
  *   该作业任何版本（含非法值）时停在错误态：不回退、不提交、不改地址栏；
  *   键完全不存在时才使用最新版本。
  * - default：展示该版本完整步骤与默认参数，不允许临时修改；
- *   custom：允许非空子集（可等于全集）与允许范围内的临时参数，临时参数不写回作业。
+ *   custom：允许非空子集（可等于全集）与允许范围内的临时参数（运行草稿），
+ *   临时参数只用于本次运行，不写回作业与工作区文件。
  * - 一次提交整组步骤 = 一个运行；步骤排序与校验由后端完成，前端不补选上游。
  * - 发布页四卡片（2026-10-26 定案，设计稿 35 流程）：作业信息 → 本次执行步骤 →
  *   执行确认 → 运行结果；「步骤校验」按钮在执行确认卡，校验状态标在步骤行，
- *   通过前「执行发布」保持灰色；custom 勾选/编辑仅限校验通过的步骤。
+ *   通过前「执行发布」保持灰色；custom 勾选范围只看引用版本允许的步骤，
+ *   可执行性由重新校验后的有效参数预检决定，不用旧校验结果门控勾选、
+ *   也不自动取消未通过步骤（修复勾选后校验失效导致的死锁）。
  *   正式请求仍由后端在创建运行前集中预检本次所选步骤，页面校验不能替代。
+ * - 步骤校验为作业级预检（doc 7.2 §5.2，POST /publish-jobs/{id}/precheck）：
+ *   与创建运行同一解析规则（引用版本默认值 + 本次允许的覆盖，完整替换），
+ *   不创建运行；草稿应用、步骤勾选、模式或版本切换均使校验结果失效。
+ * - dim_value/domain 编辑只改运行草稿（doc 7.2 §3.1）：弹窗从当前草稿或
+ *   版本默认配置经 props 初始化，确认只回传清单；Rel 不再提供编辑入口
+ *   （doc 7.2 §7.6，保留 rel 步骤选择与执行）。
  * - 运行创建成功后保留原 query 并追加 run_id；刷新恢复查询同一运行，
  *   实际版本、步骤和参数以运行详情为准；查询失败只重试查询，不重新提交。
  * - 采集不增加发布式创建前集中预检（doc 6.2 §6.3）。
@@ -21,23 +31,24 @@ import { computed, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ApiError } from '../api/http'
 import type {
+  DimValueTableParam,
+  DomainParam,
   JobItem,
   JobKind,
-  PublishCheckResponse,
-  PublishCheckStep,
+  PublishJobPrecheckResponse,
+  PublishJobPrecheckStep,
   PublishPrecheckFailure,
   RevisionItem,
 } from '../api/types'
 import {
   createRun,
   getJob,
-  getPublishCheck,
   listRevisions,
+  precheckPublishJob,
 } from '../api/workspaces'
 import DomainDescriptionDialog from '../components/DomainDescriptionDialog.vue'
 import DimValueConfigDialog from '../components/DimValueConfigDialog.vue'
 import DomainConfigDialog from '../components/DomainConfigDialog.vue'
-import RelEditDialog from '../components/RelEditDialog.vue'
 import RunPanel from '../components/RunPanel.vue'
 import StepDetailDrawer from '../components/StepDetailDrawer.vue'
 import StepGrid from '../components/StepGrid.vue'
@@ -48,6 +59,7 @@ import {
   executionOrder,
   unchosenDeps,
 } from '../utils/steps'
+import { parseDimTables, parseDomains } from '../utils/publishStepConfig'
 
 const props = defineProps<{ kind: JobKind }>()
 
@@ -160,21 +172,39 @@ async function load() {
 
 watch(jobId, () => void load(), { immediate: true })
 
-// ---- 步骤选择（custom 模式） ----
+// ---- 步骤选择（custom 模式）与运行草稿（doc 7.2 §3.1） ----
+// 校验状态提前声明（详见下方「发布校验」区），供重置逻辑在 immediate watch 中安全引用。
+
+const check = ref<PublishJobPrecheckResponse | null>(null)
+const checkLoading = ref(false)
+const checkError = ref('')
+
+/** 任何影响有效参数或校验范围的变化都使校验结果作废 */
+function invalidateCheck() {
+  check.value = null
+  checkError.value = ''
+}
 
 const selected = ref<Record<string, boolean>>({})
 const tempDescription = ref<string | null>(null)
 const tempDescriptionOpen = ref(false)
+/** 运行草稿：null = 未覆盖（继承版本默认配置）；非 null = 本次临时参数 */
+const dimRunDraft = ref<DimValueTableParam[] | null>(null)
+const domainRunDraft = ref<DomainParam[] | null>(null)
 
 function resetSelection() {
   selected.value = Object.fromEntries(revisionSteps.value.map((step) => [step, true]))
   tempDescription.value = null
+  dimRunDraft.value = null
+  domainRunDraft.value = null
+  invalidateCheck()
 }
 
 watch(revisionSteps, () => resetSelection(), { immediate: true })
 watch(mode, () => {
   // 切回默认模式不保留手工草稿含义；再切回 custom 重新按版本全集初始化
   if (mode.value === 'default') resetSelection()
+  else invalidateCheck()
 })
 
 const chosenSteps = computed(() =>
@@ -191,18 +221,21 @@ const previewOrder = computed(() =>
 )
 
 function toggleStep(step: string) {
-  // 发布 custom：只有通过发布校验的步骤可勾选（与新建页/详情页编辑器一致）
-  if (props.kind === 'publish' && stepCheck(step)?.ready !== true) return
+  // 勾选范围只看引用版本允许（StepGrid available 已限定）；不用旧校验结果
+  // 门控勾选——是否可执行由重新校验后的有效参数预检决定（doc 7.2 §4 第 5 项）
   selected.value = { ...selected.value, [step]: !selected.value[step] }
+  invalidateCheck()
 }
 
-/** custom 全选：发布只选「版本允许 ∩ 校验通过」的步骤，采集为版本全集 */
+/** custom 全选：版本步骤全集（可执行性由重新校验判定，不按旧结果预过滤） */
 function selectAllAvailable() {
-  const steps =
-    props.kind === 'publish'
-      ? revisionSteps.value.filter((step) => stepCheck(step)?.ready === true)
-      : revisionSteps.value
-  selected.value = Object.fromEntries(steps.map((step) => [step, true]))
+  selected.value = Object.fromEntries(revisionSteps.value.map((step) => [step, true]))
+  invalidateCheck()
+}
+
+function clearSelection() {
+  selected.value = {}
+  invalidateCheck()
 }
 
 function onTempDescriptionSaved(text: string) {
@@ -211,29 +244,21 @@ function onTempDescriptionSaved(text: string) {
 }
 
 // ---- 发布校验（设计稿 35 流程：四卡片，校验按钮在执行确认卡） ----
-// 结果反映点击时刻状态；执行发布要求本次所选步骤全部通过，后端仍会集中预检。
-
-const check = ref<PublishCheckResponse | null>(null)
-const checkLoading = ref(false)
-const checkError = ref('')
+// doc 7.2 §5.2：作业级预检 POST /publish-jobs/{id}/precheck，与创建运行同一
+// 解析规则（版本默认值 + 本次允许的覆盖，完整替换），不创建运行。
+// 结果反映点击时刻状态；草稿应用/勾选/模式/版本变化均使结果失效
+// （状态与 invalidateCheck 已在上方声明）。
 
 const checkRan = computed(() => check.value !== null)
 const checkByStep = computed(() => {
-  const map = new Map<string, PublishCheckStep>()
+  const map = new Map<string, PublishJobPrecheckStep>()
   for (const step of check.value?.steps ?? []) map.set(step.step_name, step)
   return map
 })
 
-function stepCheck(step: string): PublishCheckStep | undefined {
+function stepCheck(step: string): PublishJobPrecheckStep | undefined {
   return checkByStep.value.get(step)
 }
-
-/** custom 可勾选白名单：发布 = 版本步骤 ∩ 校验通过；采集 = 版本步骤 */
-const selectableSteps = computed(() =>
-  props.kind === 'publish'
-    ? revisionSteps.value.filter((step) => stepCheck(step)?.ready === true)
-    : revisionSteps.value,
-)
 
 /** 确认区域展示的步骤：默认模式 = 版本步骤；custom = 预计执行顺序 */
 const confirmSteps = computed(() =>
@@ -255,12 +280,52 @@ const checkPassedForRun = computed(() => {
   return confirmSteps.value.every((step) => stepCheck(step)?.ready === true)
 })
 
+/** 组装本次有效参数覆盖（运行草稿；完整替换语义由后端执行） */
+function buildOverrides(): Record<string, Record<string, unknown>> | null {
+  const cfg: Record<string, Record<string, unknown>> = {}
+  if (props.kind === 'collection') {
+    if (chosenSteps.value.includes('domain') && tempDescription.value !== null) {
+      cfg.domain = { description: tempDescription.value }
+    }
+  } else {
+    if (chosenSteps.value.includes('dim_value') && dimRunDraft.value !== null) {
+      cfg.dim_value = { tables: dimRunDraft.value }
+    }
+    if (chosenSteps.value.includes('domain') && domainRunDraft.value !== null) {
+      cfg.domain = { domains: domainRunDraft.value }
+    }
+  }
+  return Object.keys(cfg).length > 0 ? cfg : null
+}
+
+/** 预检与创建运行共享同一请求形状（doc 7.2 §5.2 同一解析规则） */
+function buildRunPayload():
+  | {
+      revision_no: number
+      mode: 'default' | 'custom'
+      steps?: string[]
+      step_config?: Record<string, Record<string, unknown>> | null
+    }
+  | null {
+  if (revisionNo.value === null) return null
+  if (mode.value === 'custom') {
+    return {
+      revision_no: revisionNo.value,
+      mode: 'custom',
+      steps: chosenSteps.value,
+      step_config: buildOverrides(),
+    }
+  }
+  return { revision_no: revisionNo.value, mode: 'default' }
+}
+
 async function loadCheck(): Promise<boolean> {
-  if (props.kind !== 'publish' || !workspaceId.value) return false
+  const payload = props.kind === 'publish' ? buildRunPayload() : null
+  if (!payload) return false
   checkLoading.value = true
   checkError.value = ''
   try {
-    check.value = await getPublishCheck(workspaceId.value)
+    check.value = await precheckPublishJob(jobId.value, payload)
     return true
   } catch (cause) {
     checkError.value = cause instanceof ApiError ? cause.message : '发布校验失败。'
@@ -270,33 +335,40 @@ async function loadCheck(): Promise<boolean> {
   }
 }
 
-// 校验结果更新后剔除已不通过的勾选（如上游产物在编辑期间变化）
-watch(checkByStep, () => {
-  if (props.kind !== 'publish' || mode.value !== 'custom') return
-  const next: Record<string, boolean> = {}
-  for (const [step, on] of Object.entries(selected.value)) {
-    next[step] = on && stepCheck(step)?.ready === true
-  }
-  selected.value = next
-})
+// ---- Domain/Dim 运行草稿编辑（doc 7.2 §3.1） ----
+// 弹窗仅从 props（当前草稿 ?? 版本默认配置）初始化，确认只回传清单；
+// 应用后校验结果失效，需重新「步骤校验」后才能执行。
 
-// ---- Domain/Rel/Dim 编辑（doc 6.3 §4.1：发布执行页的能力） ----
-// 编辑成功只刷新预检：不新建作业版本、不创建采集运行、不更新采集 marker 时间
 const domainOpen = ref(false)
-const relOpen = ref(false)
 const dimOpen = ref(false)
 
-function onConfigSaved() {
-  domainOpen.value = false
-  relOpen.value = false
+/** 引用版本的 dim_value 默认配置（数组形态；缺失/旧结构按空清单进入弹窗） */
+const revisionDimTables = computed<DimValueTableParam[]>(() =>
+  props.kind === 'publish' ? (parseDimTables(revision.value?.step_config) ?? []) : [],
+)
+
+/** 引用版本的 domain 默认配置（仅发布作业；采集的 step_config.domain 是描述形状） */
+const revisionDomains = computed<DomainParam[]>(() =>
+  props.kind === 'publish' ? (parseDomains(revision.value?.step_config) ?? []) : [],
+)
+
+const dimDialogInitial = computed<DimValueTableParam[]>(
+  () => dimRunDraft.value ?? revisionDimTables.value,
+)
+const domainDialogInitial = computed<DomainParam[]>(
+  () => domainRunDraft.value ?? revisionDomains.value,
+)
+
+function onDimApply(tables: DimValueTableParam[]) {
+  dimRunDraft.value = tables
   dimOpen.value = false
-  void loadCheck()
+  invalidateCheck()
 }
 
-// DomainConfigDialog 仅暴露 close（保存成功后自行关闭）；关闭后统一刷新预检
-function onDomainDialogClose() {
+function onDomainApply(domains: DomainParam[]) {
+  domainRunDraft.value = domains
   domainOpen.value = false
-  void loadCheck()
+  invalidateCheck()
 }
 
 // ---- 提交执行（doc 6.2 §6.2 / §6.3） ----
@@ -341,31 +413,14 @@ async function execute() {
   // 地址栏版本无效时不得按其他版本提交（不回退到最新版本）
   if (revisionInvalid.value) return
   if (!canExecute.value || revisionNo.value === null) return
+  const payload = buildRunPayload()
+  if (!payload) return
   executing.value = true
   execError.value = ''
   precheckFailures.value = []
   try {
     // default：省略 steps/step_config（= 不覆盖，执行该版本全部步骤与默认参数）
-    // custom：非空子集 + 允许的临时参数；临时参数不写回作业
-    const steps = mode.value === 'custom' ? chosenSteps.value : undefined
-    const useTemp =
-      props.kind === 'collection' &&
-      mode.value === 'custom' &&
-      steps !== undefined &&
-      steps.includes('domain') &&
-      tempDescription.value !== null
-    const payload = {
-      revision_no: revisionNo.value,
-      mode: mode.value,
-      ...(mode.value === 'custom'
-        ? {
-            steps,
-            step_config: useTemp
-              ? { domain: { description: tempDescription.value! } }
-              : null,
-          }
-        : {}),
-    }
+    // custom：非空子集 + 允许的临时参数（运行草稿）；临时参数不写回作业与文件
     const response = await createRun(props.kind, jobId.value, payload)
     const runId = response.collection_run_id ?? response.publish_run_id ?? ''
     if (runId) {
@@ -487,7 +542,7 @@ function switchStep(step: string) {
           </div>
           <div v-if="mode === 'custom'" class="ds-new-job-step-actions">
             <button type="button" @click="selectAllAvailable">全选</button>
-            <button type="button" @click="selected = {}">清空</button>
+            <button type="button" @click="clearSelection">清空</button>
           </div>
         </div>
 
@@ -505,7 +560,7 @@ function switchStep(step: string) {
         <StepGrid
           :kind="kind"
           :selected="mode === 'default' ? Object.fromEntries(revisionSteps.map((s) => [s, true])) : selected"
-          :available="mode === 'custom' ? selectableSteps : revisionSteps"
+          :available="revisionSteps"
           :disabled="mode === 'default' || executing || checkLoading"
           @toggle="toggleStep"
         >
@@ -521,8 +576,8 @@ function switchStep(step: string) {
               编辑
             </button>
             <!-- 发布：校验状态标记（default/custom 都显示，点击「步骤校验」后出现）；
-                 custom 步骤行编辑入口写工作区配置文件而非临时参数（doc 6.3 §4.1），
-                 需该步骤通过校验后可用。 -->
+                 custom 步骤行编辑只改本次运行草稿（doc 7.2 §3.1，不写工作区文件），
+                 不再要求该步骤先通过校验（草稿本身需经校验确认）；rel 无编辑入口。 -->
             <template v-if="kind === 'publish' && revisionSteps.includes(step)">
               <span
                 v-if="checkRan && stepCheck(step)?.ready"
@@ -546,22 +601,18 @@ function switchStep(step: string) {
                 {{ stepCheck(step)?.reason ?? '原因未知' }}
               </em>
               <template v-if="mode === 'custom'">
+                <em v-if="step === 'dim_value' && dimRunDraft !== null" class="rx-draft-mark">
+                  本次参数已改
+                </em>
+                <em v-if="step === 'domain' && domainRunDraft !== null" class="rx-draft-mark">
+                  本次参数已改
+                </em>
                 <button
                   v-if="step === 'domain'"
                   type="button"
                   class="nj-step-edit"
-                  :disabled="executing || checkLoading || stepCheck(step)?.ready !== true"
+                  :disabled="executing || checkLoading"
                   @click="domainOpen = true"
-                >
-                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20h9" /><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L8 18l-4 1 1-4Z" /></svg>
-                  编辑
-                </button>
-                <button
-                  v-if="step === 'rel'"
-                  type="button"
-                  class="nj-step-edit"
-                  :disabled="executing || checkLoading || stepCheck(step)?.ready !== true"
-                  @click="relOpen = true"
                 >
                   <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20h9" /><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L8 18l-4 1 1-4Z" /></svg>
                   编辑
@@ -570,7 +621,7 @@ function switchStep(step: string) {
                   v-if="step === 'dim_value'"
                   type="button"
                   class="nj-step-edit"
-                  :disabled="executing || checkLoading || stepCheck(step)?.ready !== true"
+                  :disabled="executing || checkLoading"
                   @click="dimOpen = true"
                 >
                   <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20h9" /><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L8 18l-4 1 1-4Z" /></svg>
@@ -601,7 +652,7 @@ function switchStep(step: string) {
               <button
                 type="button"
                 class="button button-outline rx-check-btn"
-                :disabled="checkLoading || executing"
+                :disabled="checkLoading || executing || revisionInvalid || revisionNo === null"
                 @click="loadCheck"
               >
                 {{ checkLoading ? '正在校验' : '步骤校验' }}
@@ -682,24 +733,25 @@ function switchStep(step: string) {
       @cancel="tempDescriptionOpen = false"
     />
 
-    <!-- 发布前编辑入口（工作区定位；doc 6.3 §4.1，与作业详情页同款） -->
+    <!-- 运行草稿编辑（doc 7.2 §3.1：从当前草稿或版本默认配置初始化，
+         确认只回传清单，不写工作区配置文件；rel 无编辑入口） -->
     <DomainConfigDialog
       v-if="domainOpen"
       :workspace-id="workspaceId"
-      @close="onDomainDialogClose"
-    />
-    <RelEditDialog
-      v-if="relOpen"
-      :workspace-id="workspaceId"
-      @close="relOpen = false"
-      @saved="onConfigSaved"
+      :db-name="ctx.source.value?.db_name || ''"
+      :initial-domains="domainDialogInitial"
+      purpose="run"
+      @close="domainOpen = false"
+      @apply="onDomainApply"
     />
     <DimValueConfigDialog
       v-if="dimOpen"
       :workspace-id="workspaceId"
       :db-name="ctx.source.value?.db_name || ''"
+      :initial-tables="dimDialogInitial"
+      purpose="run"
       @close="dimOpen = false"
-      @saved="onConfigSaved"
+      @apply="onDimApply"
     />
 
     <StepDetailDrawer
@@ -885,6 +937,18 @@ function switchStep(step: string) {
   font-style: normal;
   color: #dc4a4a;
   font-size: 11px;
+}
+/* 运行草稿标记（doc 7.2 §3.1：本次已自定义临时参数） */
+.rx-draft-mark {
+  font-style: normal;
+  font-size: 9px;
+  font-weight: 700;
+  padding: 1px 6px;
+  border-radius: 6px;
+  background: #fdf3e3;
+  border: 1px solid #f0d9b5;
+  color: #a06a1a;
+  white-space: nowrap;
 }
 .pc-failures {
   border: 1px solid #efcaca;

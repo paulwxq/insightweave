@@ -139,12 +139,20 @@ def run_dim_config_step(ctx: StepContext) -> StepOutcome:
 
     databases = result.get("databases", {})
     total_tables = sum(len(db_cfg.get("tables", {})) for db_cfg in databases.values())
+    recommended = getattr(generator, "last_recommended_count", 0)
+    unrecommended = getattr(generator, "last_unrecommended_count", 0)
+    recommendation_summary = (
+        f"，{recommended} 个自动推荐、{unrecommended} 个待人工填写"
+        if total_tables
+        else ""
+    )
     input_files = [(f"json/{path.name}", json_run_id) for path in json_files]
     return StepOutcome(
         success=True,
         message=(
             f"受管 Dim 配置生成完成（{len(databases)} 个数据库、"
-            f"{total_tables} 个维度表，{time.perf_counter() - started:.1f}s）"
+            f"{total_tables} 个维度表{recommendation_summary}，"
+            f"{time.perf_counter() - started:.1f}s）"
         ),
         input_files=input_files,
         output_files=[f"dim/{DIM_CONFIG_ARTIFACT_NAME}"],

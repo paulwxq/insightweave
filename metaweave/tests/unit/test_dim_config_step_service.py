@@ -104,6 +104,8 @@ def _install(
         raw_output=None,
         on_generate=None,
         readable_count=None,
+        recommended_count=None,
+        unrecommended_count=None,
     )
 
     class FakeDimConfigGenerator:
@@ -128,6 +130,9 @@ def _install(
                 if rec.readable_count is not None
                 else len(self._json_files or [])
             )
+            # doc 7.1 §6：有推荐 / 无推荐数量摘要（缺省 0）
+            self.last_recommended_count = rec.recommended_count or 0
+            self.last_unrecommended_count = rec.unrecommended_count or 0
             payload = (
                 rec.write_payload if rec.write_payload is not None else DEFAULT_CONFIG
             )
@@ -261,6 +266,18 @@ def test_success_writes_dim_yaml_with_atomic_replace(monkeypatch, tmp_path):
     ]
     assert outcome.output_files == ["dim/dim_tables.yaml"]
     assert "1 个数据库、1 个维度表" in outcome.message
+
+
+def test_success_message_includes_recommendation_summary(monkeypatch, tmp_path):
+    """doc 7.1 §6：成功消息附有自动推荐 / 待人工数量摘要。"""
+    rec = _install(monkeypatch, tmp_path)
+    rec.recommended_count = 1
+    rec.unrecommended_count = 1
+
+    outcome = service.run_dim_config_step(_ctx(rec))
+
+    assert outcome.success is True, outcome.message
+    assert "1 个自动推荐、1 个待人工填写" in outcome.message
 
 
 def test_old_dim_product_backed_up_before_update(monkeypatch, tmp_path):

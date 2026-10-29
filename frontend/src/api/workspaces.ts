@@ -9,6 +9,7 @@ import type {
   DimValueConfigUpdateRequest,
   DimValueConfigUpdateResponse,
   DimValueObjectsResponse,
+  DimValueRecommendationsResponse,
   GlobalJobListResponse,
   JobCreateRequest,
   JobItem,
@@ -16,6 +17,8 @@ import type {
   JobListResponse,
   JobPatchRequest,
   PublishCheckResponse,
+  PublishJobPrecheckRequest,
+  PublishJobPrecheckResponse,
   RelConfigColumnsResponse,
   RelConfigGetResponse,
   RelConfigUpdateRequest,
@@ -205,12 +208,26 @@ export function runIdOf(item: RunListItem): string {
   return item.run_id ?? item.collection_run_id ?? item.publish_run_id ?? ''
 }
 
-// ---- 发布预检（固定全部 8 步骤，前端按版本与本次选择过滤） ----
+// ---- 发布预检 ----
 
+/** 工作区级只读检查（固定全部 8 步骤；dim/domain 为准入最小集，不校验有效配置） */
 export function getPublishCheck(workspaceId: string) {
   return apiRequest<PublishCheckResponse>(
     `/api/workspaces/${workspaceId}/publish-check`,
     {},
+    'create',
+    true,
+  )
+}
+
+/**
+ * 作业级预检（doc 7.2 §5.2）：按"引用版本默认值 + 本次允许的覆盖"解析
+ * 有效参数并逐步骤校验，与创建运行同一规则；不创建运行。
+ */
+export function precheckPublishJob(jobId: string, payload: PublishJobPrecheckRequest) {
+  return apiRequest<PublishJobPrecheckResponse>(
+    `/api/publish-jobs/${jobId}/precheck`,
+    { method: 'POST', body: JSON.stringify(payload) },
     'create',
     true,
   )
@@ -263,6 +280,16 @@ export function putDimValueConfig(
 
 export function getDimValueObjects(workspaceId: string) {
   return apiRequest<DimValueObjectsResponse>(`/api/workspaces/${workspaceId}/dim-config/objects`)
+}
+
+/** 独立推荐读取（doc 7.2 §4）：与被编辑 YAML 解耦，草稿弹窗专用 */
+export function getDimValueRecommendations(workspaceId: string) {
+  return apiRequest<DimValueRecommendationsResponse>(
+    `/api/workspaces/${workspaceId}/dim-config/recommendations`,
+    {},
+    'create',
+    true,
+  )
 }
 
 export function getDimValueObjectColumns(

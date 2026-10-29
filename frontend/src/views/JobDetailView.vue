@@ -16,6 +16,7 @@ import type {
   PublishCheckResponse,
   PublishCheckDirectory,
   PublishCheckStep,
+  RevisionItem,
 } from '../api/types'
 import { addRevision, getPublishCheck, patchJob } from '../api/workspaces'
 import JobConfigEditor from '../components/JobConfigEditor.vue'
@@ -188,8 +189,15 @@ const checkLoading = ref(false)
 const checkError = ref('')
 // 预检卡默认收起，由配置版本卡右下「发布校验」展开（非强制，不拦截执行）
 const checkCardOpen = ref(false)
-// 版本行「查看参数」弹窗（发布专属；三 tab 读工作区配置文件）
+// 版本行「查看参数」弹窗（发布专属；doc 7.2：domain/dim_value 展示该版本固化的
+// 完整清单，rel 只读展示工作区产物）
 const paramsOpen = ref(false)
+const paramsRevision = ref<RevisionItem | null>(null)
+
+function openParams(revision: RevisionItem) {
+  paramsRevision.value = revision
+  paramsOpen.value = true
+}
 
 const checkByStep = computed(() => {
   const map = new Map<string, PublishCheckStep>()
@@ -386,7 +394,6 @@ function switchStep(step: string) {
           @cancel="editorOpen = false"
           @save="saveRevision"
           @check="loadCheck"
-          @recheck="loadCheck"
         />
 
         <template v-else>
@@ -430,8 +437,8 @@ function switchStep(step: string) {
                 v-if="kind === 'publish'"
                 type="button"
                 class="nj-step-edit"
-                title="查看 domain / dim_value / rel 参数（工作区配置文件）"
-                @click="paramsOpen = true"
+                title="查看该版本的 domain / dim_value 默认参数及当前 rel 产物"
+                @click="openParams(revision)"
               >
                 <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z" /><circle cx="12" cy="12" r="3" /></svg>
                 查看参数
@@ -610,10 +617,12 @@ function switchStep(step: string) {
       </div>
     </div>
 
-    <!-- 版本行「查看参数」（发布专属：三 tab 只读展示工作区配置文件） -->
+    <!-- 版本行「查看参数」（发布专属；doc 7.2：domain/dim_value 按版本清单，rel 读产物） -->
     <RevisionParamsDialog
-      v-if="paramsOpen"
+      v-if="paramsOpen && paramsRevision"
+      :key="paramsRevision.revision_no"
       :workspace-id="workspaceId"
+      :revision="paramsRevision"
       @close="paramsOpen = false"
     />
 

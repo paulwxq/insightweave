@@ -12,6 +12,7 @@ from backend.jobs.job_repository import COLLECTION_JOB, PUBLISH_JOB
 from backend.jobs.job_service import (
     JobConfigPayload,
     JobNameExistsError,
+    JobValidationError,
     add_revision,
     create_job,
 )
@@ -293,6 +294,7 @@ def test_run_state_machine_partial_success(live_source_and_workspace):
 def test_publish_job_revision_and_publish_steps_whitelist(live_source_and_workspace):
     source_id = live_source_and_workspace
     workspace = create_workspace(SETTINGS, source_id, "发布侧")
+    # doc 7.2 §6/§7.3：选择 dim_value/domain 的版本必须携带完整清单
     job = create_job(
         SETTINGS,
         "publish",
@@ -309,10 +311,45 @@ def test_publish_job_revision_and_publish_steps_whitelist(live_source_and_worksp
                 "dim_value",
                 "rel",
                 "sql",
-            ]
+            ],
+            step_config={
+                "dim_value": {
+                    "tables": [
+                        {
+                            "schema_name": "public",
+                            "object_name": "t",
+                            "embedding_col": ["name"],
+                        }
+                    ]
+                },
+                "domain": {
+                    "domains": [
+                        {"name": "默认域", "description": "说明", "tables": []}
+                    ]
+                },
+            },
         ),
     )
     assert job["job_id"].startswith("pub_job_")
+    # 缺少 dim_value.tables / domain.domains 的版本直接报配置错误（断代约定）
+    with pytest.raises(JobValidationError, match="dim_value.tables"):
+        create_job(
+            SETTINGS,
+            "publish",
+            workspace["workspace_id"],
+            "缺配置发布",
+            None,
+            JobConfigPayload(steps=["db", "dim_value"]),
+        )
+    with pytest.raises(JobValidationError, match="domain.domains"):
+        create_job(
+            SETTINGS,
+            "publish",
+            workspace["workspace_id"],
+            "缺域配置发布",
+            None,
+            JobConfigPayload(steps=["db", "domain"]),
+        )
     with pytest.raises(StepConfigError):
         create_job(
             SETTINGS,

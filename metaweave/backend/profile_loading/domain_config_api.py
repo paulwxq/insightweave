@@ -405,7 +405,8 @@ def list_domain_tables(settings: PlatformSettings, workspace_id) -> dict:
     with platform_session(settings) as session:
         workspace, source_id = _workspace_source(session, workspace_id)
         source = _require_context(session, source_id, workspace_id)
-        _load_yaml_bytes(_yaml_path(source_id, workspace_id))
+        # doc 7.2 §4/§5.2.1：候选取自同工作区 MD 清单及普通文件，与 Domain
+        # YAML 解耦——不再要求 db_domains.yaml 可读，候选来源也不改为 JSON。
         return {"tables": _candidate_tables(source, source_id, workspace_id)}
 
 

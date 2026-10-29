@@ -129,7 +129,7 @@ class FakeSession:
     - `_claim_publish_step` 的三表 join 冲突查询按语义直接计算。
     """
 
-    def __init__(self, *, steps=("db", "ddl"), revision_no=1):
+    def __init__(self, *, steps=("db", "ddl"), revision_no=1, step_config=None):
         self.source = SimpleNamespace(
             source_id=SOURCE_ID,
             is_active=True,
@@ -157,6 +157,7 @@ class FakeSession:
                 publish_job_id=PUBLISH_JOB_ID,
                 revision_no=revision_no,
                 steps=list(steps),
+                step_config=step_config,
                 change_note=None,
             )
         ]

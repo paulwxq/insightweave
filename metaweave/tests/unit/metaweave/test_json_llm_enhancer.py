@@ -9,7 +9,7 @@
 
 import copy
 import json
-from typing import Dict
+from typing import Any, Dict
 from unittest.mock import MagicMock
 
 import pytest
@@ -885,6 +885,232 @@ class TestLLMResponseParsing:
 
         assert result["table_category"] == "dim"
         assert result["confidence"] == 0.95
+
+
+class TestDimensionValueRecommendation:
+    """doc 7.1 §4/§5：维度值字段推荐随分类合并写入，非法推荐整组清空。"""
+
+    def _service(self, response):
+        service = MagicMock(model="test-model")
+        service.call_llm.return_value = json.dumps(response, ensure_ascii=False)
+        return service
+
+    def _classification_only(self, sample_config):
+        sample_config["json_generation"]["comments"]["llm_enabled"] = False
+        return JsonLlmEnhancer(sample_config)
+
+    def _response(self, category="dim", columns=None, confidence: Any = ..., **extra):
+        payload = {"table_category": category, "confidence": 0.95, "reason": "分类理由"}
+        if columns is not None:
+            payload["dimension_value_columns"] = columns
+        if confidence is not ...:
+            payload["dimension_value_confidence"] = confidence
+        payload.update(extra)
+        return payload
+
+    def test_dim_recommendation_stored_with_classification(
+        self, sample_config, sample_table_json
+    ):
+        enhancer = self._classification_only(sample_config)
+        enhancer.llm_service = self._service(
+            self._response(columns=["name"], confidence=0.9)
+        )
+
+        outcome = enhancer.enhance_document(_as_v3(sample_table_json))
+
+        profile = outcome.document["table_profile"]
+        assert outcome.success is True
+        assert outcome.classification_task_succeeded is True
+        assert profile["table_category"] == "dim"
+        assert profile["classification_source"] == "llm"
+        assert profile["classification_reason"] == "分类理由"
+        assert profile["rule_based_classification"]["table_category"] == "dim"
+        assert profile["dimension_value_columns"] == ["name"]
+        assert profile["dimension_value_confidence"] == 0.9
+
+    def test_empty_recommendation_stored_as_empty_and_null(
+        self, sample_config, sample_table_json
+    ):
+        enhancer = self._classification_only(sample_config)
+        enhancer.llm_service = self._service(
+            self._response(columns=[], confidence=None)
+        )
+
+        outcome = enhancer.enhance_document(_as_v3(sample_table_json))
+
+        profile = outcome.document["table_profile"]
+        assert profile["dimension_value_columns"] == []
+        assert profile["dimension_value_confidence"] is None
+
+    def test_missing_recommendation_keys_stored_as_empty(
+        self, sample_config, sample_table_json
+    ):
+        enhancer = self._classification_only(sample_config)
+        enhancer.llm_service = self._service(self._response())
+
+        outcome = enhancer.enhance_document(_as_v3(sample_table_json))
+
+        profile = outcome.document["table_profile"]
+        assert profile["dimension_value_columns"] == []
+        assert profile["dimension_value_confidence"] is None
+
+    def test_non_dim_classification_clears_recommendation(
+        self, sample_config, sample_table_json
+    ):
+        enhancer = self._classification_only(sample_config)
+        enhancer.llm_service = self._service(
+            self._response(category="fact", columns=["name"], confidence=0.9)
+        )
+
+        outcome = enhancer.enhance_document(_as_v3(sample_table_json))
+
+        profile = outcome.document["table_profile"]
+        assert profile["table_category"] == "fact"
+        assert profile["dimension_value_columns"] == []
+        assert profile["dimension_value_confidence"] is None
+
+    def test_multi_field_recommendation_cleared_and_logged(
+        self, sample_config, sample_table_json, caplog
+    ):
+        import logging
+
+        enhancer = self._classification_only(sample_config)
+        enhancer.llm_service = self._service(
+            self._response(columns=["id", "name"], confidence=0.9)
+        )
+
+        with caplog.at_level(
+            logging.WARNING, logger="metaweave.json_llm_enhancer"
+        ):
+            outcome = enhancer.enhance_document(_as_v3(sample_table_json))
+
+        profile = outcome.document["table_profile"]
+        assert profile["dimension_value_columns"] == []
+        assert profile["dimension_value_confidence"] is None
+        # 推荐非法不影响分类成功（§5.2）
+        assert outcome.classification_task_succeeded is True
+        assert outcome.success is True
+        assert "维度值字段推荐" in caplog.text
+
+    @pytest.mark.parametrize(
+        "columns",
+        [["name", "name"], ["missing_col"], ["Name"], [123], "name", {"name": 1}],
+        ids=["duplicate", "unknown", "case-mismatch", "non-string", "not-list", "dict"],
+    )
+    def test_illegal_columns_cleared(
+        self, sample_config, sample_table_json, columns
+    ):
+        enhancer = self._classification_only(sample_config)
+        enhancer.llm_service = self._service(
+            self._response(columns=columns, confidence=0.9)
+        )
+
+        outcome = enhancer.enhance_document(_as_v3(sample_table_json))
+
+        profile = outcome.document["table_profile"]
+        assert profile["dimension_value_columns"] == []
+        assert profile["dimension_value_confidence"] is None
+        assert outcome.classification_task_succeeded is True
+
+    @pytest.mark.parametrize(
+        "confidence",
+        [True, "0.9", -0.1, 1.5, float("nan"), float("inf"), None, 10**400],
+        ids=[
+            "bool",
+            "string",
+            "negative",
+            "overflow",
+            "nan",
+            "inf",
+            "missing",
+            "huge-int",
+        ],
+    )
+    def test_illegal_confidence_with_nonempty_rec_cleared(
+        self, sample_config, sample_table_json, confidence
+    ):
+        enhancer = self._classification_only(sample_config)
+        enhancer.llm_service = self._service(
+            self._response(columns=["name"], confidence=confidence)
+        )
+
+        outcome = enhancer.enhance_document(_as_v3(sample_table_json))
+
+        profile = outcome.document["table_profile"]
+        assert profile["dimension_value_columns"] == []
+        assert profile["dimension_value_confidence"] is None
+        assert outcome.classification_task_succeeded is True
+
+    @pytest.mark.parametrize("confidence", [0.0, 1.0, 1], ids=["zero", "one", "int-one"])
+    def test_boundary_confidence_accepted(
+        self, sample_config, sample_table_json, confidence
+    ):
+        enhancer = self._classification_only(sample_config)
+        enhancer.llm_service = self._service(
+            self._response(columns=["name"], confidence=confidence)
+        )
+
+        outcome = enhancer.enhance_document(_as_v3(sample_table_json))
+
+        profile = outcome.document["table_profile"]
+        assert profile["dimension_value_columns"] == ["name"]
+        assert profile["dimension_value_confidence"] == float(confidence)
+
+    def test_classification_only_prompt_includes_dimension_value_task(
+        self, sample_config, sample_table_json
+    ):
+        enhancer = JsonLlmEnhancer(sample_config)
+        view = enhancer._build_llm_input_view(_as_v3(sample_table_json))
+
+        prompt = enhancer._build_classification_only_prompt(view)
+
+        assert "dimension_value_columns" in prompt
+        assert "dimension_value_confidence" in prompt
+        assert "最多" in prompt
+
+    def test_combined_prompt_includes_dimension_value_task(
+        self, sample_config, sample_table_json
+    ):
+        enhancer = JsonLlmEnhancer(sample_config)
+        view = enhancer._build_llm_input_view(_as_v3(sample_table_json))
+
+        prompt = enhancer._build_combined_prompt(
+            view, {"need_table_comment": False, "columns_need_comment": []}
+        )
+
+        assert "dimension_value_columns" in prompt
+        assert "dimension_value_confidence" in prompt
+
+    def test_classification_failure_leaves_no_recommendation_fields(
+        self, sample_config, sample_table_json
+    ):
+        enhancer = self._classification_only(sample_config)
+        enhancer.llm_service = self._service(
+            {"dimension_value_columns": ["name"], "dimension_value_confidence": 0.9}
+        )
+
+        outcome = enhancer.enhance_document(_as_v3(sample_table_json))
+
+        profile = outcome.document["table_profile"]
+        assert outcome.classification_task_succeeded is False
+        assert "dimension_value_columns" not in profile
+        assert "dimension_value_confidence" not in profile
+
+    def test_comments_only_path_writes_no_recommendation(
+        self, sample_config, sample_table_json
+    ):
+        sample_config["json_generation"]["table_classification"]["llm_enabled"] = False
+        enhancer = JsonLlmEnhancer(sample_config)
+        enhancer.llm_service = self._service(
+            {"table_comment": "测试对象", "column_comments": {"name": "名称"}}
+        )
+
+        outcome = enhancer.enhance_document(_as_v3(sample_table_json))
+
+        profile = outcome.document["table_profile"]
+        assert profile["classification_source"] == "rule"
+        assert "dimension_value_columns" not in profile
+        assert "dimension_value_confidence" not in profile
 
 
 if __name__ == "__main__":

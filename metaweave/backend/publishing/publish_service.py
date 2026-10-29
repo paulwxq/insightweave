@@ -34,6 +34,7 @@ from backend.jobs.run_repository import (
     STATUS_SUCCESS,
     create_run,
     finish_step,
+    get_run_step,
     list_run_steps,
     mark_run_running,
     new_run_id,
@@ -64,7 +65,7 @@ from backend.profile_loading.ddl_loader import (
 from backend.profile_loading.dim_value_loader import build_dim_value_loader
 from backend.profile_loading.domain_loader import (
     DomainPublishInputError,
-    read_domain_rows,
+    domain_rows_from_config,
 )
 from backend.profile_loading.json_loader import (
     JsonPublishInputError,
@@ -227,17 +228,20 @@ def create_publish_run(
                 params_table=PUBLISH_STEP_PARAMS,
             )
             ordered = normalize_publish_steps(list(resolved.steps))
-            # 集中预检（doc 6.2 §6.3.2）：任一步骤不合格整单 400，
-            # 不生成运行 UUID、不写 run/step/manifest 等业务记录。
+            # 集中预检（doc 6.2 §6.3.2 + doc 7.2 §5.1/§5.2）：按解析后的有效
+            # 参数校验（dim_value/domain 清单来自版本默认值与本次覆盖，不读
+            # 共享 YAML）；任一步骤不合格整单 400，不生成运行 UUID、不写
+            # run/step/manifest 等业务记录。
             results = precheck_steps(
                 session,
                 workspace.source_id,
                 workspace.workspace_id,
                 ordered,
                 db_name=source.db_name,
+                effective_params=resolved.effective_step_params,
             )
             failures = [
-                {"step": step, "reason": result.reason}
+                {"step": step, "reason": result.reason, **({"code": result.code} if result.code else {})}
                 for step, result in results.items()
                 if not result.ready
             ]
@@ -265,6 +269,81 @@ def create_publish_run(
         "revision_no": revision_no,
         "steps": ordered,
         "status": "pending",
+    }
+
+
+# ---------------------------------------------------------------------
+# 作业级预检（doc 7.2 §5.2）：与创建运行同一解析与校验规则，不创建运行
+# ---------------------------------------------------------------------
+
+
+def precheck_publish_job(
+    settings: PlatformSettings,
+    publish_job_id: str,
+    *,
+    revision_no: int,
+    mode: str,
+    steps: object,
+    step_config: object,
+) -> dict:
+    """按"引用版本默认值 + 本次允许的覆盖"解析有效参数并逐步骤校验。
+
+    供执行页在应用草稿后重新校验；不创建运行、不写任何业务记录。
+    """
+    publish_job_id = normalize_publish_job_id(publish_job_id)
+    from backend.data_sources.registration_service import PlatformUnavailableError
+
+    try:
+        with platform_session(settings) as session:
+            job = get_job(PUBLISH_JOB, session, publish_job_id)
+            if job is None:
+                raise PublishRunError("发布作业不存在")
+            revision = get_revision(PUBLISH_JOB, session, publish_job_id, revision_no)
+            if revision is None:
+                raise PublishRunError("引用的作业版本不存在")
+            workspace = _workspace_context(session, job)
+            from backend.data_sources.repository import get_db_source
+
+            source = get_db_source(session, workspace.source_id)
+            if source is None:
+                raise MetaLoadSourceNotFoundError("未找到指定 source_id 的数据源")
+            if not source.is_active:
+                raise MetaLoadSourceDisabledError("指定数据源已禁用，不能发布")
+            resolved = resolve_run_request(
+                mode=mode,
+                revision_steps=list(revision.steps),
+                revision_step_config=revision.step_config,
+                request_steps=steps,
+                request_step_config=step_config,
+                whitelist=PUBLISH_STEPS,
+                params_table=PUBLISH_STEP_PARAMS,
+            )
+            ordered = normalize_publish_steps(list(resolved.steps))
+            results = precheck_steps(
+                session,
+                workspace.source_id,
+                workspace.workspace_id,
+                ordered,
+                db_name=source.db_name,
+                effective_params=resolved.effective_step_params,
+            )
+    except SQLAlchemyError:
+        raise PlatformUnavailableError("平台库暂不可用") from None
+    except StepConfigError as exc:
+        raise PublishRunError(str(exc)) from None
+    return {
+        "publish_job_id": publish_job_id,
+        "revision_no": revision_no,
+        "mode": mode,
+        "steps": [
+            {
+                "step_name": step,
+                "ready": result.ready,
+                "reason": result.reason,
+                "code": result.code,
+            }
+            for step, result in results.items()
+        ],
     }
 
 
@@ -410,8 +489,24 @@ def _execute_step(
                 settings, run_id, step_name, STATUS_BLOCKED, "数据源已禁用，不能发布"
             )
             return {"step": step_name, "status": STATUS_BLOCKED}
+        # 执行期复查（doc 6.2 §6.4 + doc 7.2 §5.3）：dim_value/domain 使用
+        # 运行步骤冻结的有效配置（创建时固化的完整清单），复查外部条件但
+        # 不重新读取共享 YAML 或最新作业版本。
+        if step_name in ("dim_value", "domain"):
+            step_row = get_run_step(PUBLISH_RUN, session, run_id, step_name)
+            frozen = step_row.step_config if step_row is not None else None
+            effective_params = {
+                step_name: frozen if isinstance(frozen, dict) else {}
+            }
+        else:
+            effective_params = None
         result = check_step(
-            session, source_id, workspace_id, step_name, db_name=source.db_name
+            session,
+            source_id,
+            workspace_id,
+            step_name,
+            db_name=source.db_name,
+            effective_params=effective_params,
         )
         if not result.ready:
             _record_terminal(
@@ -621,11 +716,18 @@ def _publish_domain(settings, run_id, workspace_id, *, input_manifest, payload) 
     source_id = _source_id(settings, workspace_id)
     with platform_session(settings) as session:
         registration = read_registration_snapshot(session, source_id)
-        rows = read_domain_rows(source_id, workspace_id, registration)
-        if not rows:
-            raise _StepFailed("Domain 产物没有表映射，请检查产物后重试")
         session.get(WorkspaceInfo, workspace_id, with_for_update=True)
         _reverify_source(session, source_id)
+        # doc 7.2 §7.4：payload 为预检/执行期复查通过的有效域清单（运行快照），
+        # 锁下按同一映射规则重算发布行，不读取共享 YAML。
+        domains = payload.get("domains") if isinstance(payload, dict) else None
+        if not isinstance(domains, list):
+            raise _StepBlocked(
+                "运行快照缺少 domain.domains 配置，请编辑作业保存新版本后重新运行"
+            )
+        rows = domain_rows_from_config(domains, source_id, workspace_id, registration)
+        if not rows:
+            raise _StepFailed("Domain 配置没有任何有效表归属，请检查配置后重试")
         session.execute(delete(TableDomain).where(TableDomain.source_id == source_id))
         session.add_all(
             TableDomain(

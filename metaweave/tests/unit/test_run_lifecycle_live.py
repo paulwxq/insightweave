@@ -488,7 +488,24 @@ def test_publish_precheck_rejects_whole_request_without_records(live_workspace):
                 "dim_value",
                 "rel",
                 "sql",
-            ]
+            ],
+            # doc 7.2 §6/§7.3：选择 dim_value/domain 的版本必须携带完整清单
+            step_config={
+                "dim_value": {
+                    "tables": [
+                        {
+                            "schema_name": "public",
+                            "object_name": "dim_t",
+                            "embedding_col": ["code"],
+                        }
+                    ]
+                },
+                "domain": {
+                    "domains": [
+                        {"name": "默认域", "description": "说明", "tables": []}
+                    ]
+                },
+            },
         ),
     )
     with pytest.raises(PublishPrecheckError) as excinfo:
@@ -523,7 +540,9 @@ def test_publish_precheck_rejects_whole_request_without_records(live_workspace):
 
 
 def test_publish_execution_recheck_blocks_changed_step(live_workspace, monkeypatch):
-    """A27：预检通过创建运行后删除 Dim 必需文件 → 该步 blocked、其余成功、整体 partial。"""
+    """A27（doc 7.2 §5.2.1 口径）：预检通过创建运行后删除 dim_value 有效清单
+    引用的 JSON 画像（执行期仍复查的外部条件）→ 该步 blocked、其余成功、
+    整体 partial。dim_value 不再以 dim_tables.yaml 为运行输入。"""
 
     from backend.jobs.job_service import create_job as create_job_service
     from backend.jobs.run_repository import PUBLISH_RUN, get_run, list_run_steps
@@ -537,14 +556,27 @@ def test_publish_execution_recheck_blocks_changed_step(live_workspace, monkeypat
     root = resolve_workspace_root(source_id, workspace_id)
     db_dir = root / "db"
     dim_dir = root / "dim"
+    json_dir = root / "json"
     sql_dir = root / "sql"
     db_dir.mkdir(parents=True, exist_ok=True)
     dim_dir.mkdir(parents=True, exist_ok=True)
+    json_dir.mkdir(parents=True, exist_ok=True)
     sql_dir.mkdir(parents=True, exist_ok=True)
     _write_db_profile_json(source_id, db_dir)
-    (dim_dir / "dim_tables.yaml").write_text(
-        "databases:\n  d:\n    tables:\n"
-        "      public.dim_t:\n        embedding_col: code\n",
+    # dim_value 有效清单引用的表/字段必须存在于当前 JSON 画像（§5.2.1）；
+    # 画像库名须与登记库名（'d'）一致，否则按超出登记范围拒绝（审核问题 2）
+    (json_dir / "d.public.dim_t.json").write_text(
+        json.dumps(
+            {
+                "object_info": {
+                    "database": "d",
+                    "schema_name": "public",
+                    "object_name": "dim_t",
+                    "object_type": "table",
+                },
+                "column_profiles": {"code": {"ordinal_position": 1}},
+            }
+        ),
         encoding="utf-8",
     )
     (sql_dir / "qs_demo_pair.json").write_text(
@@ -559,7 +591,20 @@ def test_publish_execution_recheck_blocks_changed_step(live_workspace, monkeypat
         workspace_id,
         "A27 发布",
         None,
-        JobConfigPayload(steps=["db", "dim_value", "sql"]),
+        JobConfigPayload(
+            steps=["db", "dim_value", "sql"],
+            step_config={
+                "dim_value": {
+                    "tables": [
+                        {
+                            "schema_name": "public",
+                            "object_name": "dim_t",
+                            "embedding_col": ["code"],
+                        }
+                    ]
+                }
+            },
+        ),
     )
     # db/sql 的实际下游写入用替身（本用例聚焦执行期复查语义）；
     # 替身沿用真实 publisher 契约：自行写回成功终态。
@@ -590,8 +635,9 @@ def test_publish_execution_recheck_blocks_changed_step(live_workspace, monkeypat
         step_config=None,
     )
     run_id = normalize_run_uuid(result["publish_run_id"])
-    # 预检通过、运行已创建；启动前删除 Dim 必需文件（A27 场景）
-    (dim_dir / "dim_tables.yaml").unlink()
+    # 预检通过、运行已创建；启动前删除有效清单引用的 JSON 画像（A27 场景，
+    # doc 7.2 口径：外部条件失效 → blocked，不静默改用其他配置）
+    (json_dir / "d.public.dim_t.json").unlink()
     execute_publish_run(SETTINGS, run_id)
 
     with platform_session(SETTINGS) as session:

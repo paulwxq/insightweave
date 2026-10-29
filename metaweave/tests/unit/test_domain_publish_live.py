@@ -74,8 +74,9 @@ pytestmark = pytest.mark.skipif(
 def live_domain_workspace(tmp_path, monkeypatch):
     """临时数据源 + 工作区 + 发布作业（steps=["domain"]）；结束时逆序清理。
 
-    产物目录按真实 resolver 写在项目 output/ 下（resolve_workspace_root），
-    测试结束删除整个 output/<source>/ 目录。
+    版本按 doc 7.2 §7.3 携带完整 step_config.domain.domains（选择 domain
+    步骤的必配项）。产物目录按真实 resolver 写在项目 output/ 下
+    （resolve_workspace_root），测试结束删除整个 output/<source>/ 目录。
     """
     db_name = "tx_domain_live"
     with platform_session(SETTINGS) as session:
@@ -98,7 +99,23 @@ def live_domain_workspace(tmp_path, monkeypatch):
         workspace["workspace_id"],
         "domain 实库发布",
         None,
-        JobConfigPayload(steps=["domain"]),
+        JobConfigPayload(
+            steps=["domain"],
+            step_config={
+                "domain": {
+                    "domains": [
+                        {
+                            "name": "用户管理",
+                            "description": "用户域",
+                            "tables": [
+                                f"{db_name}.public.users",
+                                f"{db_name}.public.products",
+                            ],
+                        }
+                    ]
+                }
+            },
+        ),
     )
     try:
         yield {
@@ -249,30 +266,20 @@ def test_live_domain_publish_replaces_rows_in_one_commit(live_domain_workspace):
     assert marker.status == "success"  # 发布只读采集 marker，不改写
 
 
-def test_live_zero_rows_fails_step_and_keeps_nothing(live_domain_workspace):
-    from uuid import UUID
-
+def test_live_zero_rows_rejected_before_run_and_keeps_nothing(live_domain_workspace):
+    """doc 7.2 §7.2/§7.4：custom 覆盖为全部无表归属的域清单 → 创建前整单
+    拒绝（无有效表归属不可发布），不产生运行、不写任何行。"""
     ws = live_domain_workspace
     root = resolve_workspace_root(ws["source_id"], ws["workspace_id"])
     domain_dir = root / "domain"
     md_dir = root / "md"
     domain_dir.mkdir(parents=True, exist_ok=True)
     md_dir.mkdir(parents=True, exist_ok=True)
-    # MD 清单必须有效（doc 21.2 §4 规则 5：零表映射也要先过清单校验）
+    # MD 清单有效（清单校验先于零行判定）
     md_name = f"{ws['db_name']}.public.users.md"
     (md_dir / md_name).write_text("# users\n", encoding="utf-8")
     (md_dir / "manifest.json").write_text(
         json.dumps({"files": [md_name]}), encoding="utf-8"
-    )
-    (domain_dir / "db_domains.yaml").write_text(
-        yaml.safe_dump(
-            {
-                "database": {"name": ws["db_name"]},
-                "domains": [{"name": "_未分类_", "description": "无表", "tables": []}],
-            },
-            allow_unicode=True,
-        ),
-        encoding="utf-8",
     )
     from backend.workspace_files.markers import write_collection_marker
 
@@ -280,36 +287,36 @@ def test_live_zero_rows_fails_step_and_keeps_nothing(live_domain_workspace):
         domain_dir, "22222222-2222-4222-8222-222222222222", "success"
     )
 
-    result = create_publish_run(
-        SETTINGS,
-        ws["job_id"],
-        revision_no=1,
-        mode="custom",
-        steps=["domain"],
-        step_config=None,
-    )
-    run_id = UUID(result["publish_run_id"])
-    execute_publish_run(SETTINGS, run_id)
+    from backend.publishing.precheck import PublishPrecheckError
+
+    with pytest.raises(PublishPrecheckError) as excinfo:
+        create_publish_run(
+            SETTINGS,
+            ws["job_id"],
+            revision_no=1,
+            mode="custom",
+            steps=["domain"],
+            step_config={
+                "domain": {
+                    "domains": [
+                        {"name": "_未分类_", "description": "无表", "tables": []}
+                    ]
+                }
+            },
+        )
+    assert excinfo.value.failures[0]["step"] == "domain"
 
     with platform_session(SETTINGS) as session:
-        step_status = session.execute(
+        run_count = session.execute(
             text(
-                "SELECT status, message FROM public.publish_run_step"
-                " WHERE publish_run_id = :rid AND step_name = 'domain'"
+                "SELECT count(*) FROM public.publish_run_info"
+                " WHERE publish_job_id = :jid"
             ),
-            {"rid": str(run_id)},
-        ).one()
+            {"jid": ws["job_id"]},
+        ).scalar_one()
         count = session.execute(
             text("SELECT count(*) FROM public.table_domain WHERE source_id = :sid"),
             {"sid": ws["source_id"]},
         ).scalar_one()
-        run_status = session.execute(
-            text(
-                "SELECT status FROM public.publish_run_info WHERE publish_run_id = :rid"
-            ),
-            {"rid": str(run_id)},
-        ).scalar_one()
-    assert run_status == "failed"
-    assert step_status[0] == "failed"
-    assert "没有表映射" in step_status[1]
+    assert run_count == 0
     assert count == 0

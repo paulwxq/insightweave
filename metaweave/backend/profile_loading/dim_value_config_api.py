@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -24,7 +25,12 @@ from metaweave.core.clean_targets import (
     resolve_json_output_dir,
 )
 from metaweave.core.dim_value.models import DimTableConfig, DimTablesConfig
+from metaweave.core.dim_value.recommendation import (
+    validate_dimension_value_recommendation,
+)
 from metaweave.utils.source_id import normalize_workspace_id
+
+logger = logging.getLogger(__name__)
 
 DIM_CONFIG_ARTIFACT_NAME = "dim_tables.yaml"
 DIM_CONFIG_STEP_NAME = "dim_config"
@@ -32,8 +38,10 @@ JSON_MANIFEST_NAME = "manifest.json"
 
 _WRITE_HEADER = (
     "# 维度表加载配置\n"
-    "# 说明：此文件由 Web dim_value 配置编辑保存（doc 22.2）；Web 编辑仅支持单列 embedding_col，\n"
-    "# 手工写入的多列值（列表/逗号串）在读取时视为未指定，保存后收敛为单列字符串。\n"
+    "# 说明：此文件由 Web dim_value 配置编辑保存（doc 22.2；doc 7.2 起人工可为每表配置\n"
+    "# 一个或多个 embedding_col 字段，写作单列字符串或字段名列表均可）。\n"
+    "# 含逗号的字符串读取时视为未指定（多字段请改用列表），空值视为未配置。\n"
+    "# 生成时的模型推荐及置信度注释未随保存保留，请在配置弹窗查看（doc 7.1 §4.4）。\n"
     "#\n"
 )
 
@@ -104,15 +112,59 @@ class DimConfigRegeneratedError(Exception):
 # ---- 共享读取（O_NOFOLLOW 加固，domain_loader 同款口径） ----
 
 
-def _normalize_embedding_col(value: Any) -> Optional[str]:
-    """§5.3 读取口径：非单列字符串（None/空串/列表/含逗号）一律归 None。"""
+def _normalize_embedding_col(value: Any) -> Any:
+    """读取口径（doc 7.2 §3.1.1）：单列字符串与字段名列表都合法，原样保留。
 
-    if not isinstance(value, str):
-        return None
-    text = value.strip()
-    if not text or "," in text:
-        return None
-    return text
+    - str：去空白后非空且不含逗号 → 保留该字符串；含逗号或空串 → None；
+    - list：元素全为去空白后非空、不含逗号的字符串 → 按首次出现顺序去重
+      后保留列表；任一元素非法（非字符串/空/含逗号）→ 整体归 None；
+    - 其他形态（None/数字/对象等）→ None（未指定）。
+    宽容读取不拆逗号、不截取首项，也不把列表归为未配置。
+    """
+
+    if isinstance(value, str):
+        text = value.strip()
+        if not text or "," in text:
+            return None
+        return text
+    if isinstance(value, list):
+        columns: List[str] = []
+        for item in value:
+            if not isinstance(item, str):
+                return None
+            text = item.strip()
+            if not text or "," in text:
+                return None
+            if text not in columns:
+                columns.append(text)
+        return columns or None
+    return None
+
+
+def _comma_string_tables(data: Any, db_name: str) -> List[str]:
+    """收集 embedding_col 为含逗号字符串的表全名（读取归一化将其归为未指定，
+    doc 7.2 §3.1.1）。供文件 GET 向显式初始化页返回独立警告：提示改用字段
+    列表格式；不拆分、不截取，也不影响归一化结果本身。"""
+
+    if not isinstance(data, dict):
+        return []
+    databases = data.get("databases")
+    if not isinstance(databases, dict):
+        return []
+    db_cfg = databases.get(db_name)
+    if not isinstance(db_cfg, dict):
+        return []
+    tables_cfg = db_cfg.get("tables", {})
+    if not isinstance(tables_cfg, dict):
+        return []
+    names = []
+    for full_name, cfg in tables_cfg.items():
+        if not isinstance(full_name, str) or not isinstance(cfg, dict):
+            continue
+        value = cfg.get("embedding_col")
+        if isinstance(value, str) and "," in value:
+            names.append(full_name)
+    return sorted(names)
 
 
 def classify_dim_tables_yaml(
@@ -121,7 +173,8 @@ def classify_dim_tables_yaml(
     """发布拦截三态判定（§5.3）：返回 (state, reason, config)。
 
     state ∈ {"invalid", "empty", "tables"}；invalid 时 config=None，
-    empty/config 时返回归一后的 DimTablesConfig（每表 embedding_col 为单列字符串或 None）。
+    empty/config 时返回归一后的 DimTablesConfig（每表 embedding_col 为字符串、
+    字符串列表或 None，doc 7.2 §3.1.1）。
     文件不存在/不可读归 invalid（审核修订 27：与手工损坏同态）。
     """
 
@@ -202,6 +255,70 @@ def _require_registration(session, source_id: str):
 # ---- GET dim-config（§5.1） ----
 
 
+def _load_recommendations(json_dir: Path) -> Dict[Tuple[str, str], Dict[str, Any]]:
+    """读取同工作区画像的维度值字段推荐（doc 7.1 §4.4）。
+
+    仅返回画像可读且经 §5.2 校验后的推荐；目录缺失或画像不可读的表
+    不进入映射，调用方据此展示"推荐信息不可用"。任何失败都只降级，
+    不影响配置本身的读取。
+    """
+    recommendations: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    if not json_dir.is_dir():
+        logger.warning("读取维度值推荐：json 目录不存在: %s", json_dir)
+        return recommendations
+    for path, info in _iter_json_products(json_dir):
+        schema_name = info.get("schema_name")
+        object_name = info.get("object_name")
+        if not isinstance(schema_name, str) or not isinstance(object_name, str):
+            continue
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            logger.warning("读取维度值推荐：画像不可读: %s", path.name)
+            continue
+        # 推荐读取段整体降级（doc 7.1 §4.4）：结构异常或未预期错误
+        # 只把该表标记为推荐信息不可用（不进入映射），不阻断配置读取
+        try:
+            table_profile = (
+                data.get("table_profile") if isinstance(data, dict) else None
+            )
+            column_profiles = (
+                data.get("column_profiles") if isinstance(data, dict) else None
+            )
+            if (table_profile is not None and not isinstance(table_profile, dict)) or (
+                column_profiles is not None and not isinstance(column_profiles, dict)
+            ):
+                logger.warning(
+                    "读取维度值推荐：画像结构异常，按推荐信息不可用处理: %s",
+                    path.name,
+                )
+                continue
+            columns, confidence, reason = validate_dimension_value_recommendation(
+                (table_profile or {}).get("dimension_value_columns"),
+                (table_profile or {}).get("dimension_value_confidence"),
+                column_profiles.keys() if isinstance(column_profiles, dict) else (),
+            )
+            if reason:
+                logger.warning(
+                    "维度值字段推荐整组不采用（%s.%s）: %s",
+                    schema_name,
+                    object_name,
+                    reason,
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "读取维度值推荐失败（%s，%s），按推荐信息不可用处理",
+                path.name,
+                type(exc).__name__,
+            )
+            continue
+        recommendations[(schema_name, object_name)] = {
+            "dimension_value_columns": columns,
+            "dimension_value_confidence": confidence,
+        }
+    return recommendations
+
+
 def read_dim_value_config(settings: PlatformSettings, workspace_id) -> Dict[str, Any]:
     workspace_id = normalize_workspace_id(workspace_id)
     with platform_session(settings) as session:
@@ -231,15 +348,202 @@ def read_dim_value_config(settings: PlatformSettings, workspace_id) -> Dict[str,
                 reason or "配置文件无效",
             )
 
+        # 逗号串警告（doc 7.2 §3.1.1/验收 25）：归一化已将其归为未指定，
+        # 这里独立告知显式初始化页改用字段列表格式；state 非法时已在上方
+        # 抛错，走到此处 YAML 必可解析，防御性失败降级为空列表
+        try:
+            comma_tables = _comma_string_tables(yaml.safe_load(content), source.db_name)
+        except yaml.YAMLError:
+            comma_tables = []
+
+        # 推荐信息在既有校验全部通过后附加；失败只降级为不可用（doc 7.1
+        # §4.4）。json 路径解析（含符号链接拒绝等安全检查）与推荐加载
+        # 整体降级：异常时全部表按"推荐信息不可用"处理，不阻断配置读取，
+        # 也不绕过路径安全检查读取文件
+        try:
+            recommendations = _load_recommendations(
+                resolve_json_output_dir(workspace.source_id, workspace_id)
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "读取维度值推荐失败（%s），全部按推荐信息不可用处理",
+                type(exc).__name__,
+            )
+            recommendations = {}
+        tables = []
+        for c in cfg.tables.values():
+            rec = recommendations.get((c.schema, c.table))
+            tables.append(
+                {
+                    "schema_name": c.schema,
+                    "object_name": c.table,
+                    "embedding_col": c.embedding_col,
+                    "dimension_value_columns": (
+                        rec["dimension_value_columns"] if rec else []
+                    ),
+                    "dimension_value_confidence": (
+                        rec["dimension_value_confidence"] if rec else None
+                    ),
+                    "recommendation_available": rec is not None,
+                }
+            )
+        return {"tables": tables, "version": version, "comma_string_tables": comma_tables}
+
+
+# ---- 独立推荐读取（doc 7.2 §4：与被编辑 YAML 解耦的只读能力） ----
+
+
+def read_dim_value_recommendations(
+    settings: PlatformSettings, workspace_id
+) -> Dict[str, Any]:
+    """返回当前工作区全部可读画像的维度值字段推荐（与 dim-config GET 同校验口径）。
+
+    草稿弹窗据此对 props 中的表逐表展示推荐；画像不可读或不存在的表不进入
+    结果，调用方按"推荐信息不可用"展示。任何读取失败只降级为空映射。
+    """
+    workspace_id = normalize_workspace_id(workspace_id)
+    with platform_session(settings) as session:
+        from backend.workspaces.repository import get_workspace
+
+        workspace = get_workspace(session, workspace_id)
+        if workspace is None:
+            raise DimConfigOutputMissingError("工作区不存在")
+        try:
+            recommendations = _load_recommendations(
+                resolve_json_output_dir(workspace.source_id, workspace_id)
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "读取维度值推荐失败（%s），全部按推荐信息不可用处理",
+                type(exc).__name__,
+            )
+            recommendations = {}
         tables = [
             {
-                "schema_name": c.schema,
-                "object_name": c.table,
-                "embedding_col": c.embedding_col,
+                "schema_name": schema_name,
+                "object_name": object_name,
+                "dimension_value_columns": rec["dimension_value_columns"],
+                "dimension_value_confidence": rec["dimension_value_confidence"],
+                "recommendation_available": True,
             }
-            for c in cfg.tables.values()
+            for (schema_name, object_name), rec in sorted(recommendations.items())
         ]
-        return {"tables": tables, "version": version}
+        return {"tables": tables}
+
+
+# ---- 运行/版本路径：有效清单校验与配置对象构造（doc 7.2 §5.2.1/§5.3） ----
+
+
+def _in_registration_scope(info: Dict[str, Any], db_name: str, selected_schemas) -> bool:
+    """登记边界核对（doc 7.2 §5.2.1 保留"登记边界"检查）：画像库名须等于
+    登记库名且 schema 在登记范围内。目录位置不证明归属——错误或残留画像
+    不得成为候选。"""
+
+    return (
+        info.get("database") == db_name
+        and info.get("schema_name") in set(selected_schemas)
+    )
+
+
+def build_dim_tables_from_params(
+    tables_param: Any,
+    source_id: str,
+    workspace_id: str,
+    registration,
+) -> Tuple[Optional[DimTablesConfig], Optional[str], Optional[str], list]:
+    """把规范化前的 dim_value.tables 参数校验并构造为可注入的 DimTablesConfig。
+
+    registration 为登记快照（需 db_name / selected_schemas 属性，见
+    json_loader.RegistrationSnapshot）。
+
+    返回 (config, reason, code, input_files)：
+    - config 为 None 时 reason 为失败文案；code 仅在显式零表时为
+      "dim_value_empty_tables"（沿用既有错误码，doc 7.2 §3.2），其余为 None；
+    - 结构校验与版本/运行参数共用 job_params._validate_dim_tables_param；
+    - 准入核对（§5.2.1）：每张表必须存在于当前工作区 JSON 画像，字段必须
+      在该表 column_profiles 键中（按原始大小写），失效项逐条列出；
+      画像库名须等于登记库名、schema 须在登记范围内，越界画像按失效处理；
+    - 成功时 input_files 登记实际读取的 JSON 画像文件（不再登记未读取的
+      dim_tables.yaml）；embedding_col 以数组形态直接注入，不经核心模型的
+      字符串逗号拆分路径。
+    """
+    from backend.jobs.job_params import StepConfigError, _validate_dim_tables_param
+
+    try:
+        normalized = _validate_dim_tables_param(tables_param)
+    except StepConfigError as exc:
+        return None, str(exc), None, []
+    if not normalized:
+        return None, str(DimValueEmptyTablesError()), "dim_value_empty_tables", []
+
+    db_name = registration.db_name
+    json_dir = resolve_json_output_dir(source_id, workspace_id)
+    # {(schema, object): (path, column_names)}；越界画像单独记录以区分文案
+    profiles: Dict[Tuple[str, str], Tuple[Path, set]] = {}
+    out_of_scope: set = set()
+    for path, info in _iter_json_products(json_dir):
+        schema_name = info.get("schema_name")
+        object_name = info.get("object_name")
+        if not isinstance(schema_name, str) or not isinstance(object_name, str):
+            continue
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            data = None
+        raw_profiles = data.get("column_profiles") if isinstance(data, dict) else None
+        column_names = (
+            {name for name in raw_profiles if isinstance(name, str)}
+            if isinstance(raw_profiles, dict)
+            else set()
+        )
+        key = (schema_name, object_name)
+        if not _in_registration_scope(info, db_name, registration.selected_schemas):
+            out_of_scope.add(key)
+            continue
+        profiles[key] = (path, column_names)
+
+    invalid_items: List[str] = []
+    tables: Dict[str, DimTableConfig] = {}
+    used_paths: Dict[str, Path] = {}
+    for item in normalized:
+        key = (item["schema_name"], item["object_name"])
+        full_name = f"{item['schema_name']}.{item['object_name']}"
+        profile = profiles.get(key)
+        if profile is None:
+            if key in out_of_scope:
+                invalid_items.append(f"{full_name}（画像库名或 schema 超出登记范围）")
+            else:
+                invalid_items.append(f"{full_name}（表不在当前工作区 JSON 画像中）")
+            continue
+        path, column_names = profile
+        unknown = [c for c in item["embedding_col"] if c not in column_names]
+        if unknown:
+            invalid_items.append(f"{full_name}（字段不存在: {'、'.join(unknown)}）")
+            continue
+        tables[full_name] = DimTableConfig(
+            schema=item["schema_name"],
+            table=item["object_name"],
+            embedding_col=list(item["embedding_col"]),
+        )
+        used_paths[path.name] = path
+    if invalid_items:
+        return (
+            None,
+            "dim_value 配置引用已失效的表或字段: "
+            + "；".join(invalid_items)
+            + "；请编辑作业创建新版本，或在 custom 模式修正本次清单",
+            None,
+            [],
+        )
+
+    from backend.workspace_files.markers import read_collection_marker
+
+    marker, _error = read_collection_marker(json_dir)
+    run_id = marker.run_id if marker else None
+    input_files = [
+        (f"json/{name}", run_id) for name in sorted(used_paths, key=str.lower)
+    ]
+    return DimTablesConfig(database=db_name, tables=tables), None, None, input_files
 
 
 # ---- GET objects（§5.1） ----
@@ -266,6 +570,7 @@ def list_dim_value_objects(settings: PlatformSettings, workspace_id) -> Dict[str
     workspace_id = normalize_workspace_id(workspace_id)
     with platform_session(settings) as session:
         workspace = _require_workspace(session, workspace_id)
+        source = _require_registration(session, workspace.source_id)
         json_dir = resolve_json_output_dir(workspace.source_id, workspace_id)
         if not json_dir.is_dir():
             raise DimConfigOutputMissingError("受管 json 产物目录不存在")
@@ -279,6 +584,10 @@ def list_dim_value_objects(settings: PlatformSettings, workspace_id) -> Dict[str
                 continue
             if "." in schema_name:
                 # 审核修订 18：schema 含点全链不可表达，候选即排除
+                continue
+            # 登记边界（与发布预检同一规则，doc 7.2 §5.2.1）：画像库名须等于
+            # 登记库名且 schema 在登记范围内
+            if not _in_registration_scope(info, source.db_name, source.selected_schemas):
                 continue
             objects.append(
                 {
@@ -320,6 +629,7 @@ def read_dim_value_object_columns(
     workspace_id = normalize_workspace_id(workspace_id)
     with platform_session(settings) as session:
         workspace = _require_workspace(session, workspace_id)
+        source = _require_registration(session, workspace.source_id)
         json_dir = resolve_json_output_dir(workspace.source_id, workspace_id)
 
         data = None
@@ -327,6 +637,8 @@ def read_dim_value_object_columns(
             if (
                 info.get("schema_name") == schema_name
                 and info.get("object_name") == object_name
+                # 登记边界（与发布预检同一规则）：越界画像不提供字段候选
+                and _in_registration_scope(info, source.db_name, source.selected_schemas)
             ):
                 data = json.loads(path.read_text(encoding="utf-8"))
                 break
@@ -374,8 +686,13 @@ def read_dim_value_object_columns(
 # ---- PUT（§5.2） ----
 
 
-def _validate_payload(payload: Any) -> List[Dict[str, str]]:
-    """结构校验（第 1 步）与 embedding_col 强校验（第 2 步），返回规范化表清单。"""
+def _validate_payload(payload: Any) -> List[Dict[str, Any]]:
+    """结构校验（第 1 步）与 embedding_col 强校验（第 2 步），返回规范化表清单。
+
+    embedding_col 接受单列字符串或字段名列表（doc 7.2 §3.1.1）；列表元素须为
+    非空字符串，按首次出现顺序去重；逗号串（含列表内元素含逗号）一律拒绝并
+    提示改用字段列表，不拆分、不截取首项；空值/空列表按未配置处理。
+    """
 
     if not isinstance(payload, dict):
         raise DimValueConfigInvalidError(
@@ -387,7 +704,7 @@ def _validate_payload(payload: Any) -> List[Dict[str, str]]:
 
     seen = set()
     missing: List[str] = []
-    normalized: List[Dict[str, str]] = []
+    normalized: List[Dict[str, Any]] = []
     for item in tables:
         if not isinstance(item, dict):
             raise DimValueConfigInvalidError(
@@ -414,19 +731,47 @@ def _validate_payload(payload: Any) -> List[Dict[str, str]]:
             raise DimValueConfigInvalidError(f"表重复: {full_name}", "表清单存在重复键")
         seen.add(full_name)
 
-        if not isinstance(embedding_col, str) or not embedding_col.strip():
+        columns: Any = None
+        if isinstance(embedding_col, str):
+            text = embedding_col.strip()
+            if "," in text:
+                raise DimValueConfigInvalidError(
+                    f"embedding_col 多字段请使用字段列表格式: {full_name}",
+                    "embedding_col 含逗号（多字段请使用列表）",
+                )
+            if text:
+                columns = text
+        elif isinstance(embedding_col, list):
+            items: List[str] = []
+            for element in embedding_col:
+                if not isinstance(element, str) or not element.strip():
+                    raise DimValueConfigInvalidError(
+                        f"embedding_col 列表元素必须是非空字符串: {full_name}",
+                        "embedding_col 列表含非法元素",
+                    )
+                text = element.strip()
+                if "," in text:
+                    raise DimValueConfigInvalidError(
+                        f"embedding_col 多字段请使用字段列表格式: {full_name}",
+                        "embedding_col 列表元素含逗号（多字段请使用列表）",
+                    )
+                if text not in items:
+                    items.append(text)
+            if items:
+                columns = items
+        elif embedding_col is not None:
+            raise DimValueConfigInvalidError(
+                f"embedding_col 必须是字符串或字段名列表: {full_name}",
+                "embedding_col 类型非法",
+            )
+        if columns is None:
             missing.append(full_name)
             continue
-        if "," in embedding_col:
-            raise DimValueConfigInvalidError(
-                f"embedding_col 仅支持单列: {full_name}",
-                "embedding_col 含逗号（多列形态）",
-            )
         normalized.append(
             {
                 "schema_name": schema_name,
                 "object_name": object_name,
-                "embedding_col": embedding_col,
+                "embedding_col": columns,
             }
         )
 

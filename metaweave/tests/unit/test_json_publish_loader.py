@@ -618,3 +618,40 @@ class TestAwareTimestampConstraint:
         del document["generated_timestamp"]
         rows, _ = self._build([document])
         assert rows[0]["generated_timestamp"] is None
+
+
+# ---- doc 7.1 §8.13：画像新增推荐属性的发布兼容回归 ----
+
+
+class TestDimensionValueRecommendationPublishCompat:
+    def test_validate_accepts_valid_recommendation(self):
+        doc = sample_document()
+        doc["table_profile"]["dimension_value_columns"] = ["amount"]
+        doc["table_profile"]["dimension_value_confidence"] = 0.8
+        json_loader._validate_document(doc, ["public"])  # 不抛即通过
+
+    @pytest.mark.parametrize(
+        "extra",
+        [
+            {"dimension_value_columns": [], "dimension_value_confidence": None},
+            {},
+        ],
+        ids=["empty", "missing"],
+    )
+    def test_validate_accepts_empty_and_missing_variants(self, extra):
+        doc = sample_document()
+        doc["table_profile"].update(extra)
+        json_loader._validate_document(doc, ["public"])
+
+    def test_table_row_drops_recommendation_fields(self):
+        doc = sample_document()
+        doc["table_profile"]["dimension_value_columns"] = ["amount"]
+        doc["table_profile"]["dimension_value_confidence"] = 0.8
+
+        row = json_loader._table_row(
+            doc, source_id=SOURCE_ID, publish_run_id=PUBLISH_ID
+        )
+
+        assert "dimension_value_columns" not in row
+        assert "dimension_value_confidence" not in row
+        assert row["table_category"] == "fact"

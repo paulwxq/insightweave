@@ -377,6 +377,44 @@ class TestPublishJsonExecution:
             ]
         }
 
+    @pytest.mark.parametrize(
+        "recommendation",
+        [
+            {"dimension_value_columns": ["amount"], "dimension_value_confidence": 0.8},
+            {"dimension_value_columns": [], "dimension_value_confidence": None},
+            None,
+        ],
+        ids=["valid-rec", "empty-rec", "missing-attrs"],
+    )
+    def test_publish_ingests_profile_with_recommendation_attrs(
+        self, monkeypatch, tmp_path, recommendation
+    ):
+        """doc 7.1 §8.13：三种画像形态经完整发布执行入库，
+        既有字段正常写入、推荐属性不映射为数据库列。"""
+        document = sample_document()
+        if recommendation is not None:
+            document["table_profile"].update(recommendation)
+        json_ready(tmp_path, [document])
+        session = install(monkeypatch, tmp_path, _json_job_session())
+
+        run_id = _publish_json_once(session)
+
+        step = run_step_row(session, run_id, "json")
+        assert step.status == "success"
+        rows = [row for row in session.table_profiles if row.source_id == SOURCE_ID]
+        assert len(rows) == 1
+        row = rows[0]
+        # 既有画像字段正常入库
+        assert (row.schema_name, row.object_name) == ("public", "orders")
+        assert row.table_category == "fact"
+        assert float(row.category_confidence) == 0.95
+        assert row.publish_run_id == run_id
+        # 推荐属性不入库：ORM 行无此列
+        assert "dimension_value_columns" not in vars(row)
+        assert "dimension_value_confidence" not in vars(row)
+        with pytest.raises(AttributeError):
+            _ = row.dimension_value_columns  # noqa: B018
+
     def test_file_corrupted_after_precheck_is_blocked(self, monkeypatch, tmp_path):
         json_ready(tmp_path)
         session = install(monkeypatch, tmp_path, _json_job_session())

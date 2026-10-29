@@ -413,10 +413,12 @@ export interface ApiErrorResponse {
   details?: unknown
 }
 
-/** 发布创建前集中预检失败时 details 中的步骤原因（doc 6.2 §6.4） */
+/** 发布创建前集中预检失败时 details 中的步骤原因（doc 6.2 §6.4；doc 7.2 起可带既有业务码） */
 export interface PublishPrecheckFailure {
   step: string
   reason: string
+  /** 既有业务错误码（如 dim_value_empty_tables）；无则不返回 */
+  code?: string | null
 }
 
 // ---- 对象画像读取（doc 19.2 §8.1.1；publish 来源改 publish_run_id） ----
@@ -592,15 +594,28 @@ export interface DomainConfigTablesResponse {
   tables: DomainConfigTableOption[]
 }
 
+/** 文件 GET/PUT 的配置值形态（doc 7.2 §3.1.1）：单列字符串、字段列表或 null */
 export interface DimValueConfigTable {
   schema_name: string
   object_name: string
-  embedding_col: string | null
+  embedding_col: string | string[] | null
 }
 
+/** 只读推荐信息（doc 7.1 §4.4）：来自当前工作区 JSON 画像，不参与保存提交 */
+export interface DimValueRecommendation {
+  dimension_value_columns: string[]
+  dimension_value_confidence: number | null
+  recommendation_available: boolean
+}
+
+export interface DimValueConfigGetTable extends DimValueConfigTable, DimValueRecommendation {}
+
 export interface DimValueConfigGetResponse {
-  tables: DimValueConfigTable[]
+  tables: DimValueConfigGetTable[]
   version: string
+  /** embedding_col 为含逗号字符串的表（读取按未指定处理；显式初始化页据此
+      提示改用字段列表格式，doc 7.2 §3.1.1/验收 25） */
+  comma_string_tables: string[]
 }
 
 export interface DimValueConfigUpdateRequest {
@@ -610,6 +625,51 @@ export interface DimValueConfigUpdateRequest {
 
 export interface DimValueConfigUpdateResponse {
   tables: DimValueConfigTable[]
+}
+
+/**
+ * 草稿/版本/运行参数的 dim_value 表项（doc 7.2 §3.1）：embedding_col 统一为
+ * 字段名数组（单字段也是单元素数组）；推荐信息不进入执行配置。
+ */
+export interface DimValueTableParam {
+  schema_name: string
+  object_name: string
+  embedding_col: string[]
+}
+
+/** 发布 domain 运行/版本参数项（doc 7.2 §7.2）；与文件接口的域形状一致 */
+export type DomainParam = DomainConfigDomain
+
+/** 独立推荐读取（doc 7.2 §4）：与被编辑 YAML 解耦的只读能力 */
+export interface DimValueRecommendationItem extends DimValueRecommendation {
+  schema_name: string
+  object_name: string
+}
+
+export interface DimValueRecommendationsResponse {
+  tables: DimValueRecommendationItem[]
+}
+
+/** 作业级预检（doc 7.2 §5.2）：与创建运行同一解析规则，不创建运行 */
+export interface PublishJobPrecheckRequest {
+  revision_no: number
+  mode: RunMode
+  steps?: string[] | null
+  step_config?: Record<string, Record<string, unknown>> | null
+}
+
+export interface PublishJobPrecheckStep {
+  step_name: string
+  ready: boolean
+  reason: string | null
+  code: string | null
+}
+
+export interface PublishJobPrecheckResponse {
+  publish_job_id: string
+  revision_no: number
+  mode: RunMode
+  steps: PublishJobPrecheckStep[]
 }
 
 export interface DimValueObject {

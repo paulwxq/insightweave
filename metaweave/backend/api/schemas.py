@@ -297,6 +297,35 @@ class PublishCheckResponse(BaseModel):
     input_directories: list[PublishCheckDirectory]
 
 
+class PublishJobPrecheckRequest(BaseModel):
+    """作业级预检请求（doc 7.2 §5.2）：与创建运行同一解析规则，不创建运行。"""
+
+    revision_no: int
+    mode: str = "default"  # default | custom
+    steps: list[str] | None = None
+    step_config: dict[str, dict[str, Any]] | None = None
+
+
+class PublishJobPrecheckStep(BaseModel):
+    step_name: str
+    ready: bool
+    reason: str | None = None
+    code: str | None = None
+
+
+class PublishJobPrecheckResponse(BaseModel):
+    publish_job_id: str
+    revision_no: int
+    mode: str
+    steps: list[PublishJobPrecheckStep]
+
+
+class DimValueRecommendationsResponse(BaseModel):
+    """独立推荐读取（doc 7.2 §4）：与被编辑 YAML 解耦的只读推荐。"""
+
+    tables: list[dict[str, Any]]
+
+
 # ---- 配置编辑（工作区定位） ----
 
 
@@ -404,6 +433,9 @@ class AssetProfileResponse(BaseModel):
 class DimValueConfigGetResponse(BaseModel):
     tables: list[dict[str, Any]]
     version: str
+    """embedding_col 为含逗号字符串的表（读取按未指定处理；供显式初始化页
+    提示改用字段列表格式，doc 7.2 §3.1.1/验收 25）"""
+    comma_string_tables: list[str] = []
 
 
 class DimValueObjectsResponse(BaseModel):
