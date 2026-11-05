@@ -214,7 +214,10 @@ def ready_session(**kwargs):
 class TestGetObjectDetail:
     def test_source_missing_raises(self, monkeypatch):
         session = install(monkeypatch, FakeDetailSession(source_exists=False))
-        with pytest.raises(SourceNotFoundError):
+        from backend.deletion.errors import ResourceNotFoundError
+
+        with pytest.raises(ResourceNotFoundError):
+            # doc 8.1 §7.3：只读守卫先于领域错误（404 resource_not_found）
             get_object_detail(SETTINGS, SOURCE_ID, "public", "orders")
 
     def test_no_rows_returns_not_published_payload(self, monkeypatch):

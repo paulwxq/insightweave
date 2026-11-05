@@ -394,6 +394,10 @@ def _render(document: dict, domains: list[dict]) -> str:
 def read_domain_config(settings: PlatformSettings, workspace_id) -> dict:
     workspace_id = normalize_workspace_id(workspace_id)
     with platform_session(settings) as session:
+        # doc 8.1 §8.1：只读守卫（已删工作区 410；删除中仍可查看）
+        from backend.access_guards import require_workspace
+
+        require_workspace(session, workspace_id)
         workspace, source_id = _workspace_source(session, workspace_id)
         source = _require_context(session, source_id, workspace_id)
         raw, document = _load_yaml_bytes(_yaml_path(source_id, workspace_id))
@@ -424,12 +428,29 @@ def write_domain_config(
 ) -> dict:
     workspace_id = normalize_workspace_id(workspace_id)
     with platform_session(settings) as session:
-        # 工作区行锁与采集步骤认领共用，覆盖指纹读取至原子替换（doc 6.2 §5.1）
+        # 工作区行锁与采集步骤认领共用，覆盖指纹读取至原子替换（doc 6.2 §5.1）；
+        # doc 8.1 §5.1.1：先定位父级 → 锁源 → 锁工作区，锁内复查冻结
+        from backend.access_guards import require_workspace
+        from backend.deletion.locks import lock_source_row, lock_workspace_row
         from backend.persistence.models import WorkspaceInfo
 
-        workspace_row = session.get(WorkspaceInfo, workspace_id, with_for_update=True)
+        probe = session.get(WorkspaceInfo, workspace_id)
+        if probe is not None:
+            lock_source_row(session, probe.source_id)
+        workspace_row = lock_workspace_row(session, workspace_id)
         if workspace_row is None:
             raise DomainConfigOutputMissingError("工作区不存在")
+        require_workspace(session, workspace_id, for_write=True)
+        # doc 8.1 §5.1.1：Rel 发布执行期读取本 YAML；发布运行中不得保存
+        from backend.publishing.repository import (
+            RelPublishInProgressError,
+            rel_publish_in_progress,
+        )
+
+        if rel_publish_in_progress(session, workspace_id) is not None:
+            raise RelPublishInProgressError(
+                "Rel 发布正在执行，请等待完成后再保存 Domain 配置"
+            )
         source_id = workspace_row.source_id
         source = _require_context(session, source_id, workspace_id)
         path = _yaml_path(source_id, workspace_id)

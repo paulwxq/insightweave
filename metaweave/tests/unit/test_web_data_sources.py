@@ -99,7 +99,7 @@ class FakePlatformSession:
     def _rows(self):
         return self.state["rows"]
 
-    def get(self, _model, source_id):
+    def get(self, _model, source_id, **_kwargs):
         if self.fail_get:
             raise SQLAlchemyError("query failed")
         for row in self._rows():
@@ -108,6 +108,11 @@ class FakePlatformSession:
         return None
 
     def scalars(self, stmt):
+        from backend.persistence.models import ResourceDeletionTask
+
+        if stmt.column_descriptions[0]["entity"] is ResourceDeletionTask:
+            # doc 8.1 §7.0：本假件不建模删除任务（无未解决任务）
+            return []
         if stmt.whereclause is not None:
             clause = stmt.whereclause
             conditions = getattr(clause, "clauses", None) or [clause]
@@ -149,6 +154,9 @@ class FakePlatformSession:
             ]
             return None
         text_sql = str(stmt)
+        if "resource_deletion_task" in text_sql:
+            # doc 8.1 §7.0：列表附带删除任务摘要（本假件无未解决任务）
+            return SimpleNamespace(fetchall=lambda: [], all=lambda: [])
         if "collection_run_info" in text_sql:
             activity = self.state["collection_activity"]
         elif "publish_run_info" in text_sql:
@@ -231,6 +239,8 @@ def web_env(monkeypatch):
             state["platform_sessions"] -= 1
 
     monkeypatch.setattr(connection_check.psycopg, "connect", fake_connect)
+    # doc 8.1 §7.2：关闭启动扫描，避免其真实连库污染本文件捕获的连接参数
+    monkeypatch.setenv("METAWEAVE_DELETION_STARTUP_SCAN", "0")
     monkeypatch.setattr(registration_service, "platform_session", fake_platform_session)
     monkeypatch.setenv("SOURCE_CREDENTIAL_KEY", Fernet.generate_key().decode())
     settings = PlatformSettings(
@@ -362,6 +372,7 @@ def test_create_returns_short_id_then_list_safe_fields(web_env):
         "is_active",
         "last_collected_at",
         "last_published_at",
+        "deletion_task",  # doc 8.1 §7.0：对象响应附带删除任务摘要（可空）
     }
     fetched = client.get(f"/api/data-sources/{item['source_id']}")
     assert fetched.status_code == 200
@@ -1085,264 +1096,106 @@ def _secret_absent(response, caplog) -> None:
     assert "distinct-web-test-secret" not in blob
 
 
-def test_delete_with_workspaces_is_409(web_env, monkeypatch, tmp_path, caplog):
-    """A29：已关联工作区拒绝删除，不级联、不借 delete_output 删目录。"""
-    client, rows, _connections, _kwargs, state = web_env
-    source = make_source()
-    rows.append(source)
-    state["workspaces"].append(SimpleNamespace(source_id=source.source_id))
-    _use_output_root(monkeypatch, tmp_path)
-    workspace = tmp_path / "output" / source.source_id / "ws_1" / "db"
-    workspace.mkdir(parents=True)
-    (workspace / "database.json").write_text("{}", encoding="utf-8")
-
-    caplog.set_level(logging.ERROR)
-    for delete_output in (False, True):
-        response = client.delete(
-            f"/api/data-sources/{source.source_id}",
-            params={"delete_output": delete_output},
-        )
-        assert response.status_code == 409
-        assert response.json() == {
-            "code": "source_has_workspaces",
-            "message": "该数据源已关联工作区，不能删除；请先人工处理工作区相关记录",
-        }
-    assert rows[0].source_id == source.source_id
-    # 工作区目录不被级联删除
-    assert (workspace / "database.json").read_text(encoding="utf-8") == "{}"
-    assert state["source_connects"] == 0
-    _secret_absent(response, caplog)
+# ---- 数据源删除（doc 8.1 §2.4：202 任务契约，替换旧 204 / 工作区拒绝契约） ----
 
 
-def test_delete_without_output_flag_does_not_resolve_workspace(
-    web_env, monkeypatch, caplog
-):
-    client, rows, _connections, _kwargs, state = web_env
-    source = make_source()
-    rows.append(source)
+def _patch_deletion_service(monkeypatch, *, action="delete_source"):
+    """打桩删除服务：路由层只验证契约（服务语义见 test_deletion_service.py）。"""
+    from backend.deletion import service as deletion_service
 
-    def fail_resolve(_source_id):
-        raise AssertionError("无工作区且不带 delete_output 时不应解析工作区目录")
-
+    fixed = {
+        "task_id": "11111111-1111-4111-8111-111111111111",
+        "action": action,
+        "status": "pending",
+        "source_id": "db_src_1",
+        "workspace_id": None,
+        "target_id": "db_src_1",
+        "error_message": None,
+        "created_at": None,
+        "queued_at": None,
+        "started_at": None,
+        "finished_at": None,
+    }
     monkeypatch.setattr(
-        registration_service, "resolve_source_workspace_dir", fail_resolve
+        deletion_service, "submit_source_deletion", lambda _s, sid: fixed
     )
-    caplog.set_level(logging.ERROR)
-    response = client.delete(f"/api/data-sources/{source.source_id}")
-    assert response.status_code == 204
-    assert response.content == b""
-    assert rows == []
-    assert state["source_connects"] == 0
-    _secret_absent(response, caplog)
-
-    again = client.delete(
-        f"/api/data-sources/{source.source_id}", params={"delete_output": True}
-    )
-    assert again.status_code == 404
-    assert again.json() == {"code": "not_found", "message": "数据源不存在"}
-    assert state["source_connects"] == 0
-
-
-def test_delete_output_removes_only_that_workspace(
-    web_env, monkeypatch, tmp_path, caplog
-):
-    client, rows, _connections, _kwargs, state = web_env
-    source = make_source()
-    rows.append(source)
-    _use_output_root(monkeypatch, tmp_path)
-    workspace = tmp_path / "output" / source.source_id
-    nested = workspace / "db"
-    nested.mkdir(parents=True)
-    (nested / "database.json").write_text("{}", encoding="utf-8")
-    other = tmp_path / "output" / "db_src_9"
-    other.mkdir()
-    (other / "keep.txt").write_text("other", encoding="utf-8")
-
-    caplog.set_level(logging.ERROR)
-    response = client.delete(
-        f"/api/data-sources/{source.source_id}", params={"delete_output": True}
-    )
-    assert response.status_code == 204
-    assert response.content == b""
-    assert rows == []
-    assert not workspace.exists()
-    assert (other / "keep.txt").read_text(encoding="utf-8") == "other"
-    assert state["source_connects"] == 0
-    _secret_absent(response, caplog)
-
-
-def test_delete_missing_source_keeps_orphan_directory(
-    web_env, monkeypatch, tmp_path, caplog
-):
-    client, rows, _connections, _kwargs, state = web_env
-    _use_output_root(monkeypatch, tmp_path)
-    orphan = tmp_path / "output" / "db_src_99"
-    orphan.mkdir(parents=True)
-    (orphan / "keep.txt").write_text("stay", encoding="utf-8")
-    caplog.set_level(logging.ERROR)
-    response = client.delete(
-        "/api/data-sources/db_src_99", params={"delete_output": True}
-    )
-    assert response.status_code == 404
-    assert response.json() == {"code": "not_found", "message": "数据源不存在"}
-    assert (orphan / "keep.txt").read_text(encoding="utf-8") == "stay"
-    assert rows == []
-    assert state["source_connects"] == 0
-    _secret_absent(response, caplog)
-
-
-def test_delete_symlink_workspace_keeps_target_and_row(
-    web_env, monkeypatch, tmp_path, caplog
-):
-    client, rows, _connections, _kwargs, state = web_env
-    source = make_source()
-    rows.append(source)
-    _use_output_root(monkeypatch, tmp_path)
-    target = tmp_path / "output" / "db_src_9"
-    target.mkdir(parents=True)
-    (target / "keep.txt").write_text("b", encoding="utf-8")
-    link = tmp_path / "output" / source.source_id
-    link.symlink_to(target, target_is_directory=True)
-    caplog.set_level(logging.ERROR)
-    response = client.delete(
-        f"/api/data-sources/{source.source_id}", params={"delete_output": True}
-    )
-    assert response.status_code == 500
-    assert response.json() == {
-        "code": "output_delete_failed",
-        "message": "该数据源的输出目录删除失败，登记记录仍保留",
-    }
-    assert rows[0].source_id == source.source_id
-    assert (target / "keep.txt").read_text(encoding="utf-8") == "b"
-    assert state["source_connects"] == 0
-    _secret_absent(response, caplog)
-
-
-def test_delete_permission_error_keeps_row(web_env, monkeypatch, tmp_path, caplog):
-    client, rows, _connections, _kwargs, state = web_env
-    source = make_source()
-    rows.append(source)
-    _use_output_root(monkeypatch, tmp_path)
-    workspace = tmp_path / "output" / source.source_id
-    workspace.mkdir(parents=True)
-    (workspace / "file.txt").write_text("keep", encoding="utf-8")
-
-    def deny(_path):
-        raise PermissionError("busy")
-
-    monkeypatch.setattr(registration_service.shutil, "rmtree", deny)
-    caplog.set_level(logging.ERROR)
-    response = client.delete(
-        f"/api/data-sources/{source.source_id}", params={"delete_output": True}
-    )
-    assert response.status_code == 500
-    assert response.json() == {
-        "code": "output_delete_failed",
-        "message": "该数据源的输出目录删除失败，登记记录仍保留",
-    }
-    assert rows[0].source_id == source.source_id
-    assert (workspace / "file.txt").read_text(encoding="utf-8") == "keep"
-    assert state["source_connects"] == 0
-    _secret_absent(response, caplog)
-
-
-def test_delete_commit_failure_keeps_row_after_workspace_removed(
-    web_env, monkeypatch, tmp_path
-):
-    client, rows, _connections, _kwargs, state = web_env
-    source = make_source()
-    rows.append(source)
-    _use_output_root(monkeypatch, tmp_path)
-    workspace = tmp_path / "output" / source.source_id
-    workspace.mkdir(parents=True)
-    (workspace / "file.txt").write_text("gone", encoding="utf-8")
-    state["fail_next_commit"] = True
-    response = client.delete(
-        f"/api/data-sources/{source.source_id}", params={"delete_output": True}
-    )
-    assert response.status_code == 503
-    assert response.json() == {
-        "code": "platform_unavailable",
-        "message": "平台库暂不可用",
-    }
-    assert rows[0].source_id == source.source_id
-    assert not workspace.exists()
-    assert state["source_connects"] == 0
-
-
-def test_delete_query_failure_does_not_touch_workspace(web_env, monkeypatch, tmp_path):
-    client, rows, _connections, _kwargs, state = web_env
-    source = make_source()
-    rows.append(source)
-    _use_output_root(monkeypatch, tmp_path)
-    workspace = tmp_path / "output" / source.source_id
-    workspace.mkdir(parents=True)
-    (workspace / "file.txt").write_text("stay", encoding="utf-8")
-    calls = []
-
-    def fail_if_called(source_id):
-        calls.append(source_id)
-        raise AssertionError("首次查询失败不应删除目录")
-
     monkeypatch.setattr(
-        registration_service, "resolve_source_workspace_dir", fail_if_called
+        deletion_service,
+        "submit_knowledge_clear",
+        lambda _s, sid: {**fixed, "action": "clear_source_knowledge"},
     )
-    state["fail_get"] = True
-    response = client.delete(
-        f"/api/data-sources/{source.source_id}", params={"delete_output": True}
+    monkeypatch.setattr(
+        deletion_service, "execute_task", lambda _s, tid, **_kw: {"status": "ok"}
     )
-    assert response.status_code == 503
-    assert response.json() == {
-        "code": "platform_unavailable",
-        "message": "平台库暂不可用",
-    }
-    assert calls == []
-    assert (workspace / "file.txt").read_text(encoding="utf-8") == "stay"
-    assert rows[0].source_id == source.source_id
-    assert state["source_connects"] == 0
+    monkeypatch.setattr(
+        deletion_service,
+        "preview_source_deletion",
+        lambda _s, sid: {"source_id": sid, "blocking_runs": []},
+    )
+    return fixed
 
 
-def test_delete_purges_published_content_and_keeps_other_source(web_env, caplog):
-    """删源清当前已发布内容（doc 6.1 §14.1）：画像、定义与对象行删除，
-    其他数据源的行不受影响。"""
-    client, rows, _connections, _kwargs, state = web_env
-    source = make_source()
-    other = make_source(source_id="db_src_2")
-    rows.extend([source, other])
-    state["profiles"].extend(
-        [
-            SimpleNamespace(source_id=source.source_id),
-            SimpleNamespace(source_id=other.source_id),
-        ]
+def test_delete_source_returns_202_task(web_env, monkeypatch):
+    """有无工作区均提交删除任务（202），不再按“有关联工作区”拒绝。"""
+    client, rows, _connections, _kwargs, _state = web_env
+    rows.append(make_source())
+    fixed = _patch_deletion_service(monkeypatch)
+    response = client.request(
+        "DELETE", "/api/data-sources/db_src_1", json={"confirm_id": "db_src_1"}
     )
-    state["definitions"].extend(
-        [
-            SimpleNamespace(source_id=source.source_id, define_type="ddl"),
-            SimpleNamespace(source_id=source.source_id, define_type="md"),
-            SimpleNamespace(source_id=other.source_id, define_type="ddl"),
-        ]
-    )
-    state["table_profiles"].extend(
-        [
-            SimpleNamespace(source_id=source.source_id),
-            SimpleNamespace(source_id=other.source_id),
-        ]
-    )
+    assert response.status_code == 202
+    assert response.json() == fixed
 
-    caplog.set_level(logging.ERROR)
-    response = client.delete(f"/api/data-sources/{source.source_id}")
-    assert response.status_code == 204
-    assert [row.source_id for row in rows] == [other.source_id]
-    assert [row.source_id for row in state["profiles"]] == [other.source_id]
-    assert [row.source_id for row in state["definitions"]] == [other.source_id]
-    assert [row.source_id for row in state["table_profiles"]] == [other.source_id]
-    assert state["source_connects"] == 0
-    _secret_absent(response, caplog)
+
+def test_delete_source_rejects_obsolete_delete_output_param(web_env, monkeypatch):
+    """§2.4：废止的 delete_output 显式 400，不由 FastAPI 默默忽略。"""
+    client, rows, _connections, _kwargs, _state = web_env
+    rows.append(make_source())
+    _patch_deletion_service(monkeypatch)
+    response = client.request(
+        "DELETE",
+        "/api/data-sources/db_src_1",
+        params={"delete_output": True},
+        json={"confirm_id": "db_src_1"},
+    )
+    assert response.status_code == 400
+    assert response.json()["code"] == "invalid_request"
+
+
+def test_delete_source_requires_matching_confirm_id(web_env, monkeypatch):
+    client, rows, _connections, _kwargs, _state = web_env
+    rows.append(make_source())
+    _patch_deletion_service(monkeypatch)
+    response = client.request(
+        "DELETE", "/api/data-sources/db_src_1", json={"confirm_id": "db_src_2"}
+    )
+    assert response.status_code == 400
+    assert response.json()["code"] == "invalid_request"
+
+
+def test_published_data_clear_returns_202_task(web_env, monkeypatch):
+    """§3.2：源级知识清理独立 POST，202 返回任务。"""
+    client, rows, _connections, _kwargs, _state = web_env
+    rows.append(make_source())
+    _patch_deletion_service(monkeypatch, action="clear_source_knowledge")
+    response = client.post(
+        "/api/data-sources/db_src_1/published-data/clear",
+        json={"confirm_id": "db_src_1"},
+    )
+    assert response.status_code == 202
+    assert response.json()["action"] == "clear_source_knowledge"
+
+
+def test_source_deletion_preview_passthrough(web_env, monkeypatch):
+    client, rows, _connections, _kwargs, _state = web_env
+    rows.append(make_source())
+    _patch_deletion_service(monkeypatch)
+    response = client.get("/api/data-sources/db_src_1/deletion-preview")
+    assert response.status_code == 200
+    assert response.json() == {"source_id": "db_src_1", "blocking_runs": []}
 
 
 # --- doc 18.1 §4.1：sslmode 值域校验接入 API 输入 ----------------------------
-
-
 @pytest.mark.parametrize(
     "endpoint_factory",
     [

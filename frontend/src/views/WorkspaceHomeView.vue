@@ -6,18 +6,50 @@
  * §4.5：不展示创建人。执行状态分布只在取齐全部运行后计数，不用当前页凑数。
  */
 import { computed, ref, watch } from 'vue'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { displayDate, displayDateMs } from '../api/format'
 import { ApiError } from '../api/http'
-import type { JobItem, RunListItem, RunStatus } from '../api/types'
+import type { JobItem, RunListItem, RunStatus, WorkspaceItem } from '../api/types'
 import { listJobs, listWorkspaceRuns, patchWorkspace, runIdOf } from '../api/workspaces'
+import DeleteResourceDialog from '../components/DeleteResourceDialog.vue'
 import StepDetailDrawer from '../components/StepDetailDrawer.vue'
 import { useRunPolling } from '../composables/useRunPolling'
 import { useWorkspaceContext } from '../composables/useWorkspaceContext'
 import RunDrawer from '../components/RunDrawer.vue'
+import PageBreadcrumbs from '../components/PageBreadcrumbs.vue'
 import { runStatusText, triggerTypeText } from '../utils/steps'
+import { hierarchyFrom, passThroughFrom, resolveBack, withFrom, workspacesCrumbTo } from '../navigation/from'
 
 const route = useRoute()
+const router = useRouter()
+const deleteOpen = ref(false)
+const resumeTaskId = ref<string | undefined>(undefined)
+
+function onWorkspaceDeleted() {
+  deleteOpen.value = false
+  resumeTaskId.value = undefined
+  // doc 9 §7.6：删除工作区成功 → 工作区详情的返回目标（from 指向 /workspaces… 时回那个列表）
+  void router.push(backSpec.value.target ?? '/workspaces')
+}
+
+// doc 8.1 §7.0/§7.3：按任务 action 分流——工作区删除本地弹窗恢复；
+// 源删除/知识清理是父级范围任务，跳转源详情对应入口处理
+function openTaskProgress(task: NonNullable<WorkspaceItem['deletion_task']>) {
+  if (task.action === 'delete_workspace') {
+    resumeTaskId.value = task.task_id
+    deleteOpen.value = true
+    return
+  }
+  void router.push(`/data-sources/${task.source_id}`)
+}
+
+function taskEntryLabel(
+  task: NonNullable<WorkspaceItem['deletion_task']>,
+): string {
+  if (task.action === 'delete_workspace') return '查看工作区删除进度'
+  if (task.action === 'delete_source') return '前往数据源处理删除任务'
+  return '前往数据源处理知识清理任务'
+}
 const workspaceId = computed(() =>
   typeof route.params.workspaceId === 'string' ? route.params.workspaceId : '',
 )
@@ -206,10 +238,26 @@ function openRun(kind: 'collection' | 'publish', runId: string) {
   stepDrawerStep.value = ''
   drawer[kind].open(runId)
 }
+
+// ---- doc 9 §7：返回与来源 ----
+
+function queryFrom(): string | null {
+  const raw = route.query.from
+  return typeof raw === 'string' ? raw : null
+}
+
+/** §7.4：工作区详情认 /workspaces… 来源（恢复筛选与页码），默认 /workspaces */
+const backSpec = computed(() => resolveBack('workspace-home', queryFrom(), {}))
+
+const crumbSegments = computed(() => [
+  { label: '工作区管理', to: workspacesCrumbTo(queryFrom()) },
+  { label: workspace.value?.workspace_name ?? '工作区' },
+])
 </script>
 
 <template>
   <div class="ds-jobs">
+    <PageBreadcrumbs :segments="crumbSegments" />
     <header class="ds-jobs-header">
       <div>
         <span class="ds-kicker">WORKSPACE OVERVIEW</span>
@@ -217,10 +265,26 @@ function openRun(kind: 'collection' | 'publish', runId: string) {
         <p>查看工作区的基本信息，以及数据采集作业与数据发布作业的概览统计。</p>
       </div>
       <div class="ws-home-actions">
-        <RouterLink class="ds-jobs-back" to="/workspaces">
+        <button
+          v-if="workspace?.deletion_task"
+          type="button"
+          class="ds-danger"
+          @click="openTaskProgress(workspace.deletion_task!)"
+        >
+          {{ taskEntryLabel(workspace.deletion_task!) }}
+        </button>
+        <RouterLink class="ds-jobs-back" :to="backSpec.target!">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 12H5" /><path d="m12 19-7-7 7-7" /></svg>
-          返回
+          {{ backSpec.label }}
         </RouterLink>
+        <button
+          v-if="workspace"
+          type="button"
+          class="ds-danger"
+          @click="deleteOpen = true; resumeTaskId = undefined"
+        >
+          删除工作区
+        </button>
       </div>
     </header>
 
@@ -267,10 +331,20 @@ function openRun(kind: 'collection' | 'publish', runId: string) {
               <span class="ds-kicker ds-kicker-sm">{{ card.kicker }}</span>
               <h2>{{ card.title }}</h2>
             </div>
-            <RouterLink class="ws-detail-link" :to="card.to">
-              查看详情
-              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14" /><path d="m12 5 7 7-7 7" /></svg>
-            </RouterLink>
+            <div class="ws-job-card-actions">
+              <RouterLink
+                class="ds-jobs-create ws-create-link"
+                :to="withFrom(`${card.to}/new`, hierarchyFrom(queryFrom()))"
+                :aria-label="`新建${card.title}`"
+              >
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14" /><path d="M5 12h14" /></svg>
+                新建作业
+              </RouterLink>
+              <RouterLink class="ws-detail-link" :to="withFrom(card.to, hierarchyFrom(queryFrom()))">
+                查看详情
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14" /><path d="m12 5 7 7-7 7" /></svg>
+              </RouterLink>
+            </div>
           </div>
           <div class="ws-mini-stats">
             <p class="narrow"><span>作业数量</span><strong>{{ card.jobCount }}</strong></p>
@@ -357,7 +431,7 @@ function openRun(kind: 'collection' | 'publish', runId: string) {
                 >执行步骤</button>
                 <RouterLink
                   class="ws-run-action"
-                  :to="`/workspaces/${workspaceId}/collection/jobs/${run.job_id}`"
+                  :to="withFrom(`/workspaces/${workspaceId}/collection/jobs/${run.job_id}`, passThroughFrom(queryFrom()))"
                 >作业详情</RouterLink>
               </span>
             </div>
@@ -381,7 +455,7 @@ function openRun(kind: 'collection' | 'publish', runId: string) {
                 >执行步骤</button>
                 <RouterLink
                   class="ws-run-action"
-                  :to="`/workspaces/${workspaceId}/publish/jobs/${run.job_id}`"
+                  :to="withFrom(`/workspaces/${workspaceId}/publish/jobs/${run.job_id}`, passThroughFrom(queryFrom()))"
                 >作业详情</RouterLink>
               </span>
             </div>
@@ -436,14 +510,25 @@ function openRun(kind: 'collection' | 'publish', runId: string) {
       @select-step="stepDrawerStep = $event"
     />
   </div>
+  <DeleteResourceDialog
+    v-if="deleteOpen && workspace"
+    kind="workspace"
+    :target-id="workspaceId"
+    :display-name="workspace.workspace_name"
+    :resume-task-id="resumeTaskId"
+    @cancel="deleteOpen = false; resumeTaskId = undefined"
+    @done="onWorkspaceDeleted"
+  />
 </template>
 
 <style scoped>
+/* 页头右侧按钮组与标题块顶对齐，沿用已确认的返回按钮布局。 */
 .ds-jobs .ds-jobs-header {
-  align-items: flex-end;
+  align-items: flex-start;
 }
 .ws-home-actions {
   display: flex;
+  align-items: flex-start;
   gap: 10px;
 }
 .ws-info-facts {
@@ -496,6 +581,16 @@ function openRun(kind: 'collection' | 'publish', runId: string) {
 }
 .ws-job-card .ds-jobs-list-head {
   align-items: center;
+}
+.ws-job-card-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.ws-create-link {
+  padding: 3px 8px;
+  white-space: nowrap;
 }
 .ws-mini-stats {
   display: flex;

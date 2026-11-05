@@ -75,9 +75,13 @@ def list_revisions(spec: JobSpec, session: Session, job_id: str) -> list:
 
 
 def list_jobs_by_workspace(spec: JobSpec, session: Session, workspace_id: str) -> list:
+    # doc 8.1 §3.3：普通列表排除已逻辑删除的作业
     stmt = (
         select(spec.info_table)
-        .where(spec.info_table.workspace_id == workspace_id)
+        .where(
+            spec.info_table.workspace_id == workspace_id,
+            spec.info_table.deleted_at.is_(None),
+        )
         .order_by(spec.info_table.created_at, spec.info_table.job_name)
     )
     return list(session.scalars(stmt))
@@ -223,7 +227,10 @@ def list_jobs_global(
         .join(WorkspaceInfo, WorkspaceInfo.workspace_id == spec.info_table.workspace_id)
         .outerjoin(last_run, last_run.c.jid == job_id_col)
     )
-    conditions = []
+    conditions = [
+        spec.info_table.deleted_at.is_(None),  # doc 8.1 §3.3：排除已删除作业
+        WorkspaceInfo.deleted_at.is_(None),
+    ]
     if workspace_id is not None:
         conditions.append(spec.info_table.workspace_id == workspace_id)
     if source_id is not None:

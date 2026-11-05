@@ -256,6 +256,10 @@ def get_object_detail(
     try:
         with platform_session(settings) as session:
             begin_readonly_repeatable_read(session)
+            # doc 8.1 §8.1：资产只读守卫（已删源 410；删除中仍可看画像）
+            from backend.access_guards import require_source
+
+            require_source(session, source_id)
             source = get_db_source(session, source_id)
             if source is None:
                 raise SourceNotFoundError("数据源不存在")
@@ -326,6 +330,10 @@ def get_object_ddl(
     try:
         with platform_session(settings) as session:
             begin_readonly_repeatable_read(session)
+            # doc 8.1 §8.1：资产只读守卫（已删源 410；删除中仍可看画像）
+            from backend.access_guards import require_source
+
+            require_source(session, source_id)
             source = get_db_source(session, source_id)
             if source is None:
                 raise SourceNotFoundError("数据源不存在")

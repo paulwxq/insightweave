@@ -8,11 +8,15 @@ POST 返回 202 与新运行 UUID；后台任务只执行本次请求新建的�
 import asyncio
 from uuid import UUID
 
-from fastapi import APIRouter, BackgroundTasks, Depends, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, Query, Response
 
 from backend.api.routers.data_sources import get_platform_settings
 from backend.api.schemas import (
     CollectionRunDetail,
+    DeletionConfirmRequest,
+    DeletionRetryRequest,
+    DeletionTaskDetail,
+    DeletionTaskItem,
     DomainConfigResponse,
     DomainConfigTablesResponse,
     DomainConfigUpdateRequest,
@@ -649,3 +653,90 @@ def put_dim_value_config_route(
     settings: PlatformSettings = Depends(get_platform_settings),
 ):
     return write_dim_value_config(settings, workspace_id, payload.model_dump())
+
+
+# ---- 删除与知识清理（doc 8.1 §7 API） ----
+
+
+@router.get("/workspaces/{workspace_id}/deletion-preview")
+def workspace_deletion_preview(
+    workspace_id: str, settings: PlatformSettings = Depends(get_platform_settings)
+):
+    from backend.deletion.service import preview_workspace_deletion
+
+    return preview_workspace_deletion(settings, workspace_id)
+
+
+@router.delete(
+    "/workspaces/{workspace_id}", status_code=202, response_model=DeletionTaskItem
+)
+def delete_workspace_route(
+    workspace_id: str,
+    background: BackgroundTasks,
+    payload: DeletionConfirmRequest,
+    settings: PlatformSettings = Depends(get_platform_settings),
+):
+    """提交工作区级联删除任务（doc 8.1 §5.2：目录 + 下属作业逻辑删除）。"""
+    from backend.deletion.errors import DeletionInvalidRequestError
+    from backend.deletion.service import execute_task, submit_workspace_deletion
+
+    if payload.confirm_id != workspace_id:
+        raise DeletionInvalidRequestError("确认 ID 与目标工作区不一致")
+    task = submit_workspace_deletion(settings, workspace_id)
+    background.add_task(execute_task, settings, task["task_id"])
+    return task
+
+
+@router.delete("/collection-jobs/{job_id}", status_code=204)
+def delete_collection_job_route(
+    job_id: str,
+    settings: PlatformSettings = Depends(get_platform_settings),
+):
+    """采集作业逻辑删除（doc 8.1 §5.2）：单事务写 deleted_at。"""
+    from backend.jobs.job_service import delete_job
+
+    delete_job(settings, "collection", job_id)
+    return Response(status_code=204)
+
+
+@router.delete("/publish-jobs/{job_id}", status_code=204)
+def delete_publish_job_route(
+    job_id: str,
+    settings: PlatformSettings = Depends(get_platform_settings),
+):
+    """发布作业逻辑删除（doc 8.1 §5.2）：单事务写 deleted_at。"""
+    from backend.jobs.job_service import delete_job
+
+    delete_job(settings, "publish", job_id)
+    return Response(status_code=204)
+
+
+@router.get("/deletion-tasks/{task_id}", response_model=DeletionTaskDetail)
+def get_deletion_task(
+    task_id: str, settings: PlatformSettings = Depends(get_platform_settings)
+):
+    from backend.deletion.service import task_detail
+
+    return task_detail(settings, task_id)
+
+
+@router.post(
+    "/deletion-tasks/{task_id}/retry", response_model=DeletionTaskItem, status_code=202
+)
+def retry_deletion_task(
+    task_id: str,
+    background: BackgroundTasks,
+    payload: DeletionRetryRequest | None = None,
+    settings: PlatformSettings = Depends(get_platform_settings),
+):
+    """重试失败/中断任务（doc 8.1 §7.2.4：复查准入后同一任务重新入队）。"""
+    from backend.deletion.service import execute_task, retry_task
+
+    confirmation = (
+        payload.target_confirmation.model_dump()
+        if payload is not None and payload.target_confirmation is not None
+        else None
+    )
+    task = retry_task(settings, task_id, target_confirmation=confirmation)
+    background.add_task(execute_task, settings, task["task_id"])
+    return task

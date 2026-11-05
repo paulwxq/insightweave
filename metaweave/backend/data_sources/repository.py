@@ -12,7 +12,9 @@ from backend.persistence.models import (
     DbSourceInfo,
     PublishJobInfo,
     PublishRunInfo,
+    TableColumnProfile,
     TableDefinition,
+    TableDomain,
     TableProfile,
     WorkspaceInfo,
 )
@@ -145,18 +147,27 @@ def count_workspaces_by_source(session: Session, source_id: str) -> int:
     return int(session.scalar(stmt) or 0)
 
 
-def purge_source_profiles(session: Session, source_id: str) -> None:
-    """删除该源当前已发布内容行（doc 6.1 §14.1）。
+def purge_source_profiles(session: Session, source_id: str) -> dict:
+    """删除该源当前已发布内容行（doc 6.1 §14.1、doc 8.1 §6.1）。
 
-    `db_profile` 每源一行、`table_definition` 所有定义类型行一并删除；
-    `table_profile` 行删除后字段行由 ON DELETE CASCADE 级联清理。
+    依次删除 table_column_profile、table_profile、table_definition、
+    table_domain、db_profile 五张内容表；字段画像同时显式删除
+    （虽可依赖 CASCADE，显式列出便于统计核验）。返回各表删除计数。
     事务与提交由调用方决定，本模块不提交。
     """
-    session.execute(delete(DbProfile).where(DbProfile.source_id == source_id))
-    session.execute(
-        delete(TableDefinition).where(TableDefinition.source_id == source_id)
-    )
-    session.execute(delete(TableProfile).where(TableProfile.source_id == source_id))
+    deleted = {}
+    for name, model in (
+        ("table_column_profile", TableColumnProfile),
+        ("table_profile", TableProfile),
+        ("table_definition", TableDefinition),
+        ("table_domain", TableDomain),
+        ("db_profile", DbProfile),
+    ):
+        result = session.execute(
+            delete(model).where(model.source_id == source_id)
+        )
+        deleted[name] = int(getattr(result, "rowcount", 0) or 0)
+    return {"deleted": deleted}
 
 
 def remove_db_source(session: Session, source_id: str) -> bool:

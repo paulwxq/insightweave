@@ -233,15 +233,24 @@ def test_multiple_ddl_markers_rejects_as_unknown_state(monkeypatch, tmp_path):
     assert rec.generate_calls == []
 
 
-def test_ddl_read_error_wrapped_as_not_ready(monkeypatch, tmp_path):
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "DDL 文件缺失: demo.public.orders.sql",
+        "DDL 解析失败: demo.public.orders.sql: 约束语句无效",
+    ],
+)
+def test_ddl_validation_error_preserves_file_and_reason(monkeypatch, tmp_path, reason):
     rec = _install(
         monkeypatch,
         tmp_path,
-        ddl_read_error=DDLInputError("DDL 文件缺失: demo.public.orders.sql"),
+        ddl_read_error=DDLInputError(reason),
     )
-    with pytest.raises(DbStepConfigError, match="DDL 产物未就绪（DDLInputError）"):
+    with pytest.raises(DbStepConfigError) as exc_info:
         service.run_json_step(_ctx(rec))
+    assert str(exc_info.value) == f"JSON 未启动：DDL 产物校验失败：{reason}"
     assert rec.generate_calls == []
+    assert not rec.json_dir.exists()
 
 
 def test_prep_rejects_ddl_db_name_mismatch(monkeypatch, tmp_path):

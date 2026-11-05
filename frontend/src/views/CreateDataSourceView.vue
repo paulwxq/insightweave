@@ -5,6 +5,7 @@ import { getDataSource } from '../api/dataSources'
 import { ApiError } from '../api/http'
 import type { DataSourceListItem } from '../api/types'
 import DataSourceForm from '../components/DataSourceForm.vue'
+import PageBreadcrumbs from '../components/PageBreadcrumbs.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -42,20 +43,39 @@ function onSaved() {
 
 <template>
   <div :class="editing ? 'ds-detail' : 'create-page'">
-    <RouterLink v-if="editing" to="/data-sources" class="ds-back">
-      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 12H5" /><path d="m12 19-7-7 7-7" /></svg>
-      返回数据源管理
-    </RouterLink>
-    <RouterLink v-else to="/data-sources" class="back-link">← 返回数据源管理</RouterLink>
-    <header v-if="editing" class="ds-edit-header">
-      <span class="ds-kicker ds-kicker-sm">DATA SOURCE</span>
-      <h1>修改数据源连接</h1>
-      <p>数据库类型登记后不可修改；更新连接信息、Schema 与说明后保存。</p>
+    <PageBreadcrumbs
+      :segments="editing
+        ? [
+            { label: '数据源管理', to: '/data-sources' },
+            { label: initial?.display_name ?? '数据源', to: `/data-sources/${sourceId}` },
+            { label: '修改' },
+          ]
+        : [
+            { label: '数据源管理', to: '/data-sources' },
+            { label: '新建数据源连接' },
+          ]"
+    />
+    <header v-if="editing" class="ds-edit-header cds-header-row">
+      <div>
+        <span class="ds-kicker ds-kicker-sm">DATA SOURCE</span>
+        <h1>修改数据源连接</h1>
+        <p>数据库类型登记后不可修改；更新连接信息、Schema 与说明后保存。</p>
+      </div>
+      <RouterLink :to="`/data-sources/${sourceId}`" class="ds-jobs-back">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 12H5" /><path d="m12 19-7-7 7-7" /></svg>
+        返回
+      </RouterLink>
     </header>
-    <header v-else class="page-header stacked">
-      <span class="eyebrow">DATA SOURCE</span>
-      <h1>创建数据源连接</h1>
-      <p>填写连接信息，测试成功后勾选 Schema，即可登记为可用数据源。</p>
+    <header v-else class="page-header stacked cds-header-row">
+      <div>
+        <span class="eyebrow">DATA SOURCE</span>
+        <h1>创建数据源连接</h1>
+        <p>填写连接信息，测试成功后勾选 Schema，即可登记为可用数据源。</p>
+      </div>
+      <RouterLink to="/data-sources" class="ds-jobs-back">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 12H5" /><path d="m12 19-7-7 7-7" /></svg>
+        返回
+      </RouterLink>
     </header>
     <div v-if="loading" class="state-block" role="status">正在读取数据源…</div>
     <div v-else-if="loadError" class="state-block error-state" role="alert">{{ loadError }}</div>
@@ -64,7 +84,20 @@ function onSaved() {
       :mode="editing ? 'edit' : 'create'"
       :source-id="sourceId"
       :initial="initial"
+      :cancel-to="editing ? `/data-sources/${sourceId}` : '/data-sources'"
       @saved="onSaved"
     />
   </div>
 </template>
+
+<style scoped>
+/* doc 9 验收统一：返回按钮并入页头右侧，与标题块顶对齐（覆盖两种页头的纵向布局） */
+.page-header.cds-header-row,
+.ds-edit-header.cds-header-row {
+  display: flex;
+  flex-direction: row;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 22px;
+}
+</style>

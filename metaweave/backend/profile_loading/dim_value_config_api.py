@@ -322,6 +322,10 @@ def _load_recommendations(json_dir: Path) -> Dict[Tuple[str, str], Dict[str, Any
 def read_dim_value_config(settings: PlatformSettings, workspace_id) -> Dict[str, Any]:
     workspace_id = normalize_workspace_id(workspace_id)
     with platform_session(settings) as session:
+        # doc 8.1 §8.1：只读守卫（已删工作区 410；删除中仍可查看）
+        from backend.access_guards import require_workspace
+
+        require_workspace(session, workspace_id)
         workspace = _require_workspace(session, workspace_id)
         source = _require_registration(session, workspace.source_id)
 
@@ -387,7 +391,11 @@ def read_dim_value_config(settings: PlatformSettings, workspace_id) -> Dict[str,
                     "recommendation_available": rec is not None,
                 }
             )
-        return {"tables": tables, "version": version, "comma_string_tables": comma_tables}
+        return {
+            "tables": tables,
+            "version": version,
+            "comma_string_tables": comma_tables,
+        }
 
 
 # ---- 独立推荐读取（doc 7.2 §4：与被编辑 YAML 解耦的只读能力） ----
@@ -434,14 +442,15 @@ def read_dim_value_recommendations(
 # ---- 运行/版本路径：有效清单校验与配置对象构造（doc 7.2 §5.2.1/§5.3） ----
 
 
-def _in_registration_scope(info: Dict[str, Any], db_name: str, selected_schemas) -> bool:
+def _in_registration_scope(
+    info: Dict[str, Any], db_name: str, selected_schemas
+) -> bool:
     """登记边界核对（doc 7.2 §5.2.1 保留"登记边界"检查）：画像库名须等于
     登记库名且 schema 在登记范围内。目录位置不证明归属——错误或残留画像
     不得成为候选。"""
 
-    return (
-        info.get("database") == db_name
-        and info.get("schema_name") in set(selected_schemas)
+    return info.get("database") == db_name and info.get("schema_name") in set(
+        selected_schemas
     )
 
 
@@ -587,7 +596,9 @@ def list_dim_value_objects(settings: PlatformSettings, workspace_id) -> Dict[str
                 continue
             # 登记边界（与发布预检同一规则，doc 7.2 §5.2.1）：画像库名须等于
             # 登记库名且 schema 在登记范围内
-            if not _in_registration_scope(info, source.db_name, source.selected_schemas):
+            if not _in_registration_scope(
+                info, source.db_name, source.selected_schemas
+            ):
                 continue
             objects.append(
                 {
@@ -638,7 +649,9 @@ def read_dim_value_object_columns(
                 info.get("schema_name") == schema_name
                 and info.get("object_name") == object_name
                 # 登记边界（与发布预检同一规则）：越界画像不提供字段候选
-                and _in_registration_scope(info, source.db_name, source.selected_schemas)
+                and _in_registration_scope(
+                    info, source.db_name, source.selected_schemas
+                )
             ):
                 data = json.loads(path.read_text(encoding="utf-8"))
                 break
@@ -787,15 +800,22 @@ def write_dim_value_config(
     normalized = _validate_payload(payload)
 
     with platform_session(settings) as session:
+        from backend.access_guards import require_workspace
+        from backend.deletion.locks import lock_source_row, lock_workspace_row
         from backend.persistence.models import WorkspaceInfo
         from backend.workspace_files.backups import (
             EditBackupFailedError,
             backup_files_before_edit,
         )
 
-        workspace_row = session.get(WorkspaceInfo, workspace_id, with_for_update=True)
+        # doc 8.1 §5.1.1：定位父级 → 锁源 → 锁工作区，锁内复查冻结
+        probe = session.get(WorkspaceInfo, workspace_id)
+        if probe is not None:
+            lock_source_row(session, probe.source_id)
+        workspace_row = lock_workspace_row(session, workspace_id)
         if workspace_row is None:
             raise DimConfigOutputMissingError("工作区不存在")
+        require_workspace(session, workspace_id, for_write=True)
         _require_workspace(session, workspace_id)
         source = _require_registration(session, workspace_row.source_id)
 

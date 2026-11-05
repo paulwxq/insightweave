@@ -52,6 +52,81 @@ export interface DataSourceListItem {
   is_active: boolean
   last_collected_at?: string | null
   last_published_at?: string | null
+  /** doc 8.1 §7.0：未解决删除/清理任务摘要；无任务为 null */
+  deletion_task?: DeletionTaskSummary | null
+}
+
+// ---- 删除与知识清理（doc 8.1） ----
+
+export interface DeletionTaskSummary {
+  task_id: string
+  action: 'delete_source' | 'delete_workspace' | 'clear_source_knowledge'
+  status: 'pending' | 'running' | 'failed' | 'success'
+  source_id: string
+  workspace_id: string | null
+  target_id: string
+  error_message: string | null
+}
+
+export interface DeletionTaskItem extends DeletionTaskSummary {
+  created_at: string | null
+  queued_at: string | null
+  started_at: string | null
+  finished_at: string | null
+}
+
+export interface DeletionTaskDetail extends DeletionTaskItem {
+  can_retry: boolean
+  retry_reason: string | null
+  steps: Record<string, unknown>
+}
+
+export interface DeletionTargets {
+  fingerprint: string
+  milvus: { host: string; port: string; database: string; collections: string[] }
+  neo4j: { uri: string; database: string }
+}
+
+export interface DeletionTargetChange {
+  previous: DeletionTargets
+  current: DeletionTargets
+}
+
+export interface DeletionTargetConfirmation {
+  previous_fingerprint: string
+  current_fingerprint: string
+}
+
+export interface DeletionRunRef {
+  type: string
+  run_id: string
+  status: string
+  job_id: string
+  job_name: string
+  workspace_id: string
+  created_at: string | null
+  started_at: string | null
+}
+
+export interface SourceDeletionPreview {
+  source_id: string
+  workspace_count: number
+  collection_job_count: number
+  publish_job_count: number
+  blocking_runs: DeletionRunRef[]
+  targets: {
+    milvus?: { host: string; port: string; database: string; collections: string[] }
+    neo4j?: { uri: string; database: string }
+    error?: string
+  }
+}
+
+export interface WorkspaceDeletionPreview {
+  workspace_id: string
+  source_id: string
+  collection_job_count: number
+  publish_job_count: number
+  blocking_runs: DeletionRunRef[]
 }
 
 export interface DataSourceListResponse {
@@ -77,6 +152,11 @@ export interface WorkspaceItem {
   workspace_desc: string | null
   created_at: string
   updated_at: string
+  /** doc 8.1 §7.0/§3.3.1：删除任务摘要与父级有效状态 */
+  deletion_task?: DeletionTaskSummary | null
+  effective_state?: string | null
+  blocked_by?: { parent_type: string; source_id?: string; workspace_id?: string } | null
+  blocked_reason?: string | null
 }
 
 /** 跨源列表行：WorkspaceItem 基础上附每工作区采集/发布作业数量（doc 6.2 §6.1） */

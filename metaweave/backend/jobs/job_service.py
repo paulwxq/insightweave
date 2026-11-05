@@ -203,7 +203,17 @@ def create_job(
     steps, step_config = _validate_config(kind, payload)
     try:
         with platform_session(settings) as session:
-            _require_workspace(session, workspace_id)
+            workspace = _require_workspace(session, workspace_id)
+            # doc 8.1 §5.1.1：锁源 → 工作区，锁内复查后插入作业和首版
+            from backend.access_guards import require_workspace
+            from backend.deletion.locks import (
+                lock_source_row,
+                lock_workspace_row,
+            )
+
+            lock_source_row(session, workspace.source_id)
+            lock_workspace_row(session, workspace_id)
+            require_workspace(session, workspace_id, for_write=True)
             existing = list_jobs_by_workspace(spec, session, workspace_id)
             if any(row.job_name == job_name for row in existing):
                 raise JobNameExistsError("同一工作区内已存在同名作业")
@@ -234,14 +244,31 @@ def add_revision(
     job_id: str,
     payload: JobConfigPayload,
 ) -> dict:
-    """锁作业行 → max+1 → 插入新版本；旧版本不可变（A03）。"""
+    """锁源 → 工作区 → 作业 → max+1 → 插入新版本；旧版本不可变（A03、doc 8.1 §5.1.1）。"""
     spec = _SPEC_BY_KIND[kind]
     job_id = _normalize_job_id(kind, job_id)
     change_note = _validate_change_note(payload.change_note)
     steps, step_config = _validate_config(kind, payload)
     try:
         with platform_session(settings) as session:
-            job = lock_job(spec, session, job_id)
+            # doc 8.1 §5.1.1：普通查询定位父级，替换原“先锁作业”的顺序
+            from backend.workspaces.repository import get_workspace
+
+            probe = get_job(spec, session, job_id)
+            if probe is None:
+                raise JobNotFoundError("作业不存在")
+            workspace_probe = get_workspace(session, probe.workspace_id)
+            from backend.access_guards import require_job
+            from backend.deletion.locks import (
+                lock_job_row,
+                lock_source_row,
+                lock_workspace_row,
+            )
+
+            lock_source_row(session, workspace_probe.source_id)
+            lock_workspace_row(session, probe.workspace_id)
+            job = lock_job_row(session, kind, job_id)
+            require_job(session, kind, job_id, for_write=True)
             if job is None:
                 raise JobNotFoundError("作业不存在")
             revision = insert_next_revision(
@@ -334,7 +361,9 @@ def list_jobs_global_page(
             job_ids = [getattr(row, spec.id_column) for row in rows]
             latest_map = latest_revisions_for_jobs(spec, session, job_ids)
             count_map = count_runs_for_jobs(run_spec, session, job_ids)
-            names = workspace_source_names(session, sorted({row.workspace_id for row in rows}))
+            names = workspace_source_names(
+                session, sorted({row.workspace_id for row in rows})
+            )
             run_map = last_run_times(run_spec, session, job_ids)
             items = []
             for row in rows:
@@ -354,7 +383,9 @@ def list_jobs_global_page(
                         "source_id": row_source_id,
                         "source_name": source_name,
                         "last_run_at": (
-                            utc_isoformat(last_run_at) if last_run_at is not None else None
+                            utc_isoformat(last_run_at)
+                            if last_run_at is not None
+                            else None
                         ),
                     }
                 )
@@ -378,6 +409,11 @@ def get_job_detail(settings: PlatformSettings, kind: str, job_id: str) -> dict:
     try:
         with platform_session(settings) as session:
             job = _require_job(spec, session, job_id)
+            # doc 8.1 §3.3：已删除作业详情 410（历史版本/运行仍可只读访问）
+            if getattr(job, "deleted_at", None) is not None:
+                from backend.deletion.errors import ResourceDeletedError
+
+                raise ResourceDeletedError("作业已删除")
             latest = latest_revision_no(spec, session, job_id)
             revision = (
                 get_revision(spec, session, job_id, latest)
@@ -415,7 +451,24 @@ def patch_job(
         raise JobValidationError("没有可修改的字段")
     try:
         with platform_session(settings) as session:
-            job = lock_job(spec, session, job_id)
+            # doc 8.1 §5.1.1/§8.1：定位父级 → 锁源 → 工作区 → 作业 → 写守卫
+            from backend.workspaces.repository import get_workspace
+
+            probe = get_job(spec, session, job_id)
+            if probe is None:
+                raise JobNotFoundError("作业不存在")
+            workspace_probe = get_workspace(session, probe.workspace_id)
+            from backend.access_guards import require_job
+            from backend.deletion.locks import (
+                lock_job_row,
+                lock_source_row,
+                lock_workspace_row,
+            )
+
+            lock_source_row(session, workspace_probe.source_id)
+            lock_workspace_row(session, probe.workspace_id)
+            job = lock_job_row(session, kind, job_id)
+            require_job(session, kind, job_id, for_write=True)
             if job is None:
                 raise JobNotFoundError("作业不存在")
             if has_name:
@@ -465,5 +518,52 @@ def get_revision_detail(
             if row is None:
                 raise JobRevisionNotFoundError("作业版本不存在")
             return _revision_item(kind, row)
+    except SQLAlchemyError:
+        raise PlatformUnavailableError("平台库暂不可用") from None
+
+
+def delete_job(settings: PlatformSettings, kind: str, job_id: str) -> None:
+    """逻辑删除作业（doc 8.1 §3.3/§5.2）。
+
+    锁源 → 工作区 → 作业；该作业存在未结束运行则 409；历史版本与
+    运行记录保留，不做物理级联。文件与已发布知识不受影响。
+    """
+    from sqlalchemy import func
+
+    from backend.access_guards import require_job
+    from backend.deletion import repository as deletion_repo
+    from backend.deletion.errors import ResourceHasUnfinishedRunsError
+    from backend.persistence.models import DbSourceInfo, WorkspaceInfo
+
+    spec = _SPEC_BY_KIND[kind]
+    job_id = _normalize_job_id(kind, job_id)
+    try:
+        with platform_session(settings) as session:
+            probe = get_job(spec, session, job_id)
+            if probe is None:
+                raise JobNotFoundError("作业不存在")
+            workspace_probe = get_workspace(session, probe.workspace_id)
+            # §5.1.1：普通查询定位父级，随后从源开始加锁并重新校验
+            session.get(DbSourceInfo, workspace_probe.source_id, with_for_update=True)
+            session.get(WorkspaceInfo, probe.workspace_id, with_for_update=True)
+            job = lock_job(spec, session, job_id)
+            require_job(session, kind, job_id, for_write=True)
+            blocking = [
+                run
+                for run in deletion_repo.unfinished_runs_in_scope(
+                    session, workspace_id=probe.workspace_id
+                )
+                if run["job_id"] == job_id
+            ]
+            if blocking:
+                raise ResourceHasUnfinishedRunsError(
+                    "该作业存在未结束运行，不能删除",
+                    payload={"blocking_runs": blocking},
+                )
+            if job is not None and job.deleted_at is None:
+                now = deletion_repo.db_now(session)
+                job.deleted_at = now
+                job.updated_at = func.now()
+                session.commit()
     except SQLAlchemyError:
         raise PlatformUnavailableError("平台库暂不可用") from None

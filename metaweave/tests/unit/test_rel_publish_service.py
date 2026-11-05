@@ -6,6 +6,7 @@
 
 import hashlib
 import json
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -468,6 +469,8 @@ class TestPublishRelExecution:
         _install_rel_chain(monkeypatch, tmp_path)
         if FakeGenerator.gen_result is None:
             FakeGenerator.gen_result = _gen_result()
+        if FakeGenerator.gen_result is None:
+            FakeGenerator.gen_result = _gen_result()
         return session, _publish_rel_once(monkeypatch, tmp_path, session)
 
     def test_success_message_counts_and_provenance(self, monkeypatch, tmp_path):
@@ -524,6 +527,8 @@ class TestPublishRelExecution:
         rel_ready(tmp_path)
         session = install(monkeypatch, tmp_path, FakeSession(steps=("rel",)))
         _install_rel_chain(monkeypatch, tmp_path)
+        if FakeGenerator.gen_result is None:
+            FakeGenerator.gen_result = _gen_result()
         FakeGenerator.gen_result = _gen_result()
         real_read = profile_file_utils.read_regular_text
         calls = {"n": 0}
@@ -571,6 +576,8 @@ class TestPublishRelExecution:
         rel_ready(tmp_path)
         session = install(monkeypatch, tmp_path, FakeSession(steps=("rel",)))
         _install_rel_chain(monkeypatch, tmp_path)
+        if FakeGenerator.gen_result is None:
+            FakeGenerator.gen_result = _gen_result()
         monkeypatch.setattr(publish_service, "CQLGenerator", EscapingGenerator)
         run_id = _publish_rel_once(monkeypatch, tmp_path, session)
         step = run_step_row(session, run_id, "rel")
@@ -587,7 +594,6 @@ class TestPublishRelExecution:
         assert "close" in FakeLoader.calls
 
     def test_rolled_back_failure_keeps_old_graph_message(self, monkeypatch, tmp_path):
-        from metaweave.core.loaders.cql_loader import CQLScriptValidationError
 
         FakeGenerator.gen_result = _gen_result()
         FakeLoader.load_result = {
@@ -642,3 +648,271 @@ class TestPublishRelExecution:
         assert excinfo.value.failures[0]["step"] == "rel"
         assert "marker" in excinfo.value.failures[0]["reason"]
         assert session.runs == []
+
+
+# ---- 事务边界拆分（doc 8.1 §5.1.1：不跨 Neo4j 持行锁；运行中互斥） ----
+
+
+class TestRelPublishTxnSplit:
+    def _run_with_probe(self, monkeypatch, tmp_path, probe):
+        """执行 rel 发布；FakeLoader.load 开始时调用 probe（记录现场）。"""
+        rel_ready(tmp_path)
+        session = install(monkeypatch, tmp_path, FakeSession(steps=("rel",)))
+        _install_rel_chain(monkeypatch, tmp_path)
+        if FakeGenerator.gen_result is None:
+            FakeGenerator.gen_result = _gen_result()
+
+        open_sessions = {"count": 0}
+        original_ps = publish_service.platform_session
+
+        @contextmanager
+        def counting_ps(_settings):
+            open_sessions["count"] += 1
+            try:
+                with original_ps(_settings) as inner:
+                    yield inner
+            finally:
+                open_sessions["count"] -= 1
+
+        monkeypatch.setattr(publish_service, "platform_session", counting_ps)
+
+        class ProbingLoader(FakeLoader):
+            def load(self):
+                probe(open_sessions["count"], session)
+                return super().load()
+
+        monkeypatch.setattr(publish_service, "CQLLoader", ProbingLoader)
+        run_id = _publish_rel_once(monkeypatch, tmp_path, session)
+        return session, run_id
+
+    def test_no_session_open_during_neo4j_load(self, monkeypatch, tmp_path):
+        """Neo4j 调用期间准备事务已提交、会话（与源/工作区行锁）已释放。"""
+        observed = []
+        session, run_id = self._run_with_probe(
+            monkeypatch,
+            tmp_path,
+            lambda open_count, _s: observed.append(open_count),
+        )
+        assert observed == [0]
+        assert run_step_row(session, run_id, "rel").status == "success"
+
+    def test_run_stays_running_while_neo4j_in_flight(self, monkeypatch, tmp_path):
+        """外部调用期间运行保持 running（删除准入据此阻断，不靠行锁）。"""
+        observed = {}
+
+        def probe(_open_count, session):
+            run = session.runs[0]
+            observed["run_status"] = run.status
+            observed["step_status"] = run_step_row(
+                session, run.publish_run_id, "rel"
+            ).status
+
+        session, _run_id = self._run_with_probe(monkeypatch, tmp_path, probe)
+        assert observed == {"run_status": "running", "step_status": "running"}
+        # 收尾后到终态
+        assert session.runs[0].status in ("success", "partial_success")
+
+    def test_neo4j_failure_records_failed_not_running(self, monkeypatch, tmp_path):
+        rel_ready(tmp_path)
+        session = install(monkeypatch, tmp_path, FakeSession(steps=("rel",)))
+        _install_rel_chain(monkeypatch, tmp_path)
+        if FakeGenerator.gen_result is None:
+            FakeGenerator.gen_result = _gen_result()
+        FakeLoader.load_result = {
+            "success": False,
+            "_rolled_back": True,
+            "errors": [{"error_message": "图事务回滚"}],
+        }
+        run_id = _publish_rel_once(monkeypatch, tmp_path, session)
+        step = run_step_row(session, run_id, "rel")
+        assert step.status == "failed"
+        assert "已回滚" in step.message
+        assert session.runs[0].status == "failed"
+
+    def test_rel_publish_in_progress_helper_scoping(self, monkeypatch, tmp_path):
+        """运行中检查：本工作区 running→冲突；步骤终态/兄弟工作区→放行。"""
+        from backend.publishing.repository import rel_publish_in_progress
+
+        rel_ready(tmp_path)
+        session = install(monkeypatch, tmp_path, FakeSession(steps=("rel",)))
+        _install_rel_chain(monkeypatch, tmp_path)
+        if FakeGenerator.gen_result is None:
+            FakeGenerator.gen_result = _gen_result()
+        run_id = _publish_rel_once(monkeypatch, tmp_path, session)
+        # 执行已成功 → 无运行中发布
+        assert rel_publish_in_progress(session, WORKSPACE_ID) is None
+
+        # 人为构造 running 状态复查
+        session.runs[0].status = "running"
+        run_step_row(session, run_id, "rel").status = "running"
+        assert rel_publish_in_progress(session, WORKSPACE_ID) is not None
+        # 兄弟工作区不受影响
+        assert rel_publish_in_progress(session, "ws_other") is None
+        # 步骤到终态即放行（run 仍 running 不构成输入变更冲突）
+        run_step_row(session, run_id, "rel").status = "failed"
+        assert rel_publish_in_progress(session, WORKSPACE_ID) is None
+
+    def test_write_rel_config_rejected_while_publish_running(
+        self, monkeypatch, tmp_path
+    ):
+        """发布执行期保存 Rel 配置被拒（替代原工作区行锁的互斥）。"""
+        import backend.publishing.repository as publishing_repository
+        from backend.profile_loading.rel_config_api import RelPublishInProgressError
+        from backend.profile_loading.rel_config_api import write_rel_config
+
+        rel_ready(tmp_path)
+        session = install(monkeypatch, tmp_path, FakeSession(steps=("rel",)))
+        _install_rel_chain(monkeypatch, tmp_path)
+        if FakeGenerator.gen_result is None:
+            FakeGenerator.gen_result = _gen_result()
+        run_id = _publish_rel_once(monkeypatch, tmp_path, session)
+        session.runs[0].status = "running"
+        run_step_row(session, run_id, "rel").status = "running"
+
+        import backend.profile_loading.rel_config_api as rel_config_api
+
+        @contextmanager
+        def rel_config_ps(_settings):
+            yield session
+
+        monkeypatch.setattr(rel_config_api, "platform_session", rel_config_ps)
+        monkeypatch.setattr(
+            rel_config_api,
+            "load_main_config_snapshot",
+            lambda _p: MAIN_CONFIG,
+        )
+        monkeypatch.setattr(
+            publishing_repository,
+            "rel_publish_in_progress",
+            lambda _s, _ws: run_id,
+        )
+        with pytest.raises(RelPublishInProgressError):
+            write_rel_config(SETTINGS, WORKSPACE_ID, {"fingerprint": "x"})
+
+    def test_collection_rel_claim_blocked_while_publish_running(
+        self, monkeypatch, tmp_path
+    ):
+        """Rel 重新采集在发布执行期被拒；非 rel 步骤不查此互斥。"""
+        import backend.jobs.collection_run as collection_run
+        from backend.publishing.repository import rel_publish_in_progress
+
+        rel_ready(tmp_path)
+        session = install(monkeypatch, tmp_path, FakeSession(steps=("rel",)))
+        _install_rel_chain(monkeypatch, tmp_path)
+        if FakeGenerator.gen_result is None:
+            FakeGenerator.gen_result = _gen_result()
+        run_id = _publish_rel_once(monkeypatch, tmp_path, session)
+        session.runs[0].status = "running"
+        run_step_row(session, run_id, "rel").status = "running"
+
+        @contextmanager
+        def fake_ps(_settings):
+            yield session
+
+        monkeypatch.setattr(collection_run, "platform_session", fake_ps)
+        reason = collection_run._claim_step(SETTINGS, WORKSPACE_ID, "rel", UUID(int=1))
+        assert reason is not None and "Rel 发布正在执行" in reason
+        # helper 直接验证互斥源
+        assert rel_publish_in_progress(session, WORKSPACE_ID) is not None
+
+
+# ---- Rel 发布输入的双向互斥（doc 8.1 §5.1.1：json/domain/rel 输入保护） ----
+
+
+class TestRelPublishInputMutualExclusion:
+    def _publish_running(self, monkeypatch, tmp_path):
+        rel_ready(tmp_path)
+        session = install(monkeypatch, tmp_path, FakeSession(steps=("rel",)))
+        _install_rel_chain(monkeypatch, tmp_path)
+        run_id = _publish_rel_once(monkeypatch, tmp_path, session)
+        session.runs[0].status = "running"
+        run_step_row(session, run_id, "rel").status = "running"
+        return session, run_id
+
+    def test_publish_first_blocks_input_collection_claims(self, monkeypatch, tmp_path):
+        """发布先开始：json/domain/rel 采集认领被拒；非输入步骤不受影响。"""
+        import backend.jobs.collection_run as collection_run
+        import backend.publishing.repository as publishing_repository
+
+        session, run_id = self._publish_running(monkeypatch, tmp_path)
+        assert (
+            publishing_repository.rel_publish_in_progress(session, WORKSPACE_ID)
+            is not None
+        )
+
+        @contextmanager
+        def fake_ps(_settings):
+            yield session
+
+        monkeypatch.setattr(collection_run, "platform_session", fake_ps)
+        for step in ("json", "domain", "rel"):
+            reason = collection_run._claim_step(
+                SETTINGS, WORKSPACE_ID, step, UUID(int=1)
+            )
+            assert reason is not None and "Rel 发布正在执行" in reason, step
+        # 非输入步骤不做此互斥检查（认领进入后续流程，由既有步骤语义处理）
+        reason = collection_run._claim_step(SETTINGS, WORKSPACE_ID, "md", UUID(int=1))
+        assert reason is None or "Rel 发布" not in (reason or "")
+
+    def test_publish_first_blocks_domain_config_save(self, monkeypatch, tmp_path):
+        """发布先开始：write_domain_config 被拒（409 rel_publish_in_progress）。"""
+        import backend.profile_loading.domain_config_api as domain_config_api
+        from backend.publishing.repository import RelPublishInProgressError
+
+        session, _run_id = self._publish_running(monkeypatch, tmp_path)
+
+        @contextmanager
+        def fake_ps(_settings):
+            yield session
+
+        monkeypatch.setattr(domain_config_api, "platform_session", fake_ps)
+        with pytest.raises(RelPublishInProgressError):
+            domain_config_api.write_domain_config(
+                SETTINGS, WORKSPACE_ID, {"fingerprint": "x"}
+            )
+
+    def test_collection_first_blocks_rel_publish_claim(self, monkeypatch, tmp_path):
+        """采集先开始：Rel 发布认领被拒；其他发布步骤不查此互斥。"""
+        from backend.publishing.publish_service import _claim_publish_step
+        import backend.publishing.repository as publishing_repository
+
+        rel_ready(tmp_path)
+        session = install(monkeypatch, tmp_path, FakeSession(steps=("rel",)))
+
+        collection_run_id = UUID(int=7)
+
+        @contextmanager
+        def fake_ps(_settings):
+            yield session
+
+        import backend.jobs.collection_run as collection_run
+
+        monkeypatch.setattr(collection_run, "platform_session", fake_ps)
+        monkeypatch.setattr(
+            publishing_repository,
+            "collection_inputs_in_progress",
+            lambda _s, _ws: collection_run_id,
+        )
+        reason = _claim_publish_step(SETTINGS, WORKSPACE_ID, "rel", UUID(int=2))
+        assert reason is not None and "采集正在执行" in reason
+        # 非 rel 发布步骤不做反向检查
+        monkeypatch.setattr(
+            publishing_repository,
+            "collection_inputs_in_progress",
+            lambda _s, _ws: (_ for _ in ()).throw(AssertionError("不应检查")),
+        )
+        reason_db = _claim_publish_step(SETTINGS, WORKSPACE_ID, "db", UUID(int=3))
+        assert reason_db is None or "采集正在执行" not in (reason_db or "")
+
+    def test_restriction_lifts_after_terminal_and_sibling_untouched(
+        self, monkeypatch, tmp_path
+    ):
+        """结束后解除限制；兄弟工作区不受影响（运行中检查按 workspace 过滤）。"""
+        session, run_id = self._publish_running(monkeypatch, tmp_path)
+        from backend.publishing.repository import rel_publish_in_progress
+
+        assert rel_publish_in_progress(session, WORKSPACE_ID) is not None
+        assert rel_publish_in_progress(session, "ws_sibling") is None
+        # 步骤到终态即解除（run 汇总前也不构成输入变更冲突）
+        run_step_row(session, run_id, "rel").status = "success"
+        assert rel_publish_in_progress(session, WORKSPACE_ID) is None

@@ -13,15 +13,19 @@ import { getJob, listJobRuns, listRevisions } from '../api/workspaces'
 const RUNS_PAGE_SIZE = 10
 
 /**
- * @param notFoundPath 作业/版本不存在时的回退列表路径（doc 6.3 §3.2：
- *   作业详情返回对应作业列表）；缺省回数据源列表。
+ * @param notFoundTarget 作业/版本不存在时的完整回退地址（含自身 query 与
+ *   notice，doc 9 §7.6：用作业详情页的返回目标，从全局列表进来则回全局列表）；
+ *   缺省回数据源列表并附提示。
  * @param runsPageRef 运行历史页码（1 起）；缺省为第 1 页。
+ * @param workspaceIdRef 路由上的工作区 ID；提供时校验作业归属（§7.6：
+ *   作业不属于该工作区同样走"不存在"回退），工作区参数变化时重新加载校验。
  */
 export function useJobDetail(
   kind: JobKind,
   jobIdRef: () => string,
-  notFoundPath?: () => string,
+  notFoundTarget?: () => string,
   runsPageRef?: () => number,
+  workspaceIdRef?: () => string,
 ) {
   const router = useRouter()
   const job = ref<JobItem | null>(null)
@@ -58,6 +62,14 @@ export function useJobDetail(
         getJob(kind, jobId),
         listRevisions(kind, jobId),
       ])
+      // §7.6：作业不属于路由工作区时按"不存在"回退，与执行页同规则
+      const expectedWorkspace = workspaceIdRef ? workspaceIdRef() : ''
+      if (expectedWorkspace && jobRow.workspace_id !== expectedWorkspace) {
+        await router.replace(
+          notFoundTarget ? notFoundTarget() : '/data-sources?notice=not_found',
+        )
+        return
+      }
       job.value = jobRow
       revisions.value = revisionRows.items
       selectedRevisionNo.value = jobRow.latest_revision_no
@@ -66,10 +78,9 @@ export function useJobDetail(
         cause instanceof ApiError &&
         (cause.code === 'not_found' || cause.code === 'invalid_request')
       ) {
-        await router.replace({
-          path: notFoundPath ? notFoundPath() : '/data-sources',
-          query: { notice: 'not_found' },
-        })
+        await router.replace(
+          notFoundTarget ? notFoundTarget() : '/data-sources?notice=not_found',
+        )
         return
       }
       error.value = cause instanceof Error ? cause.message : '作业信息加载失败。'
@@ -99,10 +110,14 @@ export function useJobDetail(
     selectedRevisionNo.value = revisionNo
   }
 
-  watch(jobIdRef, () => {
-    void loadJob()
-    void loadRuns()
-  }, { immediate: true })
+  watch(
+    () => [jobIdRef(), workspaceIdRef ? workspaceIdRef() : ''],
+    () => {
+      void loadJob()
+      void loadRuns()
+    },
+    { immediate: true },
+  )
   watch(runsPage, () => void loadRuns())
 
   return {

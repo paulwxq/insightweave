@@ -106,7 +106,10 @@ class TestListObjects:
     def test_source_missing_raises_404_domain(self, monkeypatch):
 
         install(monkeypatch, FakeCatalogSession(source_exists=False))
-        with pytest.raises(SourceNotFoundError):
+        from backend.deletion.errors import ResourceNotFoundError
+
+        with pytest.raises(ResourceNotFoundError):
+            # doc 8.1 §7.3：只读守卫先于领域错误（404 resource_not_found）
             object_catalog.list_objects(SETTINGS, SOURCE_ID, page=1, page_size=50)
 
     def test_no_rows_is_not_published(self, monkeypatch):

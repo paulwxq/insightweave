@@ -29,18 +29,20 @@ CREATE TABLE public.db_source_info (
     display_name text NOT NULL,
     description text,
     db_type text NOT NULL,
-    host text NOT NULL,
-    port integer NOT NULL,
-    db_name text NOT NULL,
-    username text NOT NULL,
-    password_ciphertext text NOT NULL,
+    host text,
+    port integer,
+    db_name text,
+    username text,
+    password_ciphertext text,
     sslmode text,
     db_version text,
-    selected_schemas text[] NOT NULL,
+    selected_schemas text[],
     is_active boolean NOT NULL DEFAULT true,
     created_by_user_id uuid,
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now(),
+    deleted_at timestamptz,
+    deletion_state text NOT NULL DEFAULT 'active',
 
     CONSTRAINT db_source_info_id_format
         CHECK (source_id ~ '^db_src_[1-9][0-9]*$'),
@@ -67,7 +69,33 @@ CREATE TABLE public.db_source_info (
     CONSTRAINT db_source_info_schemas_nonempty
         CHECK (cardinality(selected_schemas) > 0),
     CONSTRAINT db_source_info_schemas_no_null
-        CHECK (array_position(selected_schemas, NULL) IS NULL)
+        CHECK (array_position(selected_schemas, NULL) IS NULL),
+    CONSTRAINT db_source_info_deletion_state_check
+        CHECK (deletion_state IN ('active', 'deleting', 'delete_failed', 'deleted')),
+    CONSTRAINT db_source_info_deletion_state_time_check
+        CHECK (
+            (deleted_at IS NULL AND deletion_state IN (
+                'active', 'deleting', 'delete_failed'
+            ))
+            OR (deleted_at IS NOT NULL AND deletion_state = 'deleted')
+        ),
+    CONSTRAINT db_source_info_connection_presence_check
+        CHECK (
+            (deleted_at IS NULL
+                AND host IS NOT NULL AND port IS NOT NULL
+                AND db_name IS NOT NULL AND username IS NOT NULL
+                AND password_ciphertext IS NOT NULL
+                AND selected_schemas IS NOT NULL)
+            OR (deleted_at IS NOT NULL
+                AND host IS NULL AND port IS NULL
+                AND db_name IS NULL AND username IS NULL
+                AND password_ciphertext IS NULL
+                AND selected_schemas IS NULL
+                AND sslmode IS NULL AND db_version IS NULL
+                AND description IS NULL
+                AND is_active = false
+                AND deletion_state = 'deleted')
+        )
 );
 
 ALTER SEQUENCE public.db_source_info_id_seq
@@ -112,6 +140,10 @@ COMMENT ON COLUMN public.db_source_info.updated_at IS
     '数据源信息或启停状态最后修改时间；插入时默认 now()，后续由应用显式更新';
 COMMENT ON INDEX public.db_source_info_connection_idx IS
     '连接四元组的非唯一查重索引；支持提示重复登记，不禁止确认后登记相同连接';
+COMMENT ON COLUMN public.db_source_info.deleted_at IS
+    '逻辑删除完成时间（doc 8.1 §3.3）；有效源为 NULL';
+COMMENT ON COLUMN public.db_source_info.deletion_state IS
+    '删除流程状态 active/deleting/delete_failed/deleted；与 deleted_at 由条件 CHECK 保持一致';
 
 -- ---------------------------------------------------------------------
 -- 工作区（doc 6.1 §1）
@@ -126,6 +158,8 @@ CREATE TABLE public.workspace_info (
     created_by_user_id uuid,
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now(),
+    deleted_at timestamptz,
+    deletion_state text NOT NULL DEFAULT 'active',
 
     CONSTRAINT workspace_info_id_format
         CHECK (workspace_id ~ '^ws_[1-9][0-9]*$'),
@@ -133,9 +167,20 @@ CREATE TABLE public.workspace_info (
         CHECK (length(btrim(source_id)) > 0),
     CONSTRAINT workspace_info_name_nonblank
         CHECK (length(btrim(workspace_name)) > 0),
-    CONSTRAINT workspace_info_source_name_key
-        UNIQUE (source_id, workspace_name)
+    CONSTRAINT workspace_info_deletion_state_check
+        CHECK (deletion_state IN ('active', 'deleting', 'delete_failed', 'deleted')),
+    CONSTRAINT workspace_info_deletion_state_time_check
+        CHECK (
+            (deleted_at IS NULL AND deletion_state IN (
+                'active', 'deleting', 'delete_failed'
+            ))
+            OR (deleted_at IS NOT NULL AND deletion_state = 'deleted')
+        )
 );
+
+CREATE UNIQUE INDEX workspace_info_active_name_idx
+    ON public.workspace_info (source_id, workspace_name)
+    WHERE deleted_at IS NULL;
 
 ALTER SEQUENCE public.workspace_info_id_seq
     OWNED BY public.workspace_info.workspace_id;
@@ -170,14 +215,17 @@ CREATE TABLE public.collection_job_info (
     created_by_user_id uuid,
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now(),
+    deleted_at timestamptz,
 
     CONSTRAINT collection_job_info_id_format
         CHECK (collection_job_id ~ '^coll_job_[1-9][0-9]*$'),
     CONSTRAINT collection_job_info_name_nonblank
-        CHECK (length(btrim(job_name)) > 0),
-    CONSTRAINT collection_job_info_workspace_name_key
-        UNIQUE (workspace_id, job_name)
+        CHECK (length(btrim(job_name)) > 0)
 );
+
+CREATE UNIQUE INDEX collection_job_info_active_name_idx
+    ON public.collection_job_info (workspace_id, job_name)
+    WHERE deleted_at IS NULL;
 
 ALTER SEQUENCE public.collection_job_info_id_seq
     OWNED BY public.collection_job_info.collection_job_id;
@@ -371,14 +419,17 @@ CREATE TABLE public.publish_job_info (
     created_by_user_id uuid,
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now(),
+    deleted_at timestamptz,
 
     CONSTRAINT publish_job_info_id_format
         CHECK (publish_job_id ~ '^pub_job_[1-9][0-9]*$'),
     CONSTRAINT publish_job_info_name_nonblank
-        CHECK (length(btrim(job_name)) > 0),
-    CONSTRAINT publish_job_info_workspace_name_key
-        UNIQUE (workspace_id, job_name)
+        CHECK (length(btrim(job_name)) > 0)
 );
+
+CREATE UNIQUE INDEX publish_job_info_active_name_idx
+    ON public.publish_job_info (workspace_id, job_name)
+    WHERE deleted_at IS NULL;
 
 ALTER SEQUENCE public.publish_job_info_id_seq
     OWNED BY public.publish_job_info.publish_job_id;
@@ -934,6 +985,54 @@ COMMENT ON COLUMN public.table_domain.publish_run_id IS
     '最后成功写入本行的发布运行 UUID，实际 YAML 采集来源见该发布步骤 input_manifest';
 COMMENT ON COLUMN public.table_domain.loaded_at IS
     '本行当前领域归属的发布写入时间';
+
+-- ---------------------------------------------------------------------
+-- 删除与知识清理任务（doc 8.1 §7）
+-- ---------------------------------------------------------------------
+
+CREATE TABLE public.resource_deletion_task (
+    task_id uuid PRIMARY KEY,
+    action text NOT NULL,
+    target_id text NOT NULL,
+    source_id text NOT NULL,
+    workspace_id text,
+    status text NOT NULL DEFAULT 'pending',
+    step_results jsonb,
+    error_message text,
+    created_at timestamptz NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    queued_at timestamptz NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    started_at timestamptz,
+    finished_at timestamptz,
+    requested_by_user_id uuid,
+
+    CONSTRAINT resource_deletion_task_action_check
+        CHECK (action IN ('delete_source', 'delete_workspace', 'clear_source_knowledge')),
+    CONSTRAINT resource_deletion_task_status_check
+        CHECK (status IN ('pending', 'running', 'failed', 'success')),
+    CONSTRAINT resource_deletion_task_workspace_required_check
+        CHECK (action != 'delete_workspace' OR workspace_id IS NOT NULL)
+);
+
+CREATE UNIQUE INDEX resource_deletion_task_one_active_source_idx
+    ON public.resource_deletion_task (source_id)
+    WHERE status IN ('pending', 'running');
+
+COMMENT ON TABLE public.resource_deletion_task IS
+    '数据源/工作区删除与源级知识清理任务；同源 pending/running 至多一条（部分唯一索引）';
+COMMENT ON COLUMN public.resource_deletion_task.task_id IS
+    '任务 UUID，创建后不变，重试沿用同一任务';
+COMMENT ON COLUMN public.resource_deletion_task.action IS
+    'delete_source / delete_workspace / clear_source_knowledge';
+COMMENT ON COLUMN public.resource_deletion_task.target_id IS
+    '目标对象 ID：源删除与知识清理为 source_id，工作区删除为 workspace_id';
+COMMENT ON COLUMN public.resource_deletion_task.workspace_id IS
+    'delete_workspace 任务的目标工作区 ID；其余 action 为 NULL';
+COMMENT ON COLUMN public.resource_deletion_task.status IS
+    'pending/running/failed/success；重启后遗留任务由启动扫描标 failed 等待人工重试';
+COMMENT ON COLUMN public.resource_deletion_task.step_results IS
+    '各存储/目录清理步骤的状态、目标配置标识、计数与错误；不保存密码';
+COMMENT ON COLUMN public.resource_deletion_task.queued_at IS
+    '最近一次入队时间（数据库默认值，重试时显式刷新）；15 秒认领保护期基准';
 
 -- ---------------------------------------------------------------------
 -- 视图：各工作区各步骤最后一次成功发布（doc 6.1 §12）

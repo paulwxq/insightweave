@@ -13,7 +13,9 @@ import { useRoute, useRouter } from 'vue-router'
 import { listDataSources } from '../api/dataSources'
 import { displayDateMs } from '../api/format'
 import { ApiError } from '../api/http'
+import { buildFrom, resolveBack, withFrom } from '../navigation/from'
 import type { DataSourceListItem, WorkspacePageResponse } from '../api/types'
+import DeleteResourceDialog from '../components/DeleteResourceDialog.vue'
 import { listWorkspaces } from '../api/workspaces'
 import EmptyState from '../components/EmptyState.vue'
 
@@ -64,6 +66,28 @@ async function loadSources() {
   } finally {
     sourcesLoading.value = false
   }
+}
+
+const deleteTarget = ref<{ workspace_id: string; workspace_name: string } | null>(null)
+// doc 8.1 §7.0/§7.3：行级 deletion_task 找回——工作区删除本地恢复；
+// 源级任务跳转源详情处理，不在工作区弹窗里重试父级任务
+const resumeTarget = ref<{ workspace_id: string; task_id: string } | null>(null)
+
+function openRowTask(
+  item: { workspace_id: string } & Record<string, unknown>,
+  task: { task_id: string; action: string; source_id: string },
+) {
+  if (task.action === 'delete_workspace') {
+    resumeTarget.value = { workspace_id: item.workspace_id, task_id: task.task_id }
+    return
+  }
+  void router.push(`/data-sources/${task.source_id}`)
+}
+
+function rowTaskLabel(task: { action: string }): string {
+  if (task.action === 'delete_workspace') return '查看工作区删除进度'
+  if (task.action === 'delete_source') return '前往数据源处理删除任务'
+  return '前往数据源处理知识清理任务'
 }
 
 async function load() {
@@ -160,11 +184,34 @@ function writeQuery(next: { source_id?: string; db_type?: string; page?: number 
   if (nextType) query.db_type = nextType
   if (nextSource) query.source_id = nextSource
   if (nextPage > 1) query.page = String(nextPage)
+  // doc 9 §7.5：页内改筛选不得丢弃地址上的来源
+  const rawFrom = route.query.from
+  if (typeof rawFrom === 'string' && rawFrom) query.from = rawFrom
   void router.replace({ path: '/workspaces', query })
 }
 
 function applySearch() {
   writeQuery({ source_id: nameDraft.value, db_type: typeDraft.value, page: 1 })
+}
+
+// ---- doc 9 §7：返回与来源 ----
+
+function queryFrom(): string | null {
+  const raw = route.query.from
+  return typeof raw === 'string' ? raw : null
+}
+
+/** §7.4：仅认数据源来源，否则无返回按钮 */
+const backSpec = computed(() => resolveBack('workspaces-list', queryFrom(), {}))
+
+/** §7.3 写入点：以当前列表地址（含自身 from、剔除 notice）作为来源 */
+function listFrom(): string {
+  return buildFrom(route.fullPath)
+}
+
+function createWorkspaceTo(): string {
+  const base = sourceId.value ? `/workspaces/new?source_id=${sourceId.value}` : '/workspaces/new'
+  return withFrom(base, listFrom())
 }
 
 function prevPage() {
@@ -199,13 +246,13 @@ void loadSources()
         </p>
       </div>
       <div class="ws-list-actions">
-        <RouterLink class="ds-jobs-back" to="/data-sources">
+        <RouterLink v-if="backSpec.target" class="ds-jobs-back" :to="backSpec.target">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 12H5" /><path d="m12 19-7-7 7-7" /></svg>
-          返回
+          {{ backSpec.label }}
         </RouterLink>
         <RouterLink
           class="ds-jobs-create"
-          :to="sourceId ? `/workspaces/new?source_id=${sourceId}` : '/workspaces/new'"
+          :to="createWorkspaceTo()"
         >
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14" /><path d="M5 12h14" /></svg>
           新建工作区
@@ -272,7 +319,7 @@ void loadSources()
           <template #action>
             <RouterLink
               class="button button-primary"
-              :to="sourceId ? `/workspaces/new?source_id=${sourceId}` : '/workspaces/new'"
+              :to="createWorkspaceTo()"
             >
               新建工作区
             </RouterLink>
@@ -302,8 +349,17 @@ void loadSources()
               <span class="ws-table-count" role="cell">{{ item.collection_job_count }}</span>
               <span class="ws-table-count" role="cell">{{ item.publish_job_count }}</span>
               <span class="ws-table-time" role="cell">{{ displayDateMs(item.created_at) }}</span>
-              <span role="cell">
-                <RouterLink class="ds-manage" :to="`/workspaces/${item.workspace_id}`">
+              <span class="ws-table-actions" role="cell">
+                <button
+                  v-if="item.deletion_task"
+                  type="button"
+                  class="ds-danger"
+                  @click="openRowTask(item, item.deletion_task)"
+                >
+                  {{ rowTaskLabel(item.deletion_task) }}
+                </button>
+                <button type="button" class="ds-danger" @click="deleteTarget = item">删除</button>
+                <RouterLink class="ds-manage" :to="withFrom(`/workspaces/${item.workspace_id}`, listFrom())">
                   进入工作区
                   <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14" /><path d="m12 5 7 7-7 7" /></svg>
                 </RouterLink>
@@ -332,6 +388,23 @@ void loadSources()
       </template>
     </section>
   </div>
+  <DeleteResourceDialog
+    v-if="deleteTarget"
+    kind="workspace"
+    :target-id="deleteTarget.workspace_id"
+    :display-name="deleteTarget.workspace_name"
+    @cancel="deleteTarget = null"
+    @done="deleteTarget = null; load()"
+  />
+  <DeleteResourceDialog
+    v-if="resumeTarget"
+    kind="workspace"
+    :target-id="resumeTarget.workspace_id"
+    :display-name="resumeTarget.workspace_id"
+    :resume-task-id="resumeTarget.task_id"
+    @cancel="resumeTarget = null"
+    @done="resumeTarget = null; load()"
+  />
 </template>
 
 <style scoped>
@@ -341,11 +414,11 @@ void loadSources()
   gap: 18px;
 }
 .ws-list-page .ds-jobs-header {
-  align-items: center;
+  align-items: flex-start;
 }
 .ws-list-actions {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 10px;
 }
 .ws-filter {
@@ -398,13 +471,14 @@ void loadSources()
 /*
  * 尾部四列（采集数、发布数、创建时间、操作）固定宽度：每行是独立 grid，
  * auto 列会随本行内容伸缩导致表头与数据行错位；固定后各行轨道一致。
- * 前三列按 fr 比例分配剩余宽度，说明列（长文本）占大头。
+ * 前三列按 fr 比例分配剩余宽度，说明列（长文本）占大头；
+ * 两计数列仅容纳列头文字，操作列按「删除 + 进入工作区」两按钮同行预留。
  */
 .ws-table-row {
   display: grid;
   grid-template-columns:
     minmax(150px, 1fr) minmax(130px, 1fr) minmax(160px, 1.8fr)
-    76px 76px 148px 88px;
+    76px 76px 148px 158px;
   align-items: center;
   gap: 14px;
   padding: 11px 14px;
@@ -459,6 +533,14 @@ void loadSources()
   color: #66788f;
   font-size: 11px;
   white-space: nowrap;
+}
+.ws-table-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
 }
 .ws-table-row .ds-manage {
   display: inline-flex;

@@ -33,13 +33,16 @@ const workspacesActive = computed(
 const collectionJobsActive = computed(() => route.path === '/collection-jobs')
 const publishJobsActive = computed(() => route.path === '/publish-jobs')
 
-// 工作区管理子菜单可折叠：进入全局作业页（含刷新/深链）默认展开，
-// 其余入口默认收起；箭头向下 = 收起，向上 = 展开
-const workspacesExpanded = ref(
-  collectionJobsActive.value || publishJobsActive.value,
+// doc 9 §4.3：展开状态拆成两个。强制展开由当前路由实时计算（不存储、不可收起），
+// 手动展开是组件内布尔值（初始收起），实际展开 = 强制 或 手动。
+const onGlobalJobsPage = computed(
+  () => route.path === '/collection-jobs' || route.path === '/publish-jobs',
 )
+const manualExpanded = ref(false)
+const menuOpen = computed(() => onGlobalJobsPage.value || manualExpanded.value)
 function toggleWorkspacesMenu() {
-  workspacesExpanded.value = !workspacesExpanded.value
+  if (onGlobalJobsPage.value) return // 强制展开时点击箭头不改状态、不跳转（§4.3）
+  manualExpanded.value = !manualExpanded.value
 }
 const queryActive = computed(
   () => route.path === '/query' || route.path.startsWith('/query/'),
@@ -89,32 +92,32 @@ function openSession(sessionId: string) {
         </a>
       </RouterLink>
       <RouterLink to="/workspaces" custom v-slot="{ href, navigate }">
-        <a :href="href" :class="{ active: workspacesActive }" @click="(event) => { navigate(event); workspacesExpanded = true }">
-          <span class="nav-icon" aria-hidden="true">
-            <svg viewBox="0 0 24 24"><rect width="18" height="18" x="3" y="3" rx="2" /><path d="M3 9h18" /><path d="M9 21V9" /></svg>
-          </span>
-          工作区管理
-          <span
+        <div class="nav-row" :class="{ active: workspacesActive }">
+          <a :href="href" @click="(event) => { navigate(event); manualExpanded = true }">
+            <span class="nav-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24"><rect width="18" height="18" x="3" y="3" rx="2" /><path d="M3 9h18" /><path d="M9 21V9" /></svg>
+            </span>
+            工作区管理
+          </a>
+          <button
+            type="button"
             class="nav-chevron"
-            :class="{ open: workspacesExpanded }"
-            role="button"
-            tabindex="0"
-            :aria-expanded="workspacesExpanded"
+            :class="{ open: menuOpen }"
+            :aria-expanded="menuOpen"
+            :aria-disabled="onGlobalJobsPage || undefined"
             aria-label="展开或收起工作区管理子菜单"
-            @click.stop.prevent="toggleWorkspacesMenu"
-            @keydown.enter.prevent="toggleWorkspacesMenu"
-            @keydown.space.prevent="toggleWorkspacesMenu"
+            @click="toggleWorkspacesMenu"
           >
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6" /></svg>
-          </span>
-        </a>
+          </button>
+        </div>
       </RouterLink>
-      <template v-if="workspacesExpanded">
+      <template v-if="menuOpen">
         <RouterLink to="/collection-jobs" class="nav-sub" :class="{ active: collectionJobsActive }">
-          数据采集作业
+          全部采集作业
         </RouterLink>
         <RouterLink to="/publish-jobs" class="nav-sub" :class="{ active: publishJobsActive }">
-          数据发布作业
+          全部发布作业
         </RouterLink>
       </template>
       <span class="nav-disabled">
@@ -156,13 +159,46 @@ function openSession(sessionId: string) {
   box-shadow: none;
 }
 
+/* doc 9 §4.3 行容器承担选中背景与悬停样式；箭头是相邻 <button>，不嵌在 <a> 内 */
+.nav-row {
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding-right: 8px;
+  border: 1px solid transparent;
+  border-radius: 11px;
+}
+
+.nav-row.active {
+  background: #eef3f9;
+  border-color: #d9e3ef;
+}
+
+/* 行容器接管选中态后，文字/图标强调也需恢复（与其他入口选中视觉一致） */
+.nav-row.active a {
+  color: #17293f;
+  font-weight: 700;
+}
+
+.nav-row.active .nav-icon {
+  color: #2e7cd6;
+}
+
+.nav-row a {
+  flex: 1;
+  min-width: 0;
+}
+
 /* 工作区管理子菜单折叠箭头：向下 = 收起，向上（旋转 180°）= 展开 */
 .nav-chevron {
-  margin-left: auto;
   width: 22px;
   height: 22px;
+  padding: 0;
   display: grid;
   place-items: center;
+  border: 0;
+  background: transparent;
   border-radius: 6px;
   color: #66788f;
   cursor: pointer;
@@ -172,6 +208,16 @@ function openSession(sessionId: string) {
 .nav-chevron:hover {
   background: #e8f1ff;
   color: #2e7cd6;
+}
+
+.nav-chevron[aria-disabled='true'] {
+  color: #9aa8bb;
+  cursor: not-allowed;
+}
+
+.nav-chevron[aria-disabled='true']:hover {
+  background: transparent;
+  color: #9aa8bb;
 }
 
 .nav-chevron:focus-visible {
@@ -192,6 +238,13 @@ function openSession(sessionId: string) {
 
 .nav-chevron.open svg {
   transform: rotate(180deg);
+}
+
+@media (max-width: 800px) {
+  /* 移动端侧边栏收窄为图标态，隐藏折叠箭头（沿用既有行为） */
+  .nav-chevron {
+    display: none;
+  }
 }
 
 .sidebar-lock {

@@ -18,7 +18,6 @@ from backend.api.main import create_app
 from backend.assets.catalog import assemble_asset_profile, get_asset_profile
 from backend.data_sources.registration_service import (
     PlatformUnavailableError,
-    SourceNotFoundError,
 )
 from backend.persistence.platform_db import PlatformSettings
 
@@ -179,20 +178,26 @@ def test_missing_source_is_404(monkeypatch):
         def get(self, _model, _key):
             return None
 
+        def scalars(self, _statement):
+            return iter([])
+
     @contextmanager
     def fake_session(_settings):
         yield Session()
 
     monkeypatch.setattr("backend.assets.catalog.platform_session", fake_session)
     settings = PlatformSettings(host="h", port=1, name="n", user="u", password="p")
-    with pytest.raises(SourceNotFoundError):
+    from backend.deletion.errors import ResourceNotFoundError
+
+    with pytest.raises(ResourceNotFoundError):
+        # doc 8.1 §7.3：只读守卫先于领域错误（404 resource_not_found）
         get_asset_profile(settings, SOURCE_ID)
     with TestClient(
         create_app(settings, cors_origins=[]), raise_server_exceptions=False
     ) as client:
         response = client.get(f"/api/data-assets/{SOURCE_ID}/profile")
     assert response.status_code == 404
-    assert response.json()["code"] == "not_found"
+    assert response.json()["code"] == "resource_not_found"
 
 
 def test_database_error_is_platform_unavailable(monkeypatch):
@@ -214,3 +219,55 @@ def test_database_error_is_platform_unavailable(monkeypatch):
         response = client.get(f"/api/data-assets/{SOURCE_ID}/profile")
     assert response.status_code == 503
     assert response.json()["code"] == "platform_unavailable"
+
+
+def _guard_session(source_row):
+    class Session:
+        def __init__(self):
+            self.source = source_row
+
+        def get(self, model, key):
+            if model.__name__ == "DbSourceInfo" and key == SOURCE_ID:
+                return self.source
+            return None
+
+        def scalars(self, _statement):
+            return iter([])
+
+    return Session()
+
+
+def test_deleted_source_is_410_not_not_published(monkeypatch):
+    """doc 8.1 §7.3：已删源不得误显示为“尚未发布”。"""
+    from datetime import datetime, timezone
+
+    deleted = _source(
+        deleted_at=datetime(2026, 10, 29, tzinfo=timezone.utc),
+        deletion_state="deleted",
+    )
+
+    @contextmanager
+    def fake_session(_settings):
+        yield _guard_session(deleted)
+
+    monkeypatch.setattr("backend.assets.catalog.platform_session", fake_session)
+    settings = PlatformSettings(host="h", port=1, name="n", user="u", password="p")
+    from backend.deletion.errors import ResourceDeletedError
+
+    with pytest.raises(ResourceDeletedError):
+        get_asset_profile(settings, SOURCE_ID)
+
+
+@pytest.mark.parametrize("state", ["deleting", "delete_failed"])
+def test_deleting_states_still_view_remaining_profile(monkeypatch, state):
+    """删除中/删除失败：仍允许查看尚存画像（无画像行 → not_published）。"""
+    source_row = _source(deleted_at=None, deletion_state=state)
+
+    @contextmanager
+    def fake_session(_settings):
+        yield _guard_session(source_row)
+
+    monkeypatch.setattr("backend.assets.catalog.platform_session", fake_session)
+    settings = PlatformSettings(host="h", port=1, name="n", user="u", password="p")
+    result = get_asset_profile(settings, SOURCE_ID)
+    assert result["state"] == "not_published"

@@ -310,6 +310,10 @@ class FakeSession:
             return None
         sql_text = str(statement)
         if getattr(statement, "_setup_joins", None):
+            if "collection_run_info" in sql_text:
+                # doc 8.1 §5.1.1：Rel 发布认领的反向检查（采集输入运行中）；
+                # 本假件不建模采集运行 → 无冲突
+                return SimpleNamespace(scalar_one_or_none=lambda: None)
             # _claim_publish_step 冲突查询：同名 running 步骤被其他运行占用
             params = statement.compile().params
             step_name = params.get("step_name_1")
@@ -710,7 +714,7 @@ class TestCreatePublishRun:
         from backend.publishing.publish_service import PublishRunError
 
         make_ready_db(tmp_path)
-        session = install(monkeypatch, tmp_path)
+        install(monkeypatch, tmp_path)
         with pytest.raises(PublishRunError, match="发布作业不存在"):
             create_publish_run(
                 SETTINGS,
@@ -781,6 +785,27 @@ class TestCreatePublishRun:
 
 
 class TestExecutePublishRun:
+    def test_single_db_step_finalizes_run_and_step(self, monkeypatch, tmp_path):
+        """仅选 db 时也必须完整推进整体运行，不能遗留 pending + success。"""
+        make_ready_db(tmp_path)
+        session = install(monkeypatch, tmp_path)
+        result = create_publish_run(
+            SETTINGS,
+            PUBLISH_JOB_ID,
+            revision_no=1,
+            mode="custom",
+            steps=["db"],
+            step_config=None,
+        )
+        run_id = UUID(result["publish_run_id"])
+        execute_publish_run(SETTINGS, run_id)
+        run = session.runs[0]
+        step = run_step_row(session, run_id, "db")
+        assert run.status == step.status == "success"
+        assert run.started_at is not None and run.finished_at is not None
+        assert step.started_at is not None and step.finished_at is not None
+        assert session.profiles[0].publish_run_id == run_id
+
     def test_all_success_finalizes_success(self, monkeypatch, tmp_path):
         from tests.unit.test_ddl_publish import DEFAULT_FILES, ddl_ready
 

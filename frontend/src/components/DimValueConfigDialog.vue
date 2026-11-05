@@ -1,8 +1,8 @@
 <script setup lang="ts">
 // doc 7.2 §3.1.1/§4：dim_value 草稿编辑弹窗（运行草稿 / 版本草稿两种用途）。
 // 仅从 props 初始化并深拷贝为独立编辑状态；确认只回传父组件，不调用
-// 配置 YAML GET/PUT。候选表与字段取自当前工作区 JSON 画像；推荐经独立
-// 只读接口按全部 props 表统一读取（0/1 校验口径不变）。人工可为每表
+// 配置 YAML GET/PUT。新建页传入配置接口同次返回的推荐；其他场景及人工新增
+// 表的推荐经独立只读接口读取（0/1 校验口径不变）。人工可为每表
 // 配置一个或多个字段（数组形态），不限制最多一个。
 import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
 
@@ -14,6 +14,7 @@ import {
 import type {
   DimValueColumn,
   DimValueObject,
+  DimValueRecommendationItem,
   DimValueTableParam,
 } from '../api/types'
 
@@ -33,6 +34,8 @@ const props = defineProps<{
   dbName: string
   /** 当前草稿或引用版本默认配置（数组形态）；弹窗深拷贝为独立编辑状态 */
   initialTables: DimValueTableParam[]
+  /** 与初始配置同次读取的推荐；缺省时沿用独立推荐接口。 */
+  initialRecommendations?: DimValueRecommendationItem[]
   /** run = 本次运行草稿；version = 作业版本草稿 */
   purpose: 'run' | 'version'
 }>()
@@ -80,7 +83,7 @@ function recText(row: Row): string {
 
 function recConf(row: Row): string {
   if (row.recState !== 'loaded' || !row.recColumns[0]) return ''
-  return row.recConfidence === null ? '· —' : `· ${row.recConfidence.toFixed(2)}`
+  return row.recConfidence === null ? '—' : row.recConfidence.toFixed(2)
 }
 
 function recTitle(row: Row): string | undefined {
@@ -133,32 +136,39 @@ function typeKind(objectTypeName: string) {
   return 'table'
 }
 
-/** 打开时对 props 的全部表统一读取推荐；失败只局部降级（doc 7.2 §4）。 */
+/** 优先使用配置响应中的推荐；只补读响应之外的人工新增表，不覆盖已带入的推荐。 */
 async function loadRecommendations() {
   recError.value = ''
   if (!rows.value.length) return
-  try {
-    const resp = await getDimValueRecommendations(props.workspaceId)
-    const byKey = new Map(resp.tables.map((t) => [keyOf(t), t]))
+  const byKey = new Map((props.initialRecommendations ?? []).map((t) => [keyOf(t), t]))
+  function applyRecommendations() {
     for (const row of rows.value) {
       if (row.recState === 'unloaded') continue // 会话内新增未应用的行
       const rec = byKey.get(keyOf(row))
-      if (!rec) {
+      if (!rec || !rec.recommendation_available) {
         row.recState = 'unavailable'
         row.recColumns = []
         row.recConfidence = null
       } else {
         row.recState = 'loaded'
-        row.recColumns = rec.dimension_value_columns
+        row.recColumns = [...rec.dimension_value_columns]
         row.recConfidence = rec.dimension_value_confidence
       }
     }
-  } catch {
-    recError.value = '推荐信息读取失败，仅影响推荐列展示'
-    for (const row of rows.value) {
-      if (row.recState !== 'unloaded') row.recState = 'unavailable'
+  }
+  // 已带入的推荐立即展示，不等待人工新增表的补读请求。
+  if (props.initialRecommendations !== undefined) applyRecommendations()
+  if (props.initialRecommendations === undefined || rows.value.some((row) => !byKey.has(keyOf(row)))) {
+    try {
+      const resp = await getDimValueRecommendations(props.workspaceId)
+      for (const rec of resp.tables) {
+        if (!byKey.has(keyOf(rec))) byKey.set(keyOf(rec), rec)
+      }
+    } catch {
+      recError.value = '部分推荐信息读取失败，仅影响推荐列展示'
     }
   }
+  applyRecommendations()
 }
 
 async function loadColumns(row: { schema_name: string; object_name: string }) {
@@ -288,7 +298,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
 </script>
 
 <template>
-  <div class="dialog-backdrop" @click.self="close">
+  <div class="dialog-backdrop dimcfg-backdrop" @click.self="close">
     <div class="dialog-panel dimcfg" role="dialog" aria-modal="true" aria-labelledby="dimcfg-title">
       <header class="dimcfg-head">
         <div>
@@ -336,7 +346,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
                 @click="selectRow(row)"
               >
                 <div class="dimcfg-object">
-                  <strong>{{ keyOf(row) }}</strong>
+                  <strong :title="keyOf(row)">{{ keyOf(row) }}</strong>
                   <em class="dimcfg-type-tag" :class="typeKind(objectType(row))">
                     {{ typeLabel(objectType(row)) }}
                   </em>
@@ -354,13 +364,13 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
                   <em v-if="differsFromRec(row)" class="dimcfg-diff">与推荐不同</em>
                 </span>
                 <div class="dimcfg-ops">
-                  <button type="button" class="dimcfg-delete" @click.stop="removeRow(row)">
+                  <button type="button" class="dimcfg-delete" :aria-label="`删除 ${keyOf(row)}`" @click.stop="removeRow(row)">
                     <svg viewBox="0 0 24 24" aria-hidden="true">
                       <path d="M4 7h16" />
                       <path d="M9 7V5h6v2" />
                       <path d="M7 7l1 13h8l1-13" />
                     </svg>
-                    删除表
+                    删除
                   </button>
                 </div>
               </div>
@@ -483,8 +493,10 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
 </template>
 
 <style scoped>
+.dimcfg-backdrop { grid-template-columns: minmax(0, 1fr); }
 .dimcfg {
-  width: min(1160px, calc(100vw - 48px));
+  width: min(1480px, calc(100vw - 48px));
+  max-width: 100%;
   height: min(800px, calc(100vh - 48px));
   max-height: calc(100vh - 48px);
   padding: 0;
@@ -576,7 +588,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
   flex: 1;
   min-height: 0;
   display: grid;
-  grid-template-columns: minmax(420px, 0.92fr) minmax(0, 1.08fr);
+  grid-template-columns: minmax(0, 2fr) minmax(0, 3fr);
 }
 .dimcfg-side,
 .dimcfg-structure {
@@ -587,7 +599,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
   gap: 12px;
   padding: 18px 24px;
 }
-.dimcfg-side { border-right: 1px solid #d9e3ef; }
+.dimcfg-side { border-right: 1px solid #d9e3ef; padding-inline: 16px; }
 .dimcfg-side-head {
   display: flex;
   align-items: center;
@@ -632,7 +644,8 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
   padding: 8px 12px;
 }
 .dimcfg-grid {
-  grid-template-columns: 190px 104px minmax(0, 1fr) 84px;
+  grid-template-columns: minmax(160px, 2.2fr) minmax(80px, 1fr) minmax(80px, 1fr) 60px;
+  min-width: 404px;
   gap: 0;
 }
 .dimcfg-cols {
@@ -683,8 +696,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
 }
 .dimcfg-object {
   min-width: 0;
-  width: 190px;
-  max-width: 190px;
+  width: 100%;
   display: flex;
   flex-direction: column;
   gap: 3px;
@@ -742,14 +754,15 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
 }
 .dimcfg-rec {
   min-width: 0;
-  display: flex;
-  align-items: center;
-  gap: 6px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  justify-items: start;
+  gap: 3px;
   color: #0e9f8a;
 }
 .dimcfg-rec-text {
   min-width: 0;
-  flex: 0 1 auto;
+  width: 100%;
   font-family: "JetBrains Mono", ui-monospace, monospace;
   font-size: 10px;
   font-weight: 700;
@@ -1117,7 +1130,8 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
 .dimcfg-object-row.muted { color: #9aa5b1; }
 .dimcfg-added { color: #66788f; font-size: 11px; font-weight: 700; }
 .dimcfg-sub-actions { display: flex; justify-content: flex-end; margin-top: 12px; }
-@media (max-width: 860px) {
+@media (max-width: 1040px) {
+  .dimcfg-backdrop { padding: 12px; }
   .dimcfg-body { grid-template-columns: 1fr; overflow: auto; }
   .dimcfg-side { border-right: 0; border-bottom: 1px solid #d9e3ef; }
   .dimcfg { height: calc(100vh - 24px); width: calc(100vw - 24px); }

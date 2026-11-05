@@ -1,10 +1,14 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
+
+const deleteTarget = ref<DataSourceListItem | null>(null)
 import { useRoute, useRouter } from 'vue-router'
 import { listDataSources } from '../api/dataSources'
-import { displayDate } from '../api/format'
+import { displayDateMs } from '../api/format'
+import { buildFrom } from '../navigation/from'
 import type { DataSourceListItem } from '../api/types'
 import EmptyState from '../components/EmptyState.vue'
+import DeleteSourceDialog from '../components/DeleteSourceDialog.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -287,8 +291,6 @@ onMounted(reload)
               <RouterLink :to="`/data-assets/${source.source_id}/profile`">{{ source.display_name }}</RouterLink>
             </h3>
             <span class="ds-status" :class="{ off: !source.is_active }">{{ source.is_active ? '激活' : '已禁用' }}</span>
-            <span class="ds-spacer"></span>
-            <RouterLink class="ds-manage" :to="`/data-sources/${source.source_id}`">管理</RouterLink>
           </div>
           <div class="ds-source-info">
             <p class="ds-source-id">{{ source.source_id }}</p>
@@ -303,24 +305,38 @@ onMounted(reload)
           <div class="ds-divider"></div>
           <div class="ds-source-foot">
             <div class="ds-source-meta">
-              <p>登记时间 {{ displayDate(source.created_at) }}</p>
-              <RouterLink :to="`/data-sources/${source.source_id}`">管理数据源连接 <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14" /><path d="m12 5 7 7-7 7" /></svg></RouterLink>
-            </div>
-            <div class="ds-source-meta">
-              <p v-if="source.last_collected_at">{{ displayDate(source.last_collected_at) }}</p>
-              <span v-else></span>
+              <p>登记时间 {{ displayDateMs(source.created_at) }}</p>
               <RouterLink
                 :to="{
                   path: '/workspaces',
-                  query: { source_id: source.source_id, db_type: source.db_type },
+                  query: {
+                    source_id: source.source_id,
+                    db_type: source.db_type,
+                    from: buildFrom(route.fullPath),
+                  },
                 }"
               >相关工作区 <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14" /><path d="m12 5 7 7-7 7" /></svg></RouterLink>
             </div>
+            <div class="ds-source-meta">
+              <p v-if="source.last_collected_at">采集时间 {{ displayDateMs(source.last_collected_at) }}</p>
+              <span v-else></span>
+            </div>
+          </div>
+          <div class="ds-source-actions">
+            <RouterLink class="ds-manage" :to="`/data-sources/${source.source_id}`">管理</RouterLink>
+            <button type="button" class="ds-danger" @click="deleteTarget = source">删除</button>
           </div>
         </article>
       </div>
     </section>
   </div>
+  <DeleteSourceDialog
+    v-if="deleteTarget"
+    :source-id="deleteTarget.source_id"
+    :display-name="deleteTarget.display_name"
+    @cancel="deleteTarget = null"
+    @done="deleteTarget = null; reload()"
+  />
 </template>
 
 <style scoped>

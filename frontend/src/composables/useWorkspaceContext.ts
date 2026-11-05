@@ -4,13 +4,15 @@
  * （doc 6.3 §3.2）。
  */
 import { computed, ref, watch } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { getDataSource } from '../api/dataSources'
 import { ApiError } from '../api/http'
 import { getWorkspace } from '../api/workspaces'
 import type { DataSourceListItem, WorkspaceItem } from '../api/types'
+import { appendNotice, resolveBack } from '../navigation/from'
 
 export function useWorkspaceContext(workspaceIdRef: () => string) {
+  const route = useRoute()
   const router = useRouter()
   const workspace = ref<WorkspaceItem | null>(null)
   const source = ref<DataSourceListItem | null>(null)
@@ -32,8 +34,15 @@ export function useWorkspaceContext(workspaceIdRef: () => string) {
         cause instanceof ApiError &&
         (cause.code === 'not_found' || cause.code === 'invalid_request')
       ) {
-        // 工作区不存在 → 返回工作区管理列表并提示（doc 6.3 §3.2）
-        await router.replace({ path: '/workspaces', query: { notice: 'not_found' } })
+        // 工作区不存在 → 工作区详情的返回目标 + notice（doc 9 §7.6）：
+        // from 指向 /workspaces… 时回到那个带筛选的列表，否则 /workspaces
+        const rawFrom = route.query.from
+        const spec = resolveBack(
+          'workspace-home',
+          typeof rawFrom === 'string' ? rawFrom : null,
+          {},
+        )
+        await router.replace(appendNotice(spec.target ?? '/workspaces', 'not_found'))
         return
       }
       error.value = cause instanceof Error ? cause.message : '工作区信息加载失败。'

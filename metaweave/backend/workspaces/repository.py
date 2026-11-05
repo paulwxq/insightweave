@@ -13,7 +13,10 @@ def get_workspace(session: Session, workspace_id: str) -> WorkspaceInfo | None:
 def list_workspaces_by_source(session: Session, source_id: str) -> list[WorkspaceInfo]:
     stmt = (
         select(WorkspaceInfo)
-        .where(WorkspaceInfo.source_id == source_id)
+        .where(
+            WorkspaceInfo.source_id == source_id,
+            WorkspaceInfo.deleted_at.is_(None),  # doc 8.1 §3.3：排除已删除
+        )
         .order_by(WorkspaceInfo.created_at, WorkspaceInfo.workspace_id)
     )
     return list(session.scalars(stmt))
@@ -31,7 +34,10 @@ def page_workspaces_by_filter(
     `source_id` 为 None 时列出全部数据源的工作区；传入时不校验来源是否
     存在，按普通过滤处理（无匹配返回空页）。total 为筛选条件下的全部行数。
     """
-    conditions = [WorkspaceInfo.source_id == source_id] if source_id else []
+    # doc 8.1 §3.3/§8.1：普通分页排除已逻辑删除的工作区，total 同口径
+    conditions = [WorkspaceInfo.deleted_at.is_(None)]
+    if source_id:
+        conditions.append(WorkspaceInfo.source_id == source_id)
     total = int(
         session.execute(
             select(func.count()).select_from(WorkspaceInfo).where(*conditions)
@@ -42,16 +48,20 @@ def page_workspaces_by_filter(
         .order_by(WorkspaceInfo.created_at.desc(), WorkspaceInfo.workspace_id.desc())
         .limit(limit)
         .offset(offset)
+        .where(*conditions)
     )
-    if conditions:
-        stmt = stmt.where(*conditions)
     return list(session.scalars(stmt)), total
 
 
 def _count_jobs(session: Session, model, workspace_ids: list[str]) -> dict[str, int]:
+    # doc 8.1 §3.3/§8.1：计数与列表同口径——已逻辑删除的作业不计数；
+    # 父级删除中但作业自身未删的仍计数；无有效作业由调用方补零
     stmt = (
         select(model.workspace_id, func.count())
-        .where(model.workspace_id.in_(workspace_ids))
+        .where(
+            model.workspace_id.in_(workspace_ids),
+            model.deleted_at.is_(None),
+        )
         .group_by(model.workspace_id)
     )
     return {workspace_id: int(total) for workspace_id, total in session.execute(stmt)}

@@ -5,6 +5,7 @@ import { getAssetProfile } from '../api/assets'
 import { displayDate } from '../api/format'
 import type { AssetProfileDetail, AssetProfileResponse } from '../api/types'
 import { formatSize } from '../utils/format'
+import PageBreadcrumbs from '../components/PageBreadcrumbs.vue'
 
 const PAGE_SIZE = 10
 const route = useRoute()
@@ -64,6 +65,12 @@ async function reload() {
 
 <template>
   <div class="ds-page profile-page">
+    <PageBreadcrumbs
+      :segments="[
+        { label: '数据资产', to: '/data-assets' },
+        { label: payload?.source.display_name ?? '数据源' },
+      ]"
+    />
     <header class="ds-header">
       <div class="ds-title">
         <span class="ds-kicker">DATABASE PROFILE</span>
@@ -75,7 +82,6 @@ async function reload() {
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 12H5" /><path d="m12 19-7-7 7-7" /></svg>
           返回
         </RouterLink>
-        <RouterLink :to="`/data-sources/${sourceId}/collection-jobs/new`" class="button button-primary">重新采集画像</RouterLink>
       </div>
     </header>
 
@@ -211,3 +217,10 @@ async function reload() {
     </template>
   </div>
 </template>
+
+<style scoped>
+/* doc 9 验收统一：返回按钮顶对齐标题首行（ds-header 全局为 flex-end 且与数据源列表共用，故本页局部覆盖） */
+.ds-header {
+  align-items: flex-start;
+}
+</style>

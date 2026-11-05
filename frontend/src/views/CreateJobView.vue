@@ -8,10 +8,12 @@
  * 新建时自动读取 YAML 初始化草稿（非运行时回退）；勾选 dim_value/domain 时对应草稿必须完整才能保存。
  * Rel 不再提供编辑入口（doc 7.2 §7.6，保留 rel 步骤选择与执行）。
  */
-import { computed, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ApiError } from '../api/http'
 import type {
+  DimValueConfigGetResponse,
+  DimValueRecommendationItem,
   DimValueTableParam,
   DomainParam,
   JobKind,
@@ -20,6 +22,7 @@ import type {
 } from '../api/types'
 import {
   createJob,
+  getDimValueConfig,
   getPublishCheck,
 } from '../api/workspaces'
 import DimValueConfigDialog from '../components/DimValueConfigDialog.vue'
@@ -27,8 +30,11 @@ import DomainConfigDialog from '../components/DomainConfigDialog.vue'
 import DomainDescriptionDialog from '../components/DomainDescriptionDialog.vue'
 import { usePublishConfigInitialization } from '../composables/usePublishConfigInitialization'
 import StepGrid from '../components/StepGrid.vue'
+import PageBreadcrumbs from '../components/PageBreadcrumbs.vue'
+import { crumbFrom, passThroughFrom, resolveBack, withFrom, workspacesCrumbTo } from '../navigation/from'
 import { useWorkspaceContext } from '../composables/useWorkspaceContext'
 import { allSteps, unchosenDeps } from '../utils/steps'
+import { dimDraftFromConfig, sameDimTables } from '../utils/publishStepConfig'
 
 const props = defineProps<{ kind: JobKind }>()
 
@@ -63,6 +69,39 @@ const basePath = computed(
   () => `/workspaces/${workspaceId.value}/${props.kind === 'collection' ? 'collection' : 'publish'}`,
 )
 
+// ---- doc 9 §7：返回与来源 ----
+
+function queryFrom(): string | null {
+  const raw = route.query.from
+  return typeof raw === 'string' ? raw : null
+}
+
+/** §7.4：新建作业认同类全局列表来源；默认返回区内列表 */
+const backSpec = computed(() =>
+  resolveBack(
+    props.kind === 'collection' ? 'collection-job-new' : 'publish-job-new',
+    queryFrom(),
+    { workspaceId: workspaceId.value },
+  ),
+)
+
+/** §6.3 路径：工作区管理 / {工作区名} / 采集|发布作业 / 新建 */
+const crumbSegments = computed(() => [
+  { label: '工作区管理', to: workspacesCrumbTo(queryFrom()) },
+  {
+    label: workspace.value?.workspace_name ?? '工作区',
+    to: withFrom(
+      `/workspaces/${workspaceId.value}`,
+      crumbFrom(backSpec.value.target, `/workspaces/${workspaceId.value}`, queryFrom()),
+    ),
+  },
+  {
+    label: `${kindText.value}作业`,
+    to: withFrom(basePath.value, crumbFrom(backSpec.value.target, basePath.value, queryFrom())),
+  },
+  { label: `新建${kindText.value}作业` },
+])
+
 const NAME_MAX = 200
 const DESC_MAX = 1000
 
@@ -87,6 +126,20 @@ const domainOpen = ref(false)
 const dimOpen = ref(false)
 const dimDraft = ref<DimValueTableParam[] | null>(null)
 const domainDraft = ref<DomainParam[] | null>(null)
+const dimLoading = ref(false)
+const dimLoadError = ref('')
+const dimConfigWarning = ref('')
+const dimRecommendations = ref<DimValueRecommendationItem[]>()
+const pendingDimConfig = ref<DimValueConfigGetResponse | null>(null)
+const dimChangeCancel = ref<HTMLButtonElement | null>(null)
+let dimRequest = 0
+
+watch(pendingDimConfig, async (config) => {
+  if (config) {
+    await nextTick()
+    dimChangeCancel.value?.focus()
+  }
+})
 
 function onDimApply(tables: DimValueTableParam[]) {
   dimDraft.value = tables
@@ -98,11 +151,52 @@ function onDomainApply(domains: DomainParam[]) {
   domainOpen.value = false
 }
 
-const { initializing, initError } = usePublishConfigInitialization(
+const { initializing, initError, dimConfig } = usePublishConfigInitialization(
   () => [props.kind, workspaceId.value] as const,
   dimDraft,
   domainDraft,
 )
+
+function acceptDimConfig(config: DimValueConfigGetResponse, replaceDraft: boolean) {
+  if (replaceDraft) dimDraft.value = dimDraftFromConfig(config.tables)
+  dimConfig.value = config
+  dimRecommendations.value = config.tables
+  dimConfigWarning.value = config.comma_string_tables.length
+    ? `以下表的字段配置包含逗号串，已按未指定处理，请使用字段列表：${config.comma_string_tables.join('、')}。`
+    : ''
+  pendingDimConfig.value = null
+  dimOpen.value = true
+}
+
+async function openDimConfig() {
+  if (!workspaceId.value || dimLoading.value || saving.value || checking.value || initializing.value || pendingDimConfig.value) return
+  const request = ++dimRequest
+  const workspace = workspaceId.value
+  dimLoading.value = true
+  dimLoadError.value = ''
+  try {
+    const latest = await getDimValueConfig(workspace)
+    if (request !== dimRequest || workspace !== workspaceId.value) return
+    const edited = dimConfig.value !== null && dimDraft.value !== null &&
+      !sameDimTables(dimDraft.value, dimDraftFromConfig(dimConfig.value.tables))
+    if (edited && latest.version !== dimConfig.value?.version) {
+      pendingDimConfig.value = latest
+      return
+    }
+    acceptDimConfig(latest, !edited)
+  } catch (cause) {
+    if (request !== dimRequest) return
+    dimLoadError.value = cause instanceof ApiError ? cause.message : '最新维度值配置读取失败，请重试。'
+  } finally {
+    if (request === dimRequest) dimLoading.value = false
+  }
+}
+
+function resolveDimConfigChange(replaceDraft: boolean) {
+  if (pendingDimConfig.value) acceptDimConfig(pendingDimConfig.value, replaceDraft)
+}
+
+onBeforeUnmount(() => { dimRequest += 1 })
 
 // 发布校验（设计稿 32/33，与详情页/执行页同一 publish-check 接口）：发布步骤
 // 须通过校验才可勾选、编辑与保存；结果反映点击时刻的产物状态，保存前会复查。
@@ -173,6 +267,8 @@ const canSave = computed(
     !ctxError.value &&
     !saving.value &&
     !initializing.value &&
+    !dimLoading.value &&
+    !pendingDimConfig.value &&
     jobName.value.trim().length > 0 &&
     nameCount.value <= NAME_MAX &&
     descCount.value <= DESC_MAX &&
@@ -245,7 +341,8 @@ async function save() {
         step_config: Object.keys(stepConfig).length > 0 ? stepConfig : null,
       },
     })
-    await router.push(`${basePath.value}/jobs/${job.job_id}`)
+    // §7.6 保存新作业成功 → 作业详情，from 原样传递
+    await router.push(withFrom(`${basePath.value}/jobs/${job.job_id}`, passThroughFrom(queryFrom())))
   } catch (cause) {
     saveError.value = cause instanceof ApiError ? cause.message : `${kindText.value}作业保存失败。`
   } finally {
@@ -254,30 +351,41 @@ async function save() {
 }
 
 watch(
-  () => props.kind,
+  () => [props.kind, workspaceId.value],
   () => {
     selected.value = {}
     savedDescription.value = null
     dimDraft.value = null
     domainDraft.value = null
+    dimRequest += 1
+    dimOpen.value = false
+    dimLoading.value = false
+    dimLoadError.value = ''
+    dimConfigWarning.value = ''
+    dimRecommendations.value = undefined
+    pendingDimConfig.value = null
     initError.value = ''
     check.value = null
     checkError.value = ''
   },
 )
 
+/** §7.4 末段：返回默认上一级（工作区内）时 from 原样带过去 */
+const backTo = computed(() =>
+  backSpec.value.fromTarget
+    ? backSpec.value.target!
+    : withFrom(backSpec.value.target!, passThroughFrom(queryFrom())),
+)
+
 function goBack() {
-  const previous = window.history.state?.back
-  if (typeof previous === 'string' && previous.length > 0) {
-    router.back()
-    return
-  }
-  router.push(basePath.value)
+  // doc 9 §7.1：不再读浏览器历史；目标取自 from 或默认上一级
+  if (backTo.value) void router.push(backTo.value)
 }
 </script>
 
 <template>
   <div class="ds-new-job">
+    <PageBreadcrumbs :segments="crumbSegments" />
     <header class="ds-new-job-header">
       <div>
         <span class="ds-kicker">{{ kind === 'collection' ? 'NEW COLLECTION JOB' : 'NEW PUBLISH JOB' }}</span>
@@ -289,9 +397,9 @@ function goBack() {
         <p v-else>勾选需要的{{ kindText }}步骤后保存，保存不执行任何步骤。</p>
       </div>
       <div class="ds-new-job-actions">
-        <button type="button" class="ds-new-job-back" @click="goBack">
+        <button type="button" class="ds-jobs-back" @click="goBack">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 12H5" /><path d="m12 19-7-7 7-7" /></svg>
-          返回
+          {{ backSpec.label }}
         </button>
       </div>
     </header>
@@ -445,11 +553,11 @@ function goBack() {
                 <button
                   type="button"
                   class="nj-step-edit"
-                  :disabled="saving || checking || initializing"
-                  @click="dimOpen = true"
+                  :disabled="saving || checking || initializing || dimLoading || !!pendingDimConfig"
+                  @click="openDimConfig"
                 >
                   <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20h9" /><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L8 18l-4 1 1-4Z" /></svg>
-                  编辑
+                  {{ dimLoading ? '读取中…' : '编辑' }}
                 </button>
               </template>
             </template>
@@ -457,6 +565,8 @@ function goBack() {
         </StepGrid>
 
         <p v-if="initError" class="status-message" role="alert">{{ initError }}</p>
+        <p v-if="dimLoadError" class="status-message" role="alert">{{ dimLoadError }}</p>
+        <p v-if="dimConfigWarning" class="status-message" role="alert">{{ dimConfigWarning }}</p>
         <p v-if="dimIncomplete" class="status-message" role="alert">
           dim_value 需要完整的版本配置：请为至少一张表指定值向量化字段（自动读取配置后编辑），
           或取消勾选 dim_value。
@@ -493,11 +603,23 @@ function goBack() {
       @close="domainOpen = false"
       @apply="onDomainApply"
     />
+    <div v-if="pendingDimConfig" class="dialog-backdrop" @click.self="pendingDimConfig = null" @keydown.esc="pendingDimConfig = null">
+      <div class="dialog-panel" role="dialog" aria-modal="true" aria-labelledby="dim-config-change-title">
+        <p id="dim-config-change-title">工作区维度值配置已更新</p>
+        <p class="dialog-note">你已修改过发布字段。可以保留这些修改，也可以加载工作区最新配置；加载最新配置会替换当前修改。</p>
+        <div class="dialog-actions">
+          <button ref="dimChangeCancel" type="button" class="button button-outline" @click="pendingDimConfig = null">取消</button>
+          <button type="button" class="button button-outline" @click="resolveDimConfigChange(false)">保留当前修改</button>
+          <button type="button" class="button button-primary" @click="resolveDimConfigChange(true)">加载最新配置</button>
+        </div>
+      </div>
+    </div>
     <DimValueConfigDialog
       v-if="dimOpen"
       :workspace-id="workspaceId"
       :db-name="source?.db_name || ''"
       :initial-tables="dimDraft ?? []"
+      :initial-recommendations="dimRecommendations"
       purpose="version"
       @close="dimOpen = false"
       @apply="onDimApply"
@@ -507,7 +629,7 @@ function goBack() {
 
 <style scoped>
 .ds-new-job .ds-new-job-header {
-  align-items: flex-end;
+  align-items: flex-start;
 }
 .cj-source-facts {
   grid-template-columns: repeat(5, minmax(0, 1fr));

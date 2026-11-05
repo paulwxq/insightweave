@@ -100,6 +100,7 @@ def get_workspace_home(
         "workspace_id": workspace_id,
         "source": source_view,
         "collection_runs": {
+            "pending": _count_rows(collection_stats, "pending"),
             "running": _count_rows(collection_stats, "running"),
             "success": _count_rows(collection_stats, "success"),
             "partial_success": _count_rows(collection_stats, "partial_success"),
@@ -107,6 +108,7 @@ def get_workspace_home(
             "recent": recent_collection["items"],
         },
         "publish_runs": {
+            "pending": _count_rows(publish_stats, "pending"),
             "running": _count_rows(publish_stats, "running"),
             "success": _count_rows(publish_stats, "success"),
             "partial_success": _count_rows(publish_stats, "partial_success"),

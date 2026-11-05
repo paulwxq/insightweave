@@ -83,6 +83,16 @@ export function dimDraftFromConfig(tables: DimValueConfigTable[]): DimValueTable
   })
 }
 
+/** 比较实际执行配置；表顺序和字段选择顺序不视为用户修改。 */
+export function sameDimTables(left: DimValueTableParam[], right: DimValueTableParam[]): boolean {
+  const normalize = (tables: DimValueTableParam[]) => tables.map((table) => ({
+    schema_name: table.schema_name,
+    object_name: table.object_name,
+    embedding_col: [...new Set(table.embedding_col)].sort(),
+  })).sort((a, b) => a.schema_name.localeCompare(b.schema_name) || a.object_name.localeCompare(b.object_name))
+  return JSON.stringify(normalize(left)) === JSON.stringify(normalize(right))
+}
+
 /** 显式初始化：配置文件 GET 的 domain 清单 → 草稿（深拷贝，形态本就一致） */
 export function domainDraftFromConfig(domains: DomainConfigDomain[]): DomainParam[] {
   return domains.map((item) => ({

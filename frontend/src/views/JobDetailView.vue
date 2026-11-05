@@ -19,6 +19,7 @@ import type {
   RevisionItem,
 } from '../api/types'
 import { addRevision, getPublishCheck, patchJob } from '../api/workspaces'
+import DeleteResourceDialog from '../components/DeleteResourceDialog.vue'
 import JobConfigEditor from '../components/JobConfigEditor.vue'
 import RevisionParamsDialog from '../components/RevisionParamsDialog.vue'
 import RunDrawer from '../components/RunDrawer.vue'
@@ -26,6 +27,8 @@ import StepDetailDrawer from '../components/StepDetailDrawer.vue'
 import EmptyState from '../components/EmptyState.vue'
 import { useJobDetail } from '../composables/useJobDetail'
 import { useRunPolling } from '../composables/useRunPolling'
+import PageBreadcrumbs from '../components/PageBreadcrumbs.vue'
+import { appendNotice, crumbFrom, passThroughFrom, resolveBack, withFrom, workspacesCrumbTo } from '../navigation/from'
 import { useWorkspaceContext } from '../composables/useWorkspaceContext'
 import {
   PUBLISH_STEPS,
@@ -45,6 +48,52 @@ const jobId = computed(() =>
   typeof route.params.jobId === 'string' ? route.params.jobId : '',
 )
 const kindText = computed(() => (props.kind === 'collection' ? '采集' : '发布'))
+const deleteOpen = ref(false)
+
+// ---- doc 9 §7：返回与来源 ----
+
+function queryFrom(): string | null {
+  const raw = route.query.from
+  return typeof raw === 'string' ? raw : null
+}
+
+/** §7.4：认同类全局列表来源；默认区内同类列表 */
+const backSpec = computed(() =>
+  resolveBack(
+    props.kind === 'collection' ? 'collection-job-detail' : 'publish-job-detail',
+    queryFrom(),
+    { workspaceId: workspaceId.value },
+  ),
+)
+
+const crumbSegments = computed(() => [
+  { label: '工作区管理', to: workspacesCrumbTo(queryFrom()) },
+  {
+    label: ctx.workspace.value?.workspace_name ?? '工作区',
+    to: withFrom(
+      `/workspaces/${workspaceId.value}`,
+      crumbFrom(backSpec.value.target, `/workspaces/${workspaceId.value}`, queryFrom()),
+    ),
+  },
+  {
+    label: `${kindText.value}作业`,
+    to: withFrom(basePath.value, crumbFrom(backSpec.value.target, basePath.value, queryFrom())),
+  },
+  { label: detail.job.value?.job_name ?? '作业' },
+])
+
+/** §7.4 末段：返回默认上一级（工作区内）时 from 原样带过去；取自 from 时不附加 */
+const backTo = computed(() =>
+  backSpec.value.fromTarget
+    ? backSpec.value.target!
+    : withFrom(backSpec.value.target!, passThroughFrom(queryFrom())),
+)
+
+function onJobDeleted() {
+  deleteOpen.value = false
+  // §7.6：删除作业成功 → 作业详情的返回目标（backTo 已含 from 传递规则）
+  void router.push(backTo.value)
+}
 const basePath = computed(
   () => `/workspaces/${workspaceId.value}/${props.kind === 'collection' ? 'collection' : 'publish'}`,
 )
@@ -58,8 +107,17 @@ const runsPageNo = computed(() => {
 const detail = useJobDetail(
   props.kind,
   () => jobId.value,
-  () => basePath.value,
+  // doc 9 §7.6：作业缺失用本页返回目标（从全局列表进来则回全局列表），附 notice；
+  // 默认上一级在工作区内时 from 原样带过去
+  () => {
+    if (backSpec.value.fromTarget) return appendNotice(backSpec.value.target!, 'not_found')
+    return appendNotice(
+      withFrom(backSpec.value.target!, passThroughFrom(queryFrom())),
+      'not_found',
+    )
+  },
   () => runsPageNo.value,
+  () => workspaceId.value,
 )
 
 function gotoRunsPage(page: number) {
@@ -177,9 +235,10 @@ async function saveRevision(payload: {
 function goRun(mode: 'default' | 'custom') {
   const revisionNo = detail.selectedRevisionNo.value
   if (revisionNo === null) return
+  // doc 9 §7.7：跨页跳转不展开当前页 query，只带 revision_no、mode 与当前地址上的 from
   void router.push({
     path: `${basePath.value}/jobs/${jobId.value}/run`,
-    query: { revision_no: String(revisionNo), mode },
+    query: { revision_no: String(revisionNo), mode, from: passThroughFrom(queryFrom()) ?? undefined },
   })
 }
 
@@ -296,6 +355,7 @@ function switchStep(step: string) {
 
 <template>
   <div class="ds-jobs">
+    <PageBreadcrumbs :segments="crumbSegments" />
     <header class="ds-jobs-header">
       <div>
         <span class="ds-kicker">{{ kind === 'collection' ? 'COLLECTION JOB' : 'PUBLISH JOB' }}</span>
@@ -306,10 +366,18 @@ function switchStep(step: string) {
         </p>
       </div>
       <div class="ws-home-actions">
-        <RouterLink class="ds-jobs-back" :to="basePath">
+        <RouterLink class="ds-jobs-back" :to="backTo">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 12H5" /><path d="m12 19-7-7 7-7" /></svg>
-          返回
+          {{ backSpec.label }}
         </RouterLink>
+        <button
+          v-if="detail.job.value"
+          type="button"
+          class="ds-danger"
+          @click="deleteOpen = true"
+        >
+          删除作业
+        </button>
       </div>
     </header>
 
@@ -430,7 +498,7 @@ function switchStep(step: string) {
                 @click="detail.selectRevision(revision.revision_no)"
               >
                 <strong>版本 {{ revision.revision_no }}</strong>
-                <span class="rev-row-steps">{{ revision.steps.join(' / ') }}</span>
+                <span class="rev-row-steps">{{ revision.steps.join('/') }}</span>
                 <span class="rev-row-time">{{ displayDate(revision.created_at) }}</span>
               </button>
               <button
@@ -650,11 +718,21 @@ function switchStep(step: string) {
       @select-step="switchStep"
     />
   </div>
+<DeleteResourceDialog
+    v-if="deleteOpen && detail.job.value"
+    kind="job"
+    :job-kind="kind"
+    :target-id="jobId"
+    :display-name="detail.job.value.job_name"
+    @cancel="deleteOpen = false"
+    @done="onJobDeleted"
+  />
 </template>
 
 <style scoped>
 .ws-home-actions {
   display: flex;
+  align-items: flex-start;
   gap: 10px;
 }
 .ws-home-desc {

@@ -227,9 +227,13 @@ class FakePlatformSession:
         self.row = row
         self.commits = 0
 
-    def get(self, model, key):
+    def get(self, model, key, **_kwargs):
         assert model is DbSourceInfo
         return self.row if key == self.row.source_id else None
+
+    def scalars(self, _statement):
+        # doc 8.1 §7.3：删除任务查询（本假件不建模任务表）
+        return iter([])
 
     def commit(self):
         self.commits += 1
@@ -282,11 +286,17 @@ def test_activation_can_be_restored(monkeypatch):
 
 
 def _fake_session(monkeypatch, result=None, error=None):
+    source_row = _row(True) if result is not None else None
+
     @contextmanager
     def fake_platform_session(_settings):
         if error is not None:
             raise error
-        yield SimpleNamespace()
+        # doc 8.1 §8.1：启停入口锁源 + 守卫（get 供锁/守卫读行；无删除任务）
+        yield SimpleNamespace(
+            get=lambda _model, _key, **_kw: source_row,
+            scalars=lambda _statement: iter([]),
+        )
 
     monkeypatch.setattr(registration_service, "platform_session", fake_platform_session)
 
@@ -365,7 +375,10 @@ def test_service_missing_source_raises_not_found(monkeypatch):
     settings = PlatformSettings(
         host="platform", port=5432, name="metaweave", user="admin", password="secret"
     )
-    with pytest.raises(SourceNotFoundError):
+    from backend.deletion.errors import ResourceNotFoundError
+
+    with pytest.raises(ResourceNotFoundError):
+        # doc 8.1 §7.3：守卫先于仓储返回（404 resource_not_found）
         registration_service.set_source_activation(settings, MISSING_ID, False)
 
 

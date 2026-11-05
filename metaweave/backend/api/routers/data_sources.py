@@ -1,6 +1,6 @@
 """数据源登记路由；不直接连接数据库或执行 SQL。"""
 
-from fastapi import APIRouter, Depends, Request, Response
+from fastapi import APIRouter, BackgroundTasks, Depends, Request
 
 from backend.api.schemas import (
     ConnectionCheckRequest,
@@ -10,6 +10,8 @@ from backend.api.schemas import (
     DataSourceListItem,
     DataSourceListResponse,
     DataSourceUpdateRequest,
+    DeletionConfirmRequest,
+    DeletionTaskItem,
 )
 from backend.data_sources.connection_check import (
     SourceConnectionInput,
@@ -120,12 +122,55 @@ def update_source(
     return update_registered_source(settings, source_id, fields)
 
 
-@router.delete("/{source_id}", status_code=204)
+@router.get("/{source_id}/deletion-preview")
+def source_deletion_preview(
+    source_id: str, settings: PlatformSettings = Depends(get_platform_settings)
+):
+    """源删除范围、阻断运行与目标存储（doc 8.1 §7）。"""
+    from backend.deletion.service import preview_source_deletion
+
+    return preview_source_deletion(settings, source_id)
+
+
+@router.delete("/{source_id}", status_code=202, response_model=DeletionTaskItem)
 def delete_source(
     source_id: str,
-    delete_output: bool = False,
+    request: Request,
+    background: BackgroundTasks,
+    payload: DeletionConfirmRequest,
     settings: PlatformSettings = Depends(get_platform_settings),
 ):
-    """删除数据源；已关联工作区时拒绝（A29，不级联删除工作区）。"""
-    delete_registered_source(settings, source_id, delete_output=delete_output)
-    return Response(status_code=204)
+    """提交数据源删除任务（doc 8.1 §2.4：异步逻辑删除，替换旧 204 契约）。"""
+    from backend.deletion.errors import DeletionInvalidRequestError
+    from backend.deletion.service import execute_task
+
+    # 废止的 delete_output 查询参数显式拒绝，不由 FastAPI 默默忽略
+    if "delete_output" in request.query_params:
+        raise DeletionInvalidRequestError("delete_output 参数已废止")
+    if payload.confirm_id != source_id:
+        raise DeletionInvalidRequestError("确认 ID 与目标数据源不一致")
+    task = delete_registered_source(settings, source_id)
+    background.add_task(execute_task, settings, task["task_id"])
+    return task
+
+
+@router.post(
+    "/{source_id}/published-data/clear",
+    status_code=202,
+    response_model=DeletionTaskItem,
+)
+def clear_published_data(
+    source_id: str,
+    background: BackgroundTasks,
+    payload: DeletionConfirmRequest,
+    settings: PlatformSettings = Depends(get_platform_settings),
+):
+    """源级知识清理（doc 8.1 §3.2）：五张内容表 + 三类向量 + 该源图。"""
+    from backend.deletion.errors import DeletionInvalidRequestError
+    from backend.deletion.service import execute_task, submit_knowledge_clear
+
+    if payload.confirm_id != source_id:
+        raise DeletionInvalidRequestError("确认 ID 与目标数据源不一致")
+    task = submit_knowledge_clear(settings, source_id)
+    background.add_task(execute_task, settings, task["task_id"])
+    return task

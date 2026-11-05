@@ -43,7 +43,11 @@ class FakeSession:
         self.workspace_row = workspace_row
         self.source_row = source_row
 
-    def get(self, model, key, with_for_update=None):
+    def scalars(self, statement):
+        # doc 8.1 §7.3：删除任务查询（本假件不建模任务表 → 无未解决任务）
+        return iter([])
+
+    def get(self, model, key, **kwargs):
         from backend.persistence.models import DbSourceInfo, WorkspaceInfo
 
         if model is WorkspaceInfo:
@@ -267,7 +271,10 @@ def test_a04_workspace_missing_raises_404(tmp_path, monkeypatch):
         monkeypatch, tmp_path, FakeSession(None, _source_row()), marker=None
     )
     _write_yaml(root, "databases: {}\n")
-    with pytest.raises(DimConfigOutputMissingError, match="工作区不存在"):
+    from backend.deletion.errors import ResourceNotFoundError
+
+    with pytest.raises(ResourceNotFoundError, match="工作区不存在"):
+        # doc 8.1 §7.3：只读守卫先于领域错误（404 resource_not_found）
         read_dim_value_config(SETTINGS, WORKSPACE_ID)
 
 

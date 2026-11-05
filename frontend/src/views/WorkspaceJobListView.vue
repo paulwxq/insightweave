@@ -10,8 +10,11 @@ import { displayDateMs } from '../api/format'
 import { ApiError } from '../api/http'
 import type { JobItem, JobKind } from '../api/types'
 import { listJobs } from '../api/workspaces'
+import DeleteResourceDialog from '../components/DeleteResourceDialog.vue'
 import EmptyState from '../components/EmptyState.vue'
+import PageBreadcrumbs from '../components/PageBreadcrumbs.vue'
 import { useWorkspaceContext } from '../composables/useWorkspaceContext'
+import { passThroughFrom, withFrom, workspacesCrumbTo } from '../navigation/from'
 
 const props = defineProps<{ kind: JobKind }>()
 
@@ -42,10 +45,33 @@ const jobs = ref<JobItem[]>([])
 const jobsLoading = ref(false)
 const jobsError = ref('')
 
+const deleteTarget = ref<JobItem | null>(null)
 const kindText = computed(() => (props.kind === 'collection' ? '采集' : '发布'))
 const basePath = computed(
   () => `/workspaces/${workspaceId.value}/${props.kind === 'collection' ? 'collection' : 'publish'}`,
 )
+
+// ---- doc 9 §7：区内列表不认来源，返回固定工作区详情；下钻原样传递 ----
+
+function queryFrom(): string | null {
+  const raw = route.query.from
+  return typeof raw === 'string' ? raw : null
+}
+
+/** §7.3-2：行内与新建链接把当前地址上的 from 原样（净化后）带到下一页 */
+function drillTo(path: string): string {
+  return withFrom(path, passThroughFrom(queryFrom()))
+}
+
+const crumbSegments = computed(() => [
+  { label: '工作区管理', to: workspacesCrumbTo(queryFrom()) },
+  // 返回目标（工作区详情）与本段同页 → 原样带来源（§7.3-3-2）
+  {
+    label: workspace.value?.workspace_name ?? '工作区',
+    to: withFrom(`/workspaces/${workspaceId.value}`, passThroughFrom(queryFrom())),
+  },
+  { label: `${kindText.value}作业` },
+])
 
 // ---- 关键字筛选（全量列表客户端过滤；写入 query） ----
 
@@ -81,25 +107,36 @@ function clearKeyword() {
   applyKeyword()
 }
 
+// 请求序号：采集/发布共用本组件实例，切换类型后旧请求不得覆盖新结果
+let jobsRequestSeq = 0
+
 async function loadJobs() {
   jobsLoading.value = true
   jobsError.value = ''
+  const request = ++jobsRequestSeq
   try {
     const response = await listJobs(props.kind, workspaceId.value)
+    if (request !== jobsRequestSeq) return
     jobs.value = response.items
   } catch (cause) {
+    if (request !== jobsRequestSeq) return
     jobsError.value =
       cause instanceof ApiError ? cause.message : `${kindText.value}作业列表加载失败。`
   } finally {
-    jobsLoading.value = false
+    if (request === jobsRequestSeq) jobsLoading.value = false
   }
 }
 
-watch(workspaceId, () => void loadJobs(), { immediate: true })
+watch([workspaceId, () => props.kind], () => {
+  // 采集/发布两条路由复用本组件实例：类型变化时清空旧类型列表再加载
+  jobs.value = []
+  void loadJobs()
+}, { immediate: true })
 </script>
 
 <template>
   <div class="ds-jobs">
+    <PageBreadcrumbs :segments="crumbSegments" />
     <header class="ds-jobs-header">
       <div>
         <span class="ds-kicker">{{ kind === 'collection' ? 'COLLECTION JOBS' : 'PUBLISH JOBS' }}</span>
@@ -109,7 +146,7 @@ watch(workspaceId, () => void loadJobs(), { immediate: true })
         </p>
       </div>
       <div class="ws-home-actions">
-        <RouterLink class="ds-jobs-back" :to="`/workspaces/${workspaceId}`">
+        <RouterLink class="ds-jobs-back" :to="drillTo(`/workspaces/${workspaceId}`)">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 12H5" /><path d="m12 19-7-7 7-7" /></svg>
           返回
         </RouterLink>
@@ -150,7 +187,7 @@ watch(workspaceId, () => void loadJobs(), { immediate: true })
             <span class="ds-jobs-count">
               共 {{ jobs.length }} 个作业<template v-if="keywordQuery">，符合 {{ filteredJobs.length }} 个</template>
             </span>
-            <RouterLink class="ds-jobs-create" :to="`${basePath}/new`">
+            <RouterLink class="ds-jobs-create" :to="drillTo(`${basePath}/new`)">
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14" /><path d="M5 12h14" /></svg>
               新建{{ kindText }}作业
             </RouterLink>
@@ -180,7 +217,7 @@ watch(workspaceId, () => void loadJobs(), { immediate: true })
             :description="`新建一个${kindText}作业，保存可复用的步骤与默认参数；保存不会执行任何步骤。`"
           >
             <template #action>
-              <RouterLink class="button button-outline" :to="`${basePath}/new`">
+              <RouterLink class="button button-outline" :to="drillTo(`${basePath}/new`)">
                 新建{{ kindText }}作业
               </RouterLink>
             </template>
@@ -202,31 +239,44 @@ watch(workspaceId, () => void loadJobs(), { immediate: true })
                   <span class="ws-job-id">{{ job.job_id }}</span>
                 </div>
                 <span v-if="job.job_desc" class="ws-job-desc">{{ job.job_desc }}</span>
-                <span class="ws-job-steps">默认步骤 {{ job.default_steps.join(' / ') || '—' }}</span>
+                <span class="ws-job-steps">默认步骤 {{ job.default_steps.join('/') || '—' }}</span>
               </div>
               <div class="ws-job-meta">
                 <span>执行 {{ job.run_count }} 次</span>
                 <span>版本 {{ job.latest_revision_no ?? '—' }}</span>
                 <span>更新时间 {{ displayDateMs(job.updated_at) }}</span>
               </div>
-              <RouterLink class="ds-manage" :to="`${basePath}/jobs/${job.job_id}`">
-                作业详情
-                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14" /><path d="m12 5 7 7-7 7" /></svg>
-              </RouterLink>
+              <div class="ws-job-actions">
+                <button type="button" class="ds-danger" @click="deleteTarget = job">删除</button>
+                <RouterLink class="ds-manage" :to="drillTo(`${basePath}/jobs/${job.job_id}`)">
+                  作业详情
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14" /><path d="m12 5 7 7-7 7" /></svg>
+                </RouterLink>
+              </div>
             </div>
           </div>
         </template>
       </section>
     </template>
   </div>
+  <DeleteResourceDialog
+    v-if="deleteTarget"
+    kind="job"
+    :job-kind="kind"
+    :target-id="deleteTarget.job_id"
+    :display-name="deleteTarget.job_name"
+    @cancel="deleteTarget = null"
+    @done="deleteTarget = null; loadJobs()"
+  />
 </template>
 
 <style scoped>
 .ds-jobs .ds-jobs-header {
-  align-items: flex-end;
+  align-items: flex-start;
 }
 .ws-home-actions {
   display: flex;
+  align-items: flex-start;
   gap: 10px;
 }
 .ws-source-facts {
@@ -330,6 +380,13 @@ watch(workspaceId, () => void loadJobs(), { immediate: true })
   display: inline-flex;
   align-items: center;
   gap: 4px;
+  white-space: nowrap;
+}
+.ws-job-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  justify-self: start;
   white-space: nowrap;
 }
 .ws-job-row .ds-manage svg {

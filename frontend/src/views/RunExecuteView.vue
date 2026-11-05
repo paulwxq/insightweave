@@ -54,9 +54,19 @@ import StepDetailDrawer from '../components/StepDetailDrawer.vue'
 import StepGrid from '../components/StepGrid.vue'
 import { useRunPolling } from '../composables/useRunPolling'
 import { useWorkspaceContext } from '../composables/useWorkspaceContext'
+import PageBreadcrumbs from '../components/PageBreadcrumbs.vue'
+import {
+  appendNotice,
+  crumbFrom,
+  passThroughFrom,
+  resolveBack,
+  withFrom,
+  workspacesCrumbTo,
+} from '../navigation/from'
 import {
   PUBLISH_STEPS,
   executionOrder,
+  isTerminalRunStatus,
   unchosenDeps,
 } from '../utils/steps'
 import { parseDimTables, parseDomains } from '../utils/publishStepConfig'
@@ -78,6 +88,58 @@ const jobBasePath = computed(
 )
 
 const ctx = useWorkspaceContext(() => workspaceId.value)
+
+// ---- doc 9 §7：执行页不认来源，返回固定作业详情（from 原样带回） ----
+
+function queryFrom(): string | null {
+  const raw = route.query.from
+  return typeof raw === 'string' ? raw : null
+}
+
+const backSpec = computed(() =>
+  resolveBack('run-execute', null, {
+    workspaceId: workspaceId.value,
+    jobId: jobId.value,
+    jobKind: props.kind,
+  }),
+)
+
+/** §7.4 末段：默认上一级在工作区内，from 原样带过去 */
+const backTo = computed(() => withFrom(backSpec.value.target!, passThroughFrom(queryFrom())))
+
+/** §7.6：作业缺失的重定向用作业详情页的返回目标（不是本页按钮的目标），附 notice */
+function jobMissingTarget(): string {
+  const spec = resolveBack(
+    props.kind === 'collection' ? 'collection-job-detail' : 'publish-job-detail',
+    queryFrom(),
+    { workspaceId: workspaceId.value },
+  )
+  const target = spec.fromTarget
+    ? spec.target!
+    : withFrom(spec.target!, passThroughFrom(queryFrom()))
+  return appendNotice(target, 'not_found')
+}
+
+const crumbSegments = computed(() => {
+  const jobPath = `${jobBasePath.value}/jobs/${jobId.value}`
+  return [
+    { label: '工作区管理', to: workspacesCrumbTo(queryFrom()) },
+    {
+      label: ctx.workspace.value?.workspace_name ?? '工作区',
+      to: withFrom(
+        `/workspaces/${workspaceId.value}`,
+        crumbFrom(backSpec.value.target, `/workspaces/${workspaceId.value}`, queryFrom()),
+      ),
+    },
+    {
+      label: `${kindText.value}作业`,
+      to: withFrom(jobBasePath.value, crumbFrom(backSpec.value.target, jobBasePath.value, queryFrom())),
+    },
+    // 与「返回」同页（作业详情）→ 原样带来源
+    { label: job.value?.job_name ?? '作业', to: withFrom(jobPath, passThroughFrom(queryFrom())) },
+    { label: '执行' },
+  ]
+})
 
 // ---- 作业与版本 ----
 
@@ -105,7 +167,7 @@ const mode = computed<'default' | 'custom'>(() => {
 
 /** 「修改步骤或参数」勾选框 ⇔ mode query：保持深链、刷新恢复与前进后退行为不变 */
 function setMode(next: 'default' | 'custom') {
-  if (next === mode.value) return
+  if (runLocked.value || checkLoading.value || next === mode.value) return
   void router.replace({ query: { ...route.query, mode: next } })
 }
 
@@ -151,7 +213,7 @@ async function load() {
   try {
     const [jobRow, revisionRows] = await Promise.all([getJob(props.kind, id), listRevisions(props.kind, id)])
     if (jobRow.workspace_id !== workspaceId.value) {
-      await router.replace({ path: jobBasePath.value, query: { notice: 'not_found' } })
+      await router.replace(jobMissingTarget())
       return
     }
     job.value = jobRow
@@ -161,7 +223,7 @@ async function load() {
       cause instanceof ApiError &&
       (cause.code === 'not_found' || cause.code === 'invalid_request')
     ) {
-      await router.replace({ path: jobBasePath.value, query: { notice: 'not_found' } })
+      await router.replace(jobMissingTarget())
       return
     }
     loadError.value = cause instanceof Error ? cause.message : '作业信息加载失败。'
@@ -221,6 +283,7 @@ const previewOrder = computed(() =>
 )
 
 function toggleStep(step: string) {
+  if (runLocked.value || checkLoading.value) return
   // 勾选范围只看引用版本允许（StepGrid available 已限定）；不用旧校验结果
   // 门控勾选——是否可执行由重新校验后的有效参数预检决定（doc 7.2 §4 第 5 项）
   selected.value = { ...selected.value, [step]: !selected.value[step] }
@@ -229,16 +292,19 @@ function toggleStep(step: string) {
 
 /** custom 全选：版本步骤全集（可执行性由重新校验判定，不按旧结果预过滤） */
 function selectAllAvailable() {
+  if (runLocked.value || checkLoading.value) return
   selected.value = Object.fromEntries(revisionSteps.value.map((step) => [step, true]))
   invalidateCheck()
 }
 
 function clearSelection() {
+  if (runLocked.value || checkLoading.value) return
   selected.value = {}
   invalidateCheck()
 }
 
 function onTempDescriptionSaved(text: string) {
+  if (runLocked.value) return
   tempDescription.value = text
   tempDescriptionOpen.value = false
 }
@@ -320,6 +386,7 @@ function buildRunPayload():
 }
 
 async function loadCheck(): Promise<boolean> {
+  if (runLocked.value || checkLoading.value) return false
   const payload = props.kind === 'publish' ? buildRunPayload() : null
   if (!payload) return false
   checkLoading.value = true
@@ -360,12 +427,14 @@ const domainDialogInitial = computed<DomainParam[]>(
 )
 
 function onDimApply(tables: DimValueTableParam[]) {
+  if (runLocked.value || checkLoading.value) return
   dimRunDraft.value = tables
   dimOpen.value = false
   invalidateCheck()
 }
 
 function onDomainApply(domains: DomainParam[]) {
+  if (runLocked.value || checkLoading.value) return
   domainRunDraft.value = domains
   domainOpen.value = false
   invalidateCheck()
@@ -379,10 +448,43 @@ const precheckFailures = ref<PublishPrecheckFailure[]>([])
 const activeRun = useRunPolling(props.kind)
 const stepDrawerStep = ref('')
 
+// 创建请求返回后继续锁定，直到确认整个运行已结束；刷新和查询失败也不提前解锁。
+const runLocked = computed(() => {
+  if (executing.value) return true
+  if (!activeRun.runId.value) return false
+  const detail = activeRun.detail.value
+  return detail === null || !isTerminalRunStatus(detail.status)
+})
+
+const executeButtonText = computed(() => {
+  if (executing.value) return '创建中'
+  if (runLocked.value) {
+    if (activeRun.error.value) return '状态待确认'
+    if (!activeRun.detail.value) return '查询中'
+    if (activeRun.detail.value.status === 'pending') return '等待执行'
+    return '执行中'
+  }
+  return props.kind === 'publish' ? '执行发布' : `执行${kindText.value}运行`
+})
+
+// ---- 采集运行部分成功后引导发布：终态且至少一个步骤成功时显示 ----
+const showPublishCta = computed(
+  () =>
+    props.kind === 'collection' &&
+    activeRun.runId.value !== null &&
+    activeRun.detail.value !== null &&
+    isTerminalRunStatus(activeRun.detail.value.status) &&
+    activeRun.detail.value.steps.some((step) => step.status === 'success'),
+)
+
+const publishCtaTo = computed(() =>
+  withFrom(`/workspaces/${workspaceId.value}/publish`, passThroughFrom(queryFrom())),
+)
+
 const canExecute = computed(() => {
   if (
     ctx.sourceDisabled.value ||
-    executing.value ||
+    runLocked.value ||
     loading.value ||
     revisionInvalid.value ||
     revisionNo.value === null
@@ -426,7 +528,7 @@ async function execute() {
     if (runId) {
       // 保留 revision_no/mode 等已有 query，仅追加/更新 run_id（doc 6.3 §4.4）
       await router.replace({ query: { ...route.query, run_id: runId } })
-      activeRun.open(runId)
+      if (activeRun.runId.value !== runId) activeRun.open(runId)
       stepDrawerStep.value = ''
     }
   } catch (cause) {
@@ -459,6 +561,7 @@ function switchStep(step: string) {
 
 <template>
   <div class="rx-page">
+    <PageBreadcrumbs :segments="crumbSegments" />
     <header class="ds-jobs-header">
       <div>
         <span class="ds-kicker">{{ kind === 'collection' ? 'COLLECTION EXECUTION' : 'PUBLISH EXECUTION' }}</span>
@@ -469,7 +572,7 @@ function switchStep(step: string) {
         </p>
       </div>
       <div class="rx-actions">
-        <RouterLink class="ds-jobs-back" :to="`${jobBasePath}/jobs/${jobId}`">
+        <RouterLink class="ds-jobs-back" :to="backTo">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 12H5" /><path d="m12 19-7-7 7-7" /></svg>
           返回
         </RouterLink>
@@ -541,8 +644,8 @@ function switchStep(step: string) {
             </p>
           </div>
           <div v-if="mode === 'custom'" class="ds-new-job-step-actions">
-            <button type="button" @click="selectAllAvailable">全选</button>
-            <button type="button" @click="clearSelection">清空</button>
+            <button type="button" :disabled="runLocked || checkLoading" @click="selectAllAvailable">全选</button>
+            <button type="button" :disabled="runLocked || checkLoading" @click="clearSelection">清空</button>
           </div>
         </div>
 
@@ -561,7 +664,7 @@ function switchStep(step: string) {
           :kind="kind"
           :selected="mode === 'default' ? Object.fromEntries(revisionSteps.map((s) => [s, true])) : selected"
           :available="revisionSteps"
-          :disabled="mode === 'default' || executing || checkLoading"
+          :disabled="mode === 'default' || runLocked || checkLoading"
           @toggle="toggleStep"
         >
           <template #after-step="{ step }">
@@ -569,7 +672,7 @@ function switchStep(step: string) {
               v-if="kind === 'collection' && mode === 'custom' && step === 'domain'"
               type="button"
               class="nj-step-edit"
-              :disabled="executing"
+              :disabled="runLocked"
               @click="tempDescriptionOpen = true"
             >
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20h9" /><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L8 18l-4 1 1-4Z" /></svg>
@@ -611,7 +714,7 @@ function switchStep(step: string) {
                   v-if="step === 'domain'"
                   type="button"
                   class="nj-step-edit"
-                  :disabled="executing || checkLoading"
+                  :disabled="runLocked || checkLoading"
                   @click="domainOpen = true"
                 >
                   <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20h9" /><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L8 18l-4 1 1-4Z" /></svg>
@@ -621,7 +724,7 @@ function switchStep(step: string) {
                   v-if="step === 'dim_value'"
                   type="button"
                   class="nj-step-edit"
-                  :disabled="executing || checkLoading"
+                  :disabled="runLocked || checkLoading"
                   @click="dimOpen = true"
                 >
                   <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20h9" /><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L8 18l-4 1 1-4Z" /></svg>
@@ -652,23 +755,23 @@ function switchStep(step: string) {
               <button
                 type="button"
                 class="button button-outline rx-check-btn"
-                :disabled="checkLoading || executing || revisionInvalid || revisionNo === null"
+                :disabled="checkLoading || runLocked || revisionInvalid || revisionNo === null"
                 @click="loadCheck"
               >
                 {{ checkLoading ? '正在校验' : '步骤校验' }}
               </button>
             </template>
-            <label class="rx-custom-toggle">
+            <label class="rx-custom-toggle" :class="{ 'is-disabled': runLocked || checkLoading }">
               <input
                 type="checkbox"
                 :checked="mode === 'custom'"
-                :disabled="executing"
+                :disabled="runLocked || checkLoading"
                 @change="setMode(($event.target as HTMLInputElement).checked ? 'custom' : 'default')"
               />
               修改步骤或参数
             </label>
-            <button type="button" class="button button-primary" :disabled="!canExecute" @click="execute">
-              {{ executing ? '创建中' : kind === 'publish' ? '执行发布' : `执行${kindText}运行` }}
+            <button type="button" class="button button-primary rx-execute-btn" :disabled="!canExecute" @click="execute">
+              {{ executeButtonText }}
             </button>
           </div>
         </div>
@@ -722,6 +825,9 @@ function switchStep(step: string) {
           @retry="activeRun.retry()"
           @open-step="openStep"
         />
+        <div v-if="showPublishCta" class="rx-run-publish-cta">
+          <RouterLink class="rx-run-publish-link" :to="publishCtaTo">创建或执行发布作业 →</RouterLink>
+        </div>
       </section>
     </template>
 
@@ -775,6 +881,7 @@ function switchStep(step: string) {
 }
 .rx-actions {
   display: flex;
+  align-items: flex-start;
   gap: 10px;
 }
 .rx-confirm-actions {
@@ -797,6 +904,24 @@ function switchStep(step: string) {
   width: 15px;
   height: 15px;
   margin: 0;
+}
+.rx-execute-btn:disabled {
+  background: #e4e9f0;
+  border-color: #d9e3ef;
+  color: #8a99ac;
+  opacity: 1;
+  box-shadow: none;
+  cursor: not-allowed;
+  transform: none;
+}
+.rx-custom-toggle.is-disabled {
+  color: #8a99ac;
+  cursor: not-allowed;
+}
+.rx-custom-toggle input:disabled {
+  accent-color: #a8b3c2;
+  opacity: .65;
+  cursor: not-allowed;
 }
 .rx-note {
   margin: 0;

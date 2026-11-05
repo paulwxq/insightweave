@@ -8,6 +8,9 @@
 """
 
 import json
+import os
+import shutil
+from dataclasses import replace
 from uuid import uuid4
 
 import pytest
@@ -24,8 +27,8 @@ from backend.persistence.platform_db import (
     platform_session,
 )
 from backend.publishing.publish_service import (
-    _publish_db,
     create_publish_run,
+    execute_publish_run,
 )
 from backend.publishing.repository import (
     source_latest_successful_publish,
@@ -39,16 +42,22 @@ _SOURCE_NAME = "发布演练"
 
 
 def _settings():
-    load_project_env()
-    try:
-        return load_platform_settings_from_env()
-    except Exception:
+    # 普通 pytest 不因 .env 恰好可用就向实库写入。测试库名必须由调用方
+    # 显式提供；不覆盖应用的 PLATFORM_DB_NAME，也不回退到默认业务库。
+    test_database = os.getenv("METAWEAVE_TEST_DB_NAME", "").strip()
+    if os.getenv("METAWEAVE_RUN_LIVE_TESTS") != "1" or not test_database:
         return None
+    load_project_env()
+    application_settings = load_platform_settings_from_env()
+    if test_database == application_settings.name:
+        raise ValueError("METAWEAVE_TEST_DB_NAME 必须与应用 PLATFORM_DB_NAME 不同")
+    return replace(application_settings, name=test_database)
 
 
 SETTINGS = _settings()
 pytestmark = pytest.mark.skipif(
-    SETTINGS is None, reason="缺少 PLATFORM_DB_* 环境变量，跳过发布内容实库断言"
+    SETTINGS is None,
+    reason="需显式设置 METAWEAVE_RUN_LIVE_TESTS=1 和 METAWEAVE_TEST_DB_NAME",
 )
 
 
@@ -95,7 +104,40 @@ def _write_database_json(source_id: str, directory, collected_marker: str) -> No
 
 
 @pytest.fixture
-def live_source_two_workspaces():
+def live_source_two_workspaces(request, tmp_path, monkeypatch):
+    # 独立临时文件根，避免与其他平台库中同名短 ID 的产物目录发生冲突。
+    monkeypatch.setattr("metaweave.utils.file_utils.get_project_root", lambda: tmp_path)
+    with platform_session(SETTINGS) as session:
+        source_id = session.execute(
+            text(
+                "INSERT INTO public.db_source_info (display_name, db_type, host, port,"
+                " db_name, username, password_ciphertext, selected_schemas)"
+                " VALUES (:name, 'postgresql', 'h', 5432, 'demo', 'u',"
+                " 'x', ARRAY['public']) RETURNING source_id"
+            ),
+            {"name": f"{_SOURCE_NAME}-{uuid4().hex[:12]}"},
+        ).scalar_one()
+        session.commit()
+    # 立即注册：即使第一个/第二个工作区创建失败，pytest 仍会执行清理。
+    request.addfinalizer(lambda: _cleanup_live_source(SETTINGS, source_id))
+    ws1 = create_workspace(SETTINGS, source_id, "生产")
+    ws2 = create_workspace(SETTINGS, source_id, "测试")
+    return source_id, ws1["workspace_id"], ws2["workspace_id"]
+
+
+def _cleanup_live_source(settings, source_id):
+    """仅清理本次创建的源；文件清理失败也明确报告，并继续尝试清理数据库。"""
+    from metaweave.core.clean_targets import resolve_source_workspace_dir
+
+    try:
+        shutil.rmtree(resolve_source_workspace_dir(source_id))
+    except FileNotFoundError:
+        pass
+    finally:
+        _cleanup_live_source_rows(settings, source_id)
+
+
+def _cleanup_live_source_rows(settings, source_id):
     from backend.persistence.models import (
         PublishJobInfo,
         PublishJobRevision,
@@ -103,25 +145,7 @@ def live_source_two_workspaces():
         WorkspaceInfo,
     )
 
-    with platform_session(SETTINGS) as session:
-        source_id = session.execute(
-            text(
-                "INSERT INTO public.db_source_info (display_name, db_type, host, port,"
-                " db_name, username, password_ciphertext, selected_schemas)"
-                f" VALUES ('{_SOURCE_NAME}', 'postgresql', 'h', 5432, 'demo', 'u',"
-                " 'x', ARRAY['public']) RETURNING source_id"
-            )
-        ).scalar_one()
-        session.commit()
-    ws1 = create_workspace(SETTINGS, source_id, "生产")
-    ws2 = create_workspace(SETTINGS, source_id, "测试")
-    yield source_id, ws1["workspace_id"], ws2["workspace_id"]
-
-    import shutil
-
-    from metaweave.core.clean_targets import resolve_source_workspace_dir
-
-    with platform_session(SETTINGS) as session:
+    with platform_session(settings) as session:
         # 逆外键序，且只清理本测试的数据（共享演练库可能有其他用例的行，
         # 全表删除会被他源内容行的外键引用阻断）：步骤 → 五张内容行
         # （引用发布运行）→ 运行 → 版本 → 作业
@@ -132,20 +156,26 @@ def live_source_two_workspaces():
             TableProfile,
         )
 
-        job_ids = session.execute(
-            select(PublishJobInfo.publish_job_id)
-            .join(
-                WorkspaceInfo,
-                WorkspaceInfo.workspace_id == PublishJobInfo.workspace_id,
+        job_ids = (
+            session.execute(
+                select(PublishJobInfo.publish_job_id)
+                .join(
+                    WorkspaceInfo,
+                    WorkspaceInfo.workspace_id == PublishJobInfo.workspace_id,
+                )
+                .where(WorkspaceInfo.source_id == source_id)
             )
-            .where(WorkspaceInfo.source_id == source_id)
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
         run_ids = (
             session.execute(
                 select(PublishRunInfo.publish_run_id).where(
                     PublishRunInfo.publish_job_id.in_(job_ids)
                 )
-            ).scalars().all()
+            )
+            .scalars()
+            .all()
             if job_ids
             else []
         )
@@ -184,10 +214,6 @@ def live_source_two_workspaces():
             )
         )
         session.commit()
-    try:
-        shutil.rmtree(resolve_source_workspace_dir(source_id))
-    except (OSError, ValueError):
-        pass
 
 
 def _create_publish_job(workspace_id: str) -> str:
@@ -200,6 +226,19 @@ def _create_publish_job(workspace_id: str) -> str:
         JobConfigPayload(steps=["db"]),
     )
     return job["job_id"]
+
+
+def _assert_successful_db_run(run_id):
+    from backend.persistence.models import PublishRunInfo
+
+    with platform_session(SETTINGS) as session:
+        run = session.get(PublishRunInfo, run_id)
+        step = session.get(PublishRunStep, (run_id, "db"))
+        assert run.status == step.status == "success"
+        assert run.started_at is not None and run.finished_at is not None
+        assert step.started_at is not None and step.finished_at is not None
+        assert run.created_at <= run.started_at <= step.started_at
+        assert step.started_at <= step.finished_at <= run.finished_at
 
 
 def test_two_workspaces_publish_db_replaces_source_content(live_source_two_workspaces):
@@ -218,53 +257,18 @@ def test_two_workspaces_publish_db_replaces_source_content(live_source_two_works
         SETTINGS, job1, revision_no=1, mode="default", steps=None, step_config=None
     )
     run1_id = normalize_run_uuid(run1["publish_run_id"])
-    _publish_db(
-        SETTINGS,
-        run1_id,
-        ws1,
-        input_manifest={
-            "files": [{"path": "db/database.json", "collection_run_id": str(uuid4())}]
-        },
-        payload=None,
-    )
+    execute_publish_run(SETTINGS, run1_id)
+    _assert_successful_db_run(run1_id)
     with platform_session(SETTINGS) as session:
-        from backend.jobs.run_repository import PUBLISH_RUN, finish_step
-
-        finish_step(
-            PUBLISH_RUN,
-            session,
-            run1_id,
-            "db",
-            "success",
-            "数据库画像发布完成",
-        )
-        session.commit()
+        profile = session.get(DbProfile, source_id)
+        assert profile.publish_run_id == run1_id
 
     run2 = create_publish_run(
         SETTINGS, job2, revision_no=1, mode="default", steps=None, step_config=None
     )
     run2_id = normalize_run_uuid(run2["publish_run_id"])
-    _publish_db(
-        SETTINGS,
-        run2_id,
-        ws2,
-        input_manifest={
-            "files": [{"path": "db/database.json", "collection_run_id": str(uuid4())}]
-        },
-        payload=None,
-    )
-    with platform_session(SETTINGS) as session:
-        from backend.jobs.run_repository import PUBLISH_RUN, finish_step
-
-        finish_step(
-            PUBLISH_RUN,
-            session,
-            run2_id,
-            "db",
-            "success",
-            "数据库画像发布完成",
-        )
-        session.commit()
+    execute_publish_run(SETTINGS, run2_id)
+    _assert_successful_db_run(run2_id)
 
     with platform_session(SETTINGS) as session:
         profiles = (

@@ -173,7 +173,9 @@ def _check_ddl_products_ready(ctx: StepContext) -> tuple[str, list]:
         raise DbStepConfigError(_DDL_NOT_READY)
     try:
         rows, _ddl_dir = read_ddl_definitions(ctx.source_id, ctx.workspace_id)
-    except (DDLInputError, OSError) as exc:
+    except DDLInputError as exc:
+        raise DbStepConfigError(f"JSON 未启动：DDL 产物校验失败：{exc}") from None
+    except OSError as exc:
         raise DbStepConfigError(
             f"工作区的 DDL 产物未就绪（{type(exc).__name__}）"
         ) from None

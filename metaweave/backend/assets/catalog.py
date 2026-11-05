@@ -12,9 +12,7 @@ from metaweave.utils.time_utils import utc_isoformat
 
 from backend.data_sources.registration_service import (
     PlatformUnavailableError,
-    SourceNotFoundError,
 )
-from backend.data_sources.repository import get_db_source
 from backend.persistence.models import DbProfile, DbSourceInfo, PublishRunInfo
 from backend.persistence.platform_db import PlatformSettings, platform_session
 from metaweave.utils.source_id import normalize_source_id
@@ -184,9 +182,12 @@ def get_asset_profile(settings: PlatformSettings, source_id: str) -> dict:
     source_id = normalize_source_id(source_id)
     try:
         with platform_session(settings) as session:
-            source = get_db_source(session, source_id)
-            if source is None:
-                raise SourceNotFoundError("数据源不存在")
+            # doc 8.1 §8.1：资产只读守卫——已删源 410、不存在 404；
+            # 删除中/删除失败仍允许查看尚存画像，知识清理后按实际内容
+            # 展示（画像已清空则 not_published）
+            from backend.access_guards import require_source
+
+            source = require_source(session, source_id)
             profile = session.get(DbProfile, source_id)
             run = (
                 session.get(PublishRunInfo, profile.publish_run_id)

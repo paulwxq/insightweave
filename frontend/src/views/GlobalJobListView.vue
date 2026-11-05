@@ -9,6 +9,7 @@
  */
 import { computed, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import { buildFrom, withFrom } from '../navigation/from'
 import { displayDateMs } from '../api/format'
 import { ApiError } from '../api/http'
 import { listDataSources } from '../api/dataSources'
@@ -16,6 +17,7 @@ import type { DataSourceListItem, GlobalJobListResponse, JobKind } from '../api/
 import { listJobsGlobal, listWorkspaces } from '../api/workspaces'
 import type { WorkspaceItem } from '../api/types'
 import EmptyState from '../components/EmptyState.vue'
+import DeleteResourceDialog from '../components/DeleteResourceDialog.vue'
 
 const props = defineProps<{ kind: JobKind }>()
 
@@ -153,6 +155,7 @@ function clearKeyword() {
 
 const PAGE_SIZE = 10
 const page = ref<GlobalJobListResponse | null>(null)
+const deleteTarget = ref<{ job_id: string; job_name: string } | null>(null)
 const loading = ref(false)
 const error = ref('')
 
@@ -219,7 +222,15 @@ function openCreate() {
 function submitCreate() {
   if (!createWorkspaceId.value) return
   createOpen.value = false
-  void router.push(`/workspaces/${createWorkspaceId.value}/${props.kind === 'collection' ? 'collection' : 'publish'}/new`)
+  // doc 9 §7.3 写入点：全局列表的新建作业确认进入新建页，来源为当前列表地址
+  const base = `/workspaces/${createWorkspaceId.value}/${props.kind === 'collection' ? 'collection' : 'publish'}/new`
+  void router.push(withFrom(base, buildFrom(route.fullPath)))
+}
+
+/** doc 9 §7.3 写入点：行内「作业详情」携带当前列表地址（含筛选和页码）作为来源 */
+function jobDetailTo(job: { workspace_id: string; job_id: string }) {
+  const base = `/workspaces/${job.workspace_id}/${props.kind === 'collection' ? 'collection' : 'publish'}/jobs/${job.job_id}`
+  return withFrom(base, buildFrom(route.fullPath))
 }
 </script>
 
@@ -228,16 +239,15 @@ function submitCreate() {
     <header class="ds-jobs-header">
       <div>
         <span class="ds-kicker">{{ kind === 'collection' ? 'GLOBAL COLLECTION JOBS' : 'GLOBAL PUBLISH JOBS' }}</span>
-        <h1>{{ kind === 'collection' ? '数据采集作业(全局)' : '数据发布作业(全局)' }}</h1>
+        <h1>{{ kind === 'collection' ? '全部采集作业' : '全部发布作业' }}</h1>
         <p>全部数据源与工作区下的{{ kind === 'collection' ? '数据采集' : '数据发布' }}作业，按最后一次执行时间倒序排列。</p>
       </div>
-      <div class="ws-home-actions">
-        <RouterLink class="ds-jobs-back" to="/workspaces">
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 12H5" /><path d="m12 19-7-7 7-7" /></svg>
-          返回
-        </RouterLink>
-      </div>
     </header>
+
+    <!-- doc 9 §9：渲染作业不存在提示（跳转回本列表时携带 notice=not_found） -->
+    <p v-if="route.query.notice === 'not_found'" class="ds-banner" role="alert">
+      要打开的作业不存在或已删除，已回到全部{{ kind === 'collection' ? '采集' : '发布' }}作业列表。
+    </p>
 
     <!-- 筛选：数据源 → 工作区（联动）→ 确认（设计稿 35/37 DATASCOPE 卡片） -->
     <section class="ds-jobs-card">
@@ -337,19 +347,22 @@ function submitCreate() {
               <span class="gj-plain" :title="job.workspace_name">{{ job.workspace_name }}</span>
               <span class="gj-mono">{{ job.job_id }}</span>
               <span class="gj-plain gj-name" :title="job.job_name">{{ job.job_name }}</span>
-              <span class="gj-mono gj-steps" :title="job.default_steps.join(' / ')">
-                {{ job.default_steps.join(' / ') || '—' }}
+              <span class="gj-mono gj-steps" :title="job.default_steps.join('/')">
+                {{ job.default_steps.join('/') || '—' }}
               </span>
               <span>{{ job.latest_revision_no ?? '—' }}</span>
               <span>{{ job.run_count }}</span>
               <span>{{ job.last_run_at ? displayDateMs(job.last_run_at) : '—' }}</span>
-              <RouterLink
-                class="ds-manage"
-                :to="`/workspaces/${job.workspace_id}/${kind === 'collection' ? 'collection' : 'publish'}/jobs/${job.job_id}`"
-              >
-                作业详情
-                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14" /><path d="m12 5 7 7-7 7" /></svg>
-              </RouterLink>
+              <div class="gj-row-actions">
+                <button type="button" class="ds-danger" @click="deleteTarget = job">删除</button>
+                <RouterLink
+                  class="ds-manage"
+                  :to="jobDetailTo(job)"
+                >
+                  作业详情
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14" /><path d="m12 5 7 7-7 7" /></svg>
+                </RouterLink>
+              </div>
             </div>
           </div>
           <div class="ds-jobs-pager">
@@ -421,6 +434,15 @@ function submitCreate() {
       </div>
     </div>
   </div>
+  <DeleteResourceDialog
+    v-if="deleteTarget"
+    kind="job"
+    :job-kind="kind"
+    :target-id="deleteTarget.job_id"
+    :display-name="deleteTarget.job_name"
+    @cancel="deleteTarget = null"
+    @done="deleteTarget = null; loadJobs()"
+  />
 </template>
 
 <style scoped>
@@ -520,12 +542,13 @@ function submitCreate() {
 }
 .gj-row {
   display: grid;
-  /* 表头与数据共用比例列；步骤列预留约三分之一的空间。 */
+  /* 表头与数据共用比例列；步骤列预留约三分之一的空间；
+     操作列按「删除 + 作业详情」两按钮同行预留。 */
   grid-template-columns:
     minmax(90px, 9fr) minmax(90px, 9fr) minmax(100px, 9fr)
     minmax(110px, 12fr) minmax(300px, 34fr)
     minmax(65px, 5fr) minmax(55px, 5fr) minmax(150px, 11fr)
-    minmax(88px, 6fr);
+    minmax(140px, 6fr);
   min-width: 1200px;
   align-items: center;
   column-gap: 16px;
@@ -541,7 +564,15 @@ function submitCreate() {
     minmax(90px, 9fr) minmax(90px, 9fr) minmax(100px, 9fr)
     minmax(110px, 12fr) minmax(300px, 33fr)
     minmax(65px, 5.5fr) minmax(55px, 5.5fr) minmax(150px, 11fr)
-    minmax(88px, 6fr);
+    minmax(140px, 6fr);
+}
+.gj-row-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
 }
 .gj-head {
   background: transparent;

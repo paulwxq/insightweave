@@ -1,6 +1,6 @@
 import { ref, watch, type Ref } from 'vue'
 import { getDimValueConfig, getDomainConfig } from '../api/workspaces'
-import type { DimValueTableParam, DomainParam } from '../api/types'
+import type { DimValueConfigGetResponse, DimValueTableParam, DomainParam } from '../api/types'
 import { dimDraftFromConfig, domainDraftFromConfig } from '../utils/publishStepConfig'
 
 /** 自动加载版本草稿的初值；已有版本参数、用户应用的草稿均不覆盖。 */
@@ -11,12 +11,14 @@ export function usePublishConfigInitialization(
 ) {
   const initializing = ref(false)
   const initError = ref('')
+  const dimConfig = ref<DimValueConfigGetResponse | null>(null)
 
   watch(context, async ([kind, workspaceId], _previous, onCleanup) => {
     let active = true
     onCleanup(() => { active = false })
     initializing.value = false
     initError.value = ''
+    dimConfig.value = null
     if (kind !== 'publish' || typeof workspaceId !== 'string' || !workspaceId) return
 
     initializing.value = true
@@ -25,6 +27,7 @@ export function usePublishConfigInitialization(
       dimDraft.value === null ? getDimValueConfig(workspaceId).then((config) => {
         if (!active || dimDraft.value !== null) return
         dimDraft.value = dimDraftFromConfig(config.tables)
+        dimConfig.value = config
         if (config.comma_string_tables.length) {
           errors.push(`以下表的字段配置包含逗号串，已按未指定处理，请编辑并使用字段列表：${config.comma_string_tables.join('、')}。`)
         }
@@ -44,5 +47,5 @@ export function usePublishConfigInitialization(
     initializing.value = false
   }, { immediate: true, flush: 'post' })
 
-  return { initializing, initError }
+  return { initializing, initError, dimConfig }
 }

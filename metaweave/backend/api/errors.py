@@ -59,6 +59,7 @@ from backend.profile_loading.rel_config_api import (
     RelRegeneratedError,
     RelWriteFailedError,
 )
+from backend.publishing.repository import RelPublishInProgressError
 from backend.publishing.precheck import PublishPrecheckError
 from backend.publishing.publish_service import (
     PublishRunError,
@@ -95,10 +96,15 @@ def _route_template(request: Request) -> str:
 
 
 def _response(status: int, code: str, message: str, *, details=None) -> JSONResponse:
+    from fastapi.encoders import jsonable_encoder
+
     body = {"code": code, "message": message}
     if details is not None:
         body["details"] = details
-    return JSONResponse(status_code=status, content=body)
+    # doc 8.1 §7.3：错误载荷可能携带阻断运行的 UUID/datetime（如作业删除
+    # 的 resource_has_unfinished_runs.details），统一经 jsonable_encoder
+    # 转换，避免 409 因序列化失败变 500
+    return JSONResponse(status_code=status, content=jsonable_encoder(body))
 
 
 def register_exception_handlers(app: FastAPI) -> None:
@@ -335,6 +341,14 @@ def register_exception_handlers(app: FastAPI) -> None:
     async def rel_regenerated(_request: Request, _exc: RelRegeneratedError):
         return _response(409, "rel_regenerated", "Rel 产物已重新生成，请重新加载")
 
+    @app.exception_handler(RelPublishInProgressError)
+    async def rel_publish_in_progress(
+        _request: Request, exc: RelPublishInProgressError
+    ):
+        # doc 8.1 §5.1.1：发布执行期与配置保存的互斥（替代原工作区行锁）；
+        # 错误类统一来自 publishing.repository（domain/rel 配置保存共用）
+        return _response(409, "rel_publish_in_progress", exc.message)
+
     @app.exception_handler(RelWriteFailedError)
     async def rel_write_failed(_request: Request, exc: RelWriteFailedError):
         return _response(500, "rel_write_failed", str(exc))
@@ -461,6 +475,16 @@ def register_exception_handlers(app: FastAPI) -> None:
     @app.exception_handler(ShortIdError)
     async def short_id_invalid(_request: Request, exc: ShortIdError):
         return _response(422, "invalid_request", str(exc))
+
+    # ---- 删除与知识清理（doc 8.1 §7.3：稳定错误码统一映射） ----
+
+    from backend.deletion.errors import DeletionError
+
+    @app.exception_handler(DeletionError)
+    async def deletion_error(_request: Request, exc: DeletionError):
+        return _response(
+            exc.http_status, exc.code, exc.message, details=exc.payload or None
+        )
 
     @app.exception_handler(Exception)
     async def internal_error(request: Request, exc: Exception):

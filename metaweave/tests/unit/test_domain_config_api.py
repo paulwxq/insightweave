@@ -54,11 +54,21 @@ class FakeSession:
         self.source_row = source_row
         self.events: list[str] = []
 
-    def get(self, model, key, with_for_update=None):
+    def scalars(self, statement):
+        # doc 8.1 §7.3：删除任务查询（本假件不建模任务表 → 无未解决任务）
+        return iter([])
+
+    def execute(self, _statement):
+        # doc 8.1 §5.1.1：Rel 发布运行中检查（本假件不建模发布运行 → 无冲突）
+        from types import SimpleNamespace as _NS
+
+        return _NS(scalar_one_or_none=lambda: None)
+
+    def get(self, model, key, **kwargs):
         from backend.persistence.models import DbSourceInfo, WorkspaceInfo
 
         if model is WorkspaceInfo:
-            if with_for_update:
+            if kwargs.get("with_for_update"):
                 self.events.append("lock")
             if self.workspace_row is None or key != self.workspace_row.workspace_id:
                 return None
@@ -341,11 +351,14 @@ def test_multiple_markers_is_404(tmp_path, monkeypatch):
 def test_workspace_or_source_missing_or_disabled(tmp_path, monkeypatch):
     root = _install(monkeypatch, tmp_path, FakeSession(None, _source_row()))
     _write_yaml(root, SAMPLE)
-    with pytest.raises(DomainConfigOutputMissingError, match="工作区不存在"):
+    from backend.deletion.errors import ResourceNotFoundError
+
+    with pytest.raises(ResourceNotFoundError, match="工作区不存在"):
+        # doc 8.1 §7.3：只读守卫先于领域错误（404 resource_not_found）
         read_domain_config(SETTINGS, WORKSPACE_ID)
 
     _install(monkeypatch, tmp_path, FakeSession(_workspace_row(), None))
-    with pytest.raises(MetaLoadSourceNotFoundError):
+    with pytest.raises(ResourceNotFoundError, match="数据源不存在"):
         read_domain_config(SETTINGS, WORKSPACE_ID)
 
     _install(

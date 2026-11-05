@@ -19,7 +19,6 @@ from sqlalchemy import (
     Numeric,
     Text,
     ForeignKey,
-    UniqueConstraint,
     text,
 )
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID as PGUUID
@@ -72,6 +71,27 @@ class DbSourceInfo(Base):
             "AND array_position(selected_schemas, NULL) IS NULL",
             name="db_source_info_schemas_nonempty",
         ),
+        CheckConstraint(
+            "deletion_state IN ('active', 'deleting', 'delete_failed', 'deleted')",
+            name="db_source_info_deletion_state_check",
+        ),
+        CheckConstraint(
+            "(deleted_at IS NULL AND deletion_state IN "
+            "('active', 'deleting', 'delete_failed')) "
+            "OR (deleted_at IS NOT NULL AND deletion_state = 'deleted')",
+            name="db_source_info_deletion_state_time_check",
+        ),
+        CheckConstraint(
+            "(deleted_at IS NULL AND host IS NOT NULL AND port IS NOT NULL "
+            "AND db_name IS NOT NULL AND username IS NOT NULL "
+            "AND password_ciphertext IS NOT NULL AND selected_schemas IS NOT NULL) "
+            "OR (deleted_at IS NOT NULL AND host IS NULL AND port IS NULL "
+            "AND db_name IS NULL AND username IS NULL "
+            "AND password_ciphertext IS NULL AND selected_schemas IS NULL "
+            "AND sslmode IS NULL AND db_version IS NULL AND description IS NULL "
+            "AND is_active = false AND deletion_state = 'deleted')",
+            name="db_source_info_connection_presence_check",
+        ),
         Index(
             "db_source_info_connection_idx",
             "host",
@@ -90,14 +110,18 @@ class DbSourceInfo(Base):
     display_name: Mapped[str] = mapped_column(Text, nullable=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     db_type: Mapped[str] = mapped_column(Text, nullable=False)
-    host: Mapped[str] = mapped_column(Text, nullable=False)
-    port: Mapped[int] = mapped_column(Integer, nullable=False)
-    db_name: Mapped[str] = mapped_column(Text, nullable=False)
-    username: Mapped[str] = mapped_column(Text, nullable=False)
-    password_ciphertext: Mapped[str] = mapped_column(Text, nullable=False)
+    # doc 8.1 §3.5：连接字段仅对有效源强制非空（条件约束），
+    # 删除完成后按字段清单置 NULL，保留最小登记。
+    host: Mapped[str | None] = mapped_column(Text, nullable=True)
+    port: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    db_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    username: Mapped[str | None] = mapped_column(Text, nullable=True)
+    password_ciphertext: Mapped[str | None] = mapped_column(Text, nullable=True)
     sslmode: Mapped[str | None] = mapped_column(Text, nullable=True)
     db_version: Mapped[str | None] = mapped_column(Text, nullable=True)
-    selected_schemas: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False)
+    selected_schemas: Mapped[list[str] | None] = mapped_column(
+        ARRAY(Text), nullable=True
+    )
     is_active: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default=text("true")
     )
@@ -107,6 +131,12 @@ class DbSourceInfo(Base):
     )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=text("now()"), nullable=False
+    )
+    deleted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    deletion_state: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default=text("'active'")
     )
 
 
@@ -124,8 +154,22 @@ class WorkspaceInfo(Base):
         CheckConstraint(
             "length(btrim(workspace_name)) > 0", name="workspace_info_name_nonblank"
         ),
-        UniqueConstraint(
-            "source_id", "workspace_name", name="workspace_info_source_name_key"
+        CheckConstraint(
+            "deletion_state IN ('active', 'deleting', 'delete_failed', 'deleted')",
+            name="workspace_info_deletion_state_check",
+        ),
+        CheckConstraint(
+            "(deleted_at IS NULL AND deletion_state IN "
+            "('active', 'deleting', 'delete_failed')) "
+            "OR (deleted_at IS NOT NULL AND deletion_state = 'deleted')",
+            name="workspace_info_deletion_state_time_check",
+        ),
+        Index(
+            "workspace_info_active_name_idx",
+            "source_id",
+            "workspace_name",
+            unique=True,
+            postgresql_where=text("deleted_at IS NULL"),
         ),
         {"schema": "public"},
     )
@@ -145,6 +189,12 @@ class WorkspaceInfo(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=text("now()"), nullable=False
     )
+    deleted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    deletion_state: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default=text("'active'")
+    )
 
 
 class CollectionJobInfo(Base):
@@ -159,8 +209,12 @@ class CollectionJobInfo(Base):
         CheckConstraint(
             "length(btrim(job_name)) > 0", name="collection_job_info_name_nonblank"
         ),
-        UniqueConstraint(
-            "workspace_id", "job_name", name="collection_job_info_workspace_name_key"
+        Index(
+            "collection_job_info_active_name_idx",
+            "workspace_id",
+            "job_name",
+            unique=True,
+            postgresql_where=text("deleted_at IS NULL"),
         ),
         {"schema": "public"},
     )
@@ -181,6 +235,9 @@ class CollectionJobInfo(Base):
     )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=text("now()"), nullable=False
+    )
+    deleted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
     )
 
 
@@ -361,8 +418,12 @@ class PublishJobInfo(Base):
         CheckConstraint(
             "length(btrim(job_name)) > 0", name="publish_job_info_name_nonblank"
         ),
-        UniqueConstraint(
-            "workspace_id", "job_name", name="publish_job_info_workspace_name_key"
+        Index(
+            "publish_job_info_active_name_idx",
+            "workspace_id",
+            "job_name",
+            unique=True,
+            postgresql_where=text("deleted_at IS NULL"),
         ),
         {"schema": "public"},
     )
@@ -383,6 +444,9 @@ class PublishJobInfo(Base):
     )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=text("now()"), nullable=False
+    )
+    deleted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
     )
 
 
@@ -739,3 +803,62 @@ class TableDomain(Base):
     loaded_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=text("now()"), nullable=False
     )
+
+
+class ResourceDeletionTask(Base):
+    """数据源/工作区删除与源级知识清理任务（doc 8.1 §7）。
+
+    同源互斥由部分唯一索引保证（pending/running 每源至多一条）；
+    queued_at 由数据库默认值生成并随每次重试显式刷新。
+    """
+
+    __tablename__ = "resource_deletion_task"
+    __table_args__ = (
+        CheckConstraint(
+            "action IN ('delete_source', 'delete_workspace', 'clear_source_knowledge')",
+            name="resource_deletion_task_action_check",
+        ),
+        CheckConstraint(
+            "status IN ('pending', 'running', 'failed', 'success')",
+            name="resource_deletion_task_status_check",
+        ),
+        CheckConstraint(
+            "action != 'delete_workspace' OR workspace_id IS NOT NULL",
+            name="resource_deletion_task_workspace_required_check",
+        ),
+        Index(
+            "resource_deletion_task_one_active_source_idx",
+            "source_id",
+            unique=True,
+            postgresql_where=text("status IN ('pending', 'running')"),
+        ),
+        {"schema": "public"},
+    )
+
+    task_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
+    action: Mapped[str] = mapped_column(Text, nullable=False)
+    target_id: Mapped[str] = mapped_column(Text, nullable=False)
+    source_id: Mapped[str] = mapped_column(Text, nullable=False)
+    workspace_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default=text("'pending'")
+    )
+    step_results: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=text("CURRENT_TIMESTAMP"),
+        nullable=False,
+    )
+    queued_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=text("CURRENT_TIMESTAMP"),
+        nullable=False,
+    )
+    started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    requested_by_user_id: Mapped[UUID | None] = mapped_column(PGUUID(as_uuid=True))

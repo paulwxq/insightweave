@@ -58,6 +58,14 @@ CREATE_INDEX_START_PATTERN = re.compile(
     r"(?:\s+USING\s+(?P<method>[A-Za-z0-9_]+))?\s*(?=\()",
     re.IGNORECASE | re.DOTALL,
 )
+# 匹配完整关键词；constraint_count、unique_constraints 等都是普通字段名。
+TABLE_CONSTRAINT_START_PATTERN = re.compile(
+    r"^(?:(?P<constraint>CONSTRAINT)(?=\s|$)|"
+    r"(?P<primary_key>PRIMARY\s+KEY)(?=\s|\(|$)|"
+    r"(?P<unique>UNIQUE)(?=\s|\(|$)|"
+    r"(?P<foreign_key>FOREIGN\s+KEY)(?=\s|\(|$))",
+    re.IGNORECASE,
+)
 
 CHAR_TYPES = {
     "character varying",
@@ -381,13 +389,7 @@ class DDLLoader:
         ordinal = 1
         for definition in definitions:
             stripped = definition.strip()
-            upper = stripped.upper()
-            if (
-                upper.startswith("CONSTRAINT")
-                or upper.startswith("PRIMARY KEY")
-                or upper.startswith("UNIQUE")
-                or upper.startswith("FOREIGN KEY")
-            ):
+            if TABLE_CONSTRAINT_START_PATTERN.match(stripped):
                 continue
             if not stripped:
                 continue
@@ -511,26 +513,27 @@ class DDLLoader:
         # 处理表级约束
         for definition in definitions:
             stripped = definition.strip()
-            upper = stripped.upper()
+            constraint_match = TABLE_CONSTRAINT_START_PATTERN.match(stripped)
+            if constraint_match is None:
+                continue
 
             # 处理 CONSTRAINT ... PRIMARY KEY
-            if upper.startswith("CONSTRAINT"):
+            if constraint_match.lastgroup == "constraint":
                 tokens = stripped.split(None, 2)
                 if len(tokens) < 3:
                     # 不内联约束原文（可能含字面量），与字段定义同样的脱敏规则
                     raise DDLLoaderError(f"约束语句无效 ({ddl_path})")
                 constraint_name = tokens[1]
                 remainder = tokens[2]
-                remainder_upper = remainder.upper()
+                kind_match = TABLE_CONSTRAINT_START_PATTERN.match(remainder)
+                kind = kind_match.lastgroup if kind_match else None
 
-                if "PRIMARY KEY" in remainder_upper:
+                if kind == "primary_key":
                     columns = self._extract_column_list(remainder, "PRIMARY KEY")
                     primary_keys.append(
                         PrimaryKey(constraint_name=constraint_name, columns=columns)
                     )
-                elif (
-                    "UNIQUE" in remainder_upper and "FOREIGN KEY" not in remainder_upper
-                ):
+                elif kind == "unique":
                     columns = self._extract_column_list(remainder, "UNIQUE")
                     unique_constraints.append(
                         UniqueConstraint(
@@ -539,12 +542,12 @@ class DDLLoader:
                             is_partial=False,
                         )
                     )
-                elif "FOREIGN KEY" in remainder_upper:
+                elif kind == "foreign_key":
                     fk = self._parse_foreign_key(constraint_name, remainder, ddl_path)
                     foreign_keys.append(fk)
 
             # 处理无名表级 PRIMARY KEY
-            elif upper.startswith("PRIMARY KEY"):
+            elif constraint_match.lastgroup == "primary_key":
                 columns = self._extract_column_list(stripped, "PRIMARY KEY")
                 pk_name = f"{metadata.table_name}_pkey"
                 primary_keys.append(
@@ -556,7 +559,10 @@ class DDLLoader:
         metadata.foreign_keys = foreign_keys
 
     def _extract_column_list(self, text: str, keyword: str) -> List[str]:
-        pattern = re.compile(keyword + r"\s*\((?P<cols>[^\)]+)\)", re.IGNORECASE)
+        keyword_pattern = r"\s+".join(re.escape(part) for part in keyword.split())
+        pattern = re.compile(
+            keyword_pattern + r"\s*\((?P<cols>[^\)]+)\)", re.IGNORECASE
+        )
         match = pattern.search(text)
         if not match:
             return []

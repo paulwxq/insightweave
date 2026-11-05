@@ -46,4 +46,24 @@ def create_app(
     app.include_router(workspaces_router)
     app.include_router(assets_router)
     app.include_router(asset_objects_router)
+
+    @app.on_event("startup")
+    def _deletion_startup_scan() -> None:
+        """doc 8.1 §7.2：启动恢复扫描，只修复状态不自动执行清理。
+
+        METAWEAVE_DELETION_STARTUP_SCAN=0 可关闭（测试环境隔离用）；
+        扫描失败仅记日志，不阻断启动，页面仍可显式重试。
+        """
+        import logging
+        import os
+
+        if os.getenv("METAWEAVE_DELETION_STARTUP_SCAN", "1") != "1":
+            return
+        from backend.deletion.service import startup_scan
+
+        try:
+            startup_scan(settings)
+        except Exception:  # noqa: BLE001 —— 扫描失败不阻断启动
+            logging.getLogger("backend.api").exception("删除任务启动扫描失败")
+
     return app

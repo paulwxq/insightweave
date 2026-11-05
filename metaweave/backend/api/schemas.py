@@ -67,6 +67,65 @@ class DataSourceActivationRequest(BaseModel):
     is_active: StrictBool
 
 
+class DeletionConfirmRequest(BaseModel):
+    """删除/清理确认体：必须回传目标 ID（doc 8.1 §4/§7）。"""
+
+    confirm_id: str
+
+
+class DeletionTargetConfirmation(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    previous_fingerprint: str = Field(pattern=r"^[0-9a-f]{16}$")
+    current_fingerprint: str = Field(pattern=r"^[0-9a-f]{16}$")
+
+
+class DeletionRetryRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    target_confirmation: DeletionTargetConfirmation | None = None
+
+
+class DeletionTaskItem(BaseModel):
+    task_id: str
+    action: str
+    status: str
+    source_id: str
+    workspace_id: str | None = None
+    target_id: str
+    error_message: str | None = None
+    created_at: str | None = None
+    queued_at: str | None = None
+    started_at: str | None = None
+    finished_at: str | None = None
+
+
+class DeletionTaskDetail(DeletionTaskItem):
+    can_retry: bool
+    retry_reason: str | None = None
+    steps: dict[str, Any] = {}
+
+
+class DeletionTaskSummary(BaseModel):
+    """对象响应附带的删除任务摘要（doc 8.1 §7.0）。"""
+
+    task_id: str
+    action: str
+    status: str
+    source_id: str
+    workspace_id: str | None = None
+    target_id: str
+    error_message: str | None = None
+
+
+class HistorySourceSummary(BaseModel):
+    """历史来源摘要（doc 8.1 §8.2）：不含连接字段，不解密、不建连。"""
+
+    source_id: str
+    display_name: str
+    deleted: bool
+
+
 class DataSourceListItem(BaseModel):
     source_id: str
     display_name: str
@@ -83,6 +142,7 @@ class DataSourceListItem(BaseModel):
     is_active: bool
     last_collected_at: str | None = None
     last_published_at: str | None = None
+    deletion_task: DeletionTaskSummary | None = None
 
 
 class DataSourceListResponse(BaseModel):
@@ -104,6 +164,10 @@ class WorkspaceItem(BaseModel):
     workspace_desc: str | None = None
     created_at: str
     updated_at: str
+    deletion_task: DeletionTaskSummary | None = None
+    effective_state: str | None = None
+    blocked_by: dict[str, str] | None = None
+    blocked_reason: str | None = None
 
 
 class WorkspacePageItem(WorkspaceItem):

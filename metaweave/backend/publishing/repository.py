@@ -108,3 +108,86 @@ def get_publish_run_context(session: Session, publish_run_id: UUID):
     job = session.get(PublishJobInfo, run.publish_job_id)
     workspace = session.get(WorkspaceInfo, job.workspace_id) if job else None
     return run, job, workspace
+
+
+def rel_publish_in_progress(session: Session, workspace_id: str):
+    """该工作区是否有 running 的 rel 发布步骤（doc 8.1 §5.1.1）。
+
+    `_publish_rel` 拆分事务后不再跨 Neo4j 调用持工作区行锁；同工作区的
+    Rel 配置保存与重新采集改用本检查互斥，替代原行锁提供的保护。
+    """
+    from sqlalchemy import select
+
+    from backend.persistence.models import (
+        PublishJobInfo,
+        PublishRunInfo,
+        PublishRunStep,
+    )
+
+    return session.execute(
+        select(PublishRunInfo.publish_run_id)
+        .join(
+            PublishRunStep,
+            PublishRunStep.publish_run_id == PublishRunInfo.publish_run_id,
+        )
+        .join(
+            PublishJobInfo,
+            PublishJobInfo.publish_job_id == PublishRunInfo.publish_job_id,
+        )
+        .where(
+            PublishJobInfo.workspace_id == workspace_id,
+            PublishRunStep.step_name == "rel",
+            PublishRunStep.status == "running",
+            PublishRunInfo.status == "running",
+        )
+        .limit(1)
+    ).scalar_one_or_none()
+
+
+class RelPublishInProgressError(Exception):
+    """409 rel_publish_in_progress：同工作区有 running 的 Rel 发布（doc 8.1 §5.1.1）。
+
+    `_publish_rel` 拆分事务后不再跨 Neo4j 调用持工作区行锁；Rel 发布
+    输入（JSON/Rel/Domain 产物与配置）的写入方改用运行中检查互斥。
+    """
+
+    def __init__(self, message: str = "Rel 发布正在执行，请等待完成后再修改其输入"):
+        super().__init__(message)
+        self.message = message
+
+
+# Rel 发布生成器实际读取的采集输入目录步骤（json/domain/rel）
+REL_PUBLISH_INPUT_STEPS = ("json", "domain", "rel")
+
+
+def collection_inputs_in_progress(session: Session, workspace_id: str):
+    """该工作区是否有 running 的 json/domain/rel 采集步骤（doc 8.1 §5.1.1）。
+
+    Rel 发布认领前的反向检查：采集先开始时，发布不得读取正在改写的输入。
+    """
+    from sqlalchemy import select
+
+    from backend.persistence.models import (
+        CollectionJobInfo,
+        CollectionRunInfo,
+        CollectionRunStep,
+    )
+
+    return session.execute(
+        select(CollectionRunInfo.collection_run_id)
+        .join(
+            CollectionRunStep,
+            CollectionRunStep.collection_run_id == CollectionRunInfo.collection_run_id,
+        )
+        .join(
+            CollectionJobInfo,
+            CollectionJobInfo.collection_job_id == CollectionRunInfo.collection_job_id,
+        )
+        .where(
+            CollectionJobInfo.workspace_id == workspace_id,
+            CollectionRunStep.step_name.in_(REL_PUBLISH_INPUT_STEPS),
+            CollectionRunStep.status == "running",
+            CollectionRunInfo.status == "running",
+        )
+        .limit(1)
+    ).scalar_one_or_none()

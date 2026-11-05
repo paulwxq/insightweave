@@ -33,7 +33,10 @@ import type {
   WorkspaceItem,
   WorkspacePageResponse,
   WorkspacePatchRequest,
+  DeletionTaskItem,
+  WorkspaceDeletionPreview,
 } from './types'
+
 
 // ---- 工作区 ----
 
@@ -325,4 +328,24 @@ export function getRelObjectColumns(
     `/api/workspaces/${workspaceId}/rel-config/object-columns` +
       `?schema_name=${encodeURIComponent(schemaName)}&object_name=${encodeURIComponent(objectName)}`,
   )
+}
+
+// ---- 删除（doc 8.1 §5.2/§7） ----
+
+export function deleteWorkspace(workspaceId: string, confirmId: string) {
+  return apiRequest<DeletionTaskItem>(`/api/workspaces/${workspaceId}`, {
+    method: 'DELETE',
+    body: JSON.stringify({ confirm_id: confirmId }),
+  })
+}
+
+export function getWorkspaceDeletionPreview(workspaceId: string) {
+  return apiRequest<WorkspaceDeletionPreview>(
+    `/api/workspaces/${workspaceId}/deletion-preview`,
+  )
+}
+
+export function deleteJob(kind: 'collection' | 'publish', jobId: string) {
+  const path = kind === 'collection' ? 'collection-jobs' : 'publish-jobs'
+  return apiRequest<void>(`/api/${path}/${jobId}`, { method: 'DELETE' })
 }

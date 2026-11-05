@@ -8,9 +8,17 @@
 .readonly-item.full{grid-column:1/-1}
 .page-header .source-id{margin:0 0 8px;font-size:13px;line-height:1.4;color:#8a9bb1;overflow-wrap:anywhere}
 .sidebar-nav a.nav-sub{padding-left:36px}
-.detail-actions{display:flex;gap:10px;flex-wrap:wrap}
+.detail-actions{display:flex;align-items:flex-start;gap:10px;flex-wrap:wrap}
 .dialog-backdrop{position:fixed;inset:0;background:rgba(22,38,61,.45);display:grid;place-items:center;padding:24px;z-index:20}
 .dialog-panel{width:min(100%,480px);background:#fff;border:1px solid #d9e5f5;border-radius:16px;padding:22px}
+.del-blocking{margin:8px 0 0;font-size:12px;color:#a54452}
+.del-blocking-title{margin:0;font-weight:700}
+.del-blocking ul{margin:6px 0;padding:0;list-style:none;display:flex;flex-direction:column;gap:4px}
+.del-blocking li{display:flex;flex-direction:column;gap:2px;padding:6px 10px;background:#fff;border:1px solid #f0d4d7;border-radius:8px}
+.del-blocking-job{color:#2E7CD6;font-weight:700;overflow-wrap:anywhere}
+.del-blocking-job:hover{text-decoration:underline}
+.del-blocking-meta{color:#8a6b70;font-size:11px;overflow-wrap:anywhere}
+.del-blocking-hint{margin:6px 0 0}
 .dialog-panel.with-close{position:relative}
 .dialog-close{position:absolute;right:12px;top:10px;border:0;background:transparent;color:#8A99AC;font-size:15px;line-height:1;padding:6px;border-radius:8px;display:inline-flex;align-items:center;justify-content:center}.dialog-close svg{width:16px;height:16px;display:block;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
 .dialog-close:hover{background:#EEF3F9;color:#41597A}
@@ -61,12 +69,12 @@ body{background:#F2F6FB;color:#17293F}
 .ds-source-top{display:flex;align-items:center;gap:8px}
 .ds-source-icon{width:38px;height:38px;border-radius:10px;background:#C9DEF6;color:#2E7CD6;display:grid;place-items:center;flex-shrink:0}
 .ds-source-icon svg{width:18px;height:18px}
-.ds-source-top h3{margin:0;font-size:15px;font-weight:700;color:#17293F}
+.ds-source-top h3{margin:0;font-size:15px;font-weight:700;color:#17293F;min-width:0;overflow-wrap:anywhere}
 .ds-source-top h3 a:hover{color:#2E7CD6;text-decoration:underline}
 .ds-status{background:#DDF0EB;color:#0E9F8A;border-radius:12px;padding:5px 11px;font-size:11px;font-weight:700;white-space:nowrap}
 .ds-status.off{background:#EEF1F5;color:#66788F}
-.ds-spacer{flex:1}
-.ds-manage{border:1px solid #D9E3EF;border-radius:12px;padding:5px 12px;color:#2E7CD6;font-size:11px;font-weight:700;background:#fff}
+.ds-source-actions{display:flex;align-items:center;justify-content:flex-end;gap:8px}
+.ds-manage{border:1px solid #D9E3EF;border-radius:12px;padding:5px 12px;color:#2E7CD6;font-size:10px;font-weight:700;background:#fff}
 .ds-source-info,.ds-source-foot{display:flex;flex-direction:column;gap:4px}
 .ds-source-info p,.ds-source-desc,.ds-source-foot p{margin:0;color:#66788F;font-size:12px;line-height:1.45}
 .ds-source-id{font-family:"JetBrains Mono",ui-monospace,monospace;font-size:10px;overflow-wrap:anywhere}
@@ -85,19 +93,18 @@ body{background:#F2F6FB;color:#17293F}
 
 .ds-detail{display:flex;flex-direction:column;gap:28px;color:#17293F;font-family:"Noto Sans SC","PingFang SC","Microsoft YaHei",sans-serif}
 .ds-back{color:#2E7CD6;font-size:12px;font-weight:700}
-.ds-detail-header{display:flex;justify-content:space-between;align-items:flex-end;gap:22px}
+.ds-detail-header{display:flex;justify-content:space-between;align-items:flex-start;gap:22px}
 .ds-detail .ds-title h1{margin:10px 0 0;font-family:"Noto Serif SC","Songti SC",Georgia,serif;font-size:38px;font-weight:700;color:#17293F}
 .ds-detail .ds-source-id{margin:10px 0 0;color:#66788F;font-family:"JetBrains Mono",ui-monospace,monospace;font-size:11px;overflow-wrap:anywhere}
 .ds-lead{margin:10px 0 0;color:#66788F;font-size:13px;line-height:21px}
-.ds-detail-actions{display:flex;align-items:center;gap:10px;flex-shrink:0}
+.ds-detail-actions{display:flex;align-items:flex-start;gap:10px;flex-shrink:0}
 .ds-enable{display:inline-flex;align-items:center;gap:8px;padding:10px 4px;border:0;background:transparent;color:#66788F;font-size:12px;font-weight:400}
 .ds-switch{position:relative;width:36px;height:20px;border-radius:10px;background:#2E7CD6}
 .ds-switch span{position:absolute;top:2px;left:18px;width:16px;height:16px;border-radius:50%;background:#fff}
 .ds-switch.off{background:#CBD6E4}
 .ds-switch.off span{left:2px}
-.ds-danger,.ds-edit{display:inline-flex;align-items:center;border-radius:12px;padding:10px 18px;font-size:12px;font-weight:700;background:#fff}
-.ds-danger{border:1px solid #EFCACA;color:#C64F4F}
-.ds-edit{border:1px solid #D9E3EF;color:#2E7CD6}
+.ds-danger{display:inline-flex;align-items:center;border-radius:12px;padding:5px 12px;font-size:10px;font-weight:700;background:#fff;border:1px solid #EFCACA;color:#C64F4F}
+.ds-edit{display:inline-flex;align-items:center;border-radius:12px;padding:10px 18px;font-size:12px;font-weight:700;background:#fff;border:1px solid #D9E3EF;color:#2E7CD6}
 .ds-panel{background:#fff;border:1px solid #D9E3EF;border-radius:20px;padding:28px;display:flex;flex-direction:column;gap:16px}
 .ds-panel-row{flex-direction:row;align-items:center;justify-content:space-between;padding:18px 24px}
 .ds-panel-head{display:flex;align-items:center;gap:12px}
@@ -151,8 +158,10 @@ body{background:#F2F6FB;color:#17293F}
 
 .ds-jobs{display:flex;flex-direction:column;gap:28px;color:#17293F;font-family:"Noto Sans SC","PingFang SC","Microsoft YaHei",sans-serif}
 .ds-jobs-header{display:flex;justify-content:space-between;align-items:flex-start;gap:22px}
-.ds-jobs-back{display:inline-flex;align-items:center;gap:6px;flex-shrink:0;border:1px solid #D9E3EF;border-radius:12px;background:#fff;color:#2E7CD6;padding:10px 16px;font-size:12px;font-weight:700}
-.ds-jobs-back svg{width:14px;height:14px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+.ds-jobs-back{display:inline-flex;align-items:center;gap:4px;flex-shrink:0;border:1px solid #D9E3EF;border-radius:12px;background:#fff;color:#2E7CD6;padding:5px 12px;font-size:10px;font-weight:700}
+.rx-run-publish-cta{display:flex;justify-content:flex-end;padding-top:14px;border-top:1px solid #EDF2F8;margin-top:4px}
+.rx-run-publish-link{display:inline-flex;align-items:center;gap:4px;border:1px solid #D9E3EF;border-radius:12px;background:#fff;color:#2E7CD6;padding:5px 12px;font-size:10px;font-weight:700}
+.ds-jobs-back svg{width:11px;height:11px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
 .ds-jobs-header h1,.ds-jobs-card h2{margin:10px 0 0;font-family:"Noto Serif SC","Songti SC",Georgia,serif;font-weight:700;color:#17293F}
 .ds-jobs-header h1{font-size:38px}
 .ds-jobs-header p,.ds-jobs-list-head p{margin:10px 0 0;color:#66788F;font-size:13px;line-height:21px}
@@ -200,14 +209,13 @@ body{background:#F2F6FB;color:#17293F}
 @media(max-width:960px){.ds-jobs-facts,.ds-jobs-list-head{grid-template-columns:1fr}.ds-jobs-header,.ds-jobs-list-head,.ds-jobs-pager{flex-direction:column;align-items:flex-start}.ds-jobs-row,.ds-publish-jobs-row{grid-template-columns:1fr}.ds-jobs-header h1{font-size:32px}}
 
 .ds-new-job{display:flex;flex-direction:column;gap:28px;color:#17293F;font-family:"Noto Sans SC","PingFang SC","Microsoft YaHei",sans-serif}
-.ds-new-job-header{display:flex;justify-content:space-between;align-items:flex-end;gap:22px}
+.ds-new-job-header{display:flex;justify-content:space-between;align-items:flex-start;gap:22px}
 .ds-new-job-header h1{margin:10px 0 0;font-family:"Noto Serif SC","Songti SC",Georgia,serif;font-size:38px;font-weight:700;color:#17293F}
 .ds-new-job-header p,.ds-new-job-steps p{margin:10px 0 0;color:#66788F;font-size:13px;line-height:21px}
 .ds-new-job-actions{display:flex;align-items:center;gap:10px;flex-shrink:0}
-.ds-new-job-back,.ds-new-job-run,.ds-new-job-edit{display:inline-flex;align-items:center;gap:8px;border-radius:12px;padding:11px 18px;font-size:13px;font-weight:700}
-.ds-new-job-back{border:1px solid #D9E3EF;background:#fff;color:#17293F}
+.ds-new-job-run,.ds-new-job-edit{display:inline-flex;align-items:center;gap:8px;border-radius:12px;padding:11px 18px;font-size:13px;font-weight:700}
 .ds-new-job-run{border:0;background:#2E7CD6;color:#fff}
-.ds-new-job-back svg,.ds-new-job-run svg{width:15px;height:15px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+.ds-new-job-run svg{width:15px;height:15px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
 .ds-new-job-run svg{fill:currentColor;stroke:none}
 .ds-new-job-bar{display:flex;align-items:center;gap:20px;background:#fff;border:1px solid #D9E3EF;border-radius:16px;padding:16px 20px}
 .ds-new-job-bar-title{color:#66788F;font-size:11px;font-weight:700;letter-spacing:1px;white-space:nowrap}

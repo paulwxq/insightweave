@@ -217,6 +217,22 @@ def create_publish_run(
                 raise MetaLoadSourceNotFoundError("未找到指定 source_id 的数据源")
             if not source.is_active:
                 raise MetaLoadSourceDisabledError("指定数据源已禁用，不能发布")
+            # doc 8.1 §5.1.1：源 → 工作区 → 发布作业加锁，锁内经完整层级守卫复查
+            from backend.access_guards import require_job
+            from backend.deletion.locks import (
+                lock_job_row,
+                lock_source_row,
+                lock_workspace_row,
+            )
+
+            source = lock_source_row(session, workspace.source_id)
+            workspace_row = lock_workspace_row(session, job.workspace_id)
+            job = lock_job_row(session, "publish", publish_job_id)
+            require_job(session, "publish", publish_job_id, for_write=True)
+            if job is None or workspace_row is None or source is None:
+                raise PublishRunError("发布作业、工作区或数据源不存在")
+            if not source.is_active:
+                raise MetaLoadSourceDisabledError("指定数据源已禁用，不能发布")
 
             resolved = resolve_run_request(
                 mode=mode,
@@ -241,7 +257,11 @@ def create_publish_run(
                 effective_params=resolved.effective_step_params,
             )
             failures = [
-                {"step": step, "reason": result.reason, **({"code": result.code} if result.code else {})}
+                {
+                    "step": step,
+                    "reason": result.reason,
+                    **({"code": result.code} if result.code else {}),
+                }
                 for step, result in results.items()
                 if not result.ready
             ]
@@ -368,9 +388,29 @@ def _claim_publish_step(
     )
 
     with platform_session(settings) as session:
-        workspace = session.get(WorkspaceInfo, workspace_id, with_for_update=True)
-        if workspace is None:
+        # doc 8.1 §5.1.1：普通查询只用于定位父级；锁序为源 → 工作区
+        from backend.deletion.locks import lock_source_row, lock_workspace_row
+
+        probe = session.get(WorkspaceInfo, workspace_id)
+        if probe is None:
             return "工作区不存在"
+        source_row = lock_source_row(session, probe.source_id)
+        workspace = lock_workspace_row(session, workspace_id)
+        if source_row is None or workspace is None:
+            return "数据源或工作区不存在"
+        if workspace.source_id != source_row.source_id:
+            return "工作区归属已变化，不能认领发布步骤"
+        if getattr(source_row, "deletion_state", "active") != "active":
+            return "数据源正在删除或已删除，不能认领发布步骤"
+        if getattr(workspace, "deletion_state", "active") != "active":
+            return "工作区正在删除，不能认领发布步骤"
+        if step_name == "rel":
+            # doc 8.1 §5.1.1：反向检查——json/domain/rel 采集先开始时，
+            # Rel 发布不得读取正在改写的输入
+            from backend.publishing.repository import collection_inputs_in_progress
+
+            if collection_inputs_in_progress(session, workspace_id) is not None:
+                return "该工作区 JSON/Domain/Rel 采集正在执行，不能发布 Rel，请稍后重试"
         conflict = session.execute(
             select(PublishRunInfo.publish_run_id)
             .join(
@@ -495,9 +535,7 @@ def _execute_step(
         if step_name in ("dim_value", "domain"):
             step_row = get_run_step(PUBLISH_RUN, session, run_id, step_name)
             frozen = step_row.step_config if step_row is not None else None
-            effective_params = {
-                step_name: frozen if isinstance(frozen, dict) else {}
-            }
+            effective_params = {step_name: frozen if isinstance(frozen, dict) else {}}
         else:
             effective_params = None
         result = check_step(
@@ -645,6 +683,10 @@ def _publish_db(settings, run_id, workspace_id, *, input_manifest, payload) -> N
     source_id = _source_id(settings, workspace_id)
     fields, _dir = read_db_profile_input(source_id, workspace_id)
     with platform_session(settings) as session:
+        # doc 8.1 §5.1.1：先锁源再锁工作区（原仅工作区 FOR UPDATE）
+        from backend.deletion.locks import lock_source_row
+
+        lock_source_row(session, source_id)
         session.get(WorkspaceInfo, workspace_id, with_for_update=True)
         _reverify_source(session, source_id)
         replace_db_profile(session, run_id, fields)
@@ -663,6 +705,10 @@ def _publish_ddl(settings, run_id, workspace_id, *, input_manifest, payload) -> 
     source_id = _source_id(settings, workspace_id)
     rows, _dir = read_ddl_definitions(source_id, workspace_id)
     with platform_session(settings) as session:
+        # doc 8.1 §5.1.1：先锁源再锁工作区（原仅工作区 FOR UPDATE）
+        from backend.deletion.locks import lock_source_row
+
+        lock_source_row(session, source_id)
         session.get(WorkspaceInfo, workspace_id, with_for_update=True)
         _reverify_source(session, source_id)
         session.execute(
@@ -693,6 +739,10 @@ def _publish_json(settings, run_id, workspace_id, *, input_manifest, payload) ->
         table_rows, column_rows = build_profile_rows(
             source_id, run_id, documents, registration.selected_schemas
         )
+        # doc 8.1 §5.1.1：先锁源再锁工作区（原仅工作区 FOR UPDATE）
+        from backend.deletion.locks import lock_source_row
+
+        lock_source_row(session, source_id)
         session.get(WorkspaceInfo, workspace_id, with_for_update=True)
         _reverify_source(session, source_id)
         session.execute(delete(TableProfile).where(TableProfile.source_id == source_id))
@@ -716,6 +766,10 @@ def _publish_domain(settings, run_id, workspace_id, *, input_manifest, payload) 
     source_id = _source_id(settings, workspace_id)
     with platform_session(settings) as session:
         registration = read_registration_snapshot(session, source_id)
+        # doc 8.1 §5.1.1：先锁源再锁工作区（原仅工作区 FOR UPDATE）
+        from backend.deletion.locks import lock_source_row
+
+        lock_source_row(session, source_id)
         session.get(WorkspaceInfo, workspace_id, with_for_update=True)
         _reverify_source(session, source_id)
         # doc 7.2 §7.4：payload 为预检/执行期复查通过的有效域清单（运行快照），
@@ -851,14 +905,26 @@ def _dim_value_failure_summary(result: dict) -> str:
 
 
 def _publish_rel(settings, run_id, workspace_id, *, input_manifest, payload) -> None:
-    """rel 发布：锁内复查 → 整目录备份 cql → 生成 → validate → load Neo4j。"""
+    """rel 发布：短事务准备 → 事务外执行 → 短事务收尾（doc 8.1 §5.1.1）。
+
+    准备事务按“源 → 工作区”加锁复查 marker/指纹并取输入快照，提交即释放
+    行锁；备份/生成/validate/load Neo4j 均在会话关闭后执行，运行与步骤保持
+    running；loader 关闭后另开短事务记录成功（失败经 _StepFailed 走既有
+    收尾路径）。同工作区的 Rel 配置保存与重新采集由运行中检查互斥
+    （write_rel_config / _claim_step），不依赖本函数持有的行锁。
+    """
     from backend.profile_loading.rel_loader import (
         RelPrecheckError,
         capture_rel_precheck_snapshot,
     )
 
     source_id = _source_id(settings, workspace_id)
+
+    # ---- 短事务准备：锁内复查 + 输入快照，提交释放行锁 ----
     with platform_session(settings) as session:
+        from backend.deletion.locks import lock_source_row
+
+        lock_source_row(session, source_id)
         session.get(WorkspaceInfo, workspace_id, with_for_update=True)
         _reverify_source(session, source_id)
         # 锁下复查三目录 marker 与内容（预检后变化 → blocked）
@@ -885,8 +951,6 @@ def _publish_rel(settings, run_id, workspace_id, *, input_manifest, payload) -> 
             raise _StepBlocked("Rel 产物内容已变更（预检后有编辑保存），请重新发布")
 
         cql_dir = resolve_cql_output_dir(source_id, workspace_id)
-        cql_dir.mkdir(parents=True, exist_ok=True)
-        backup_directory_before_update(cql_dir)
         managed_snapshot = build_managed_output_snapshot(
             snapshot.main_config,
             source_id,
@@ -894,83 +958,90 @@ def _publish_rel(settings, run_id, workspace_id, *, input_manifest, payload) -> 
             snapshot.registration.db_name,
             snapshot.registration.selected_schemas,
         )
-        domain_yaml = (
-            resolve_domain_output_dir(source_id, workspace_id) / "db_domains.yaml"
-        )
-        generator = CQLGenerator(
-            resolve_project_path(METADATA_CONFIG),
-            domain_resolver=DomainResolver(domain_yaml),
-            config=managed_snapshot,
-            provenance=(source_id, str(run_id)),
-        )
-        gen_result = generator.generate()
-        outputs = [Path(p) for p in (gen_result.output_files or [])]
-        gen_counts = (
-            gen_result.tables_count,
-            gen_result.columns_count,
-            gen_result.relationships_count,
-        )
-        outputs_ok = bool(outputs) and all(
-            p.is_file()
-            and not p.is_symlink()
-            and p.resolve().parent == cql_dir.resolve()
-            for p in outputs
-        )
-        if not gen_result.success or not outputs_ok:
-            raise _StepFailed(
-                "Rel 发布失败：CQL 生成或产物核验未通过（"
-                + ((gen_result.errors or ["产物核验未通过"])[0])
-                + "）"
-            )
         loader_config = deepcopy(
             (snapshot.main_config.get("loaders") or {}).get("cql_loader") or {}
         )
         loader_config["input_file"] = str(
             cql_dir / f"import_all.{snapshot.registration.db_name}.cypher"
         )
-        loader = CQLLoader({"cql_loader": loader_config}, source_id=source_id)
+        neo4j_target = {
+            "type": "neo4j",
+            "database": _neo4j_database(snapshot.main_config),
+        }
+        session.commit()  # 释放源/工作区行锁（doc 8.1 §5.1.1：不跨外部 I/O 持锁）
+
+    # ---- 事务外执行：备份 → 生成 → validate → load（运行/步骤保持 running） ----
+    cql_dir.mkdir(parents=True, exist_ok=True)
+    backup_directory_before_update(cql_dir)
+    domain_yaml = resolve_domain_output_dir(source_id, workspace_id) / "db_domains.yaml"
+    generator = CQLGenerator(
+        resolve_project_path(METADATA_CONFIG),
+        domain_resolver=DomainResolver(domain_yaml),
+        config=managed_snapshot,
+        provenance=(source_id, str(run_id)),
+    )
+    gen_result = generator.generate()
+    outputs = [Path(p) for p in (gen_result.output_files or [])]
+    gen_counts = (
+        gen_result.tables_count,
+        gen_result.columns_count,
+        gen_result.relationships_count,
+    )
+    outputs_ok = bool(outputs) and all(
+        p.is_file() and not p.is_symlink() and p.resolve().parent == cql_dir.resolve()
+        for p in outputs
+    )
+    if not gen_result.success or not outputs_ok:
+        raise _StepFailed(
+            "Rel 发布失败：CQL 生成或产物核验未通过（"
+            + ((gen_result.errors or ["产物核验未通过"])[0])
+            + "）"
+        )
+    loader = CQLLoader({"cql_loader": loader_config}, source_id=source_id)
+    try:
+        if not loader.validate():
+            raise _StepFailed("Rel 发布失败：Neo4j 服务不可用")
         try:
-            if not loader.validate():
-                raise _StepFailed("Rel 发布失败：Neo4j 服务不可用")
-            try:
-                result = loader.load()
-            except CQLScriptValidationError as exc:
-                raise _StepFailed(f"Rel 发布失败：{exc}") from None
-        finally:
-            loader.close()
-        success = bool(result.get("success"))
-        logger.info(
-            "rel 发布图事务结束 source_id=%s publish_run_id=%s success=%s "
-            "expected=(tables=%s columns=%s rel=%s) actual_counts=%s",
-            source_id,
-            run_id,
-            success,
-            gen_counts[0],
-            gen_counts[1],
-            gen_counts[2],
-            result.get("counts"),
-        )
-        if not success:
-            if result.get("_rolled_back"):
-                raise _StepFailed(
-                    "Rel 发布失败（已回滚，旧图保留）：" + _first_rel_error(result)
-                )
-            raise _StepFailed("Rel 发布失败：Neo4j 图事务提交状态不可知，请重跑发布")
-        tables, columns, relationships = gen_counts
-        message = f"Rel 已发布到 Neo4j（{tables} 张表 / {columns} 列 / {relationships} 条关系）"
-        if relationships == 0:
-            message += "；关系为空，请检查 Rel 产物与阈值配置"
-        _record_terminal(
-            settings,
-            run_id,
-            "rel",
-            STATUS_SUCCESS,
-            message,
-            input_manifest=input_manifest,
-            target_manifest=build_target_manifest(
-                [{"type": "neo4j", "database": _neo4j_database(snapshot.main_config)}]
-            ),
-        )
+            result = loader.load()
+        except CQLScriptValidationError as exc:
+            raise _StepFailed(f"Rel 发布失败：{exc}") from None
+    finally:
+        loader.close()
+    success = bool(result.get("success"))
+    logger.info(
+        "rel 发布图事务结束 source_id=%s publish_run_id=%s success=%s "
+        "expected=(tables=%s columns=%s rel=%s) actual_counts=%s",
+        source_id,
+        run_id,
+        success,
+        gen_counts[0],
+        gen_counts[1],
+        gen_counts[2],
+        result.get("counts"),
+    )
+    if not success:
+        if result.get("_rolled_back"):
+            raise _StepFailed(
+                "Rel 发布失败（已回滚，旧图保留）：" + _first_rel_error(result)
+            )
+        raise _StepFailed("Rel 发布失败：Neo4j 图事务提交状态不可知，请重跑发布")
+    tables, columns, relationships = gen_counts
+    message = (
+        f"Rel 已发布到 Neo4j（{tables} 张表 / {columns} 列 / {relationships} 条关系）"
+    )
+    if relationships == 0:
+        message += "；关系为空，请检查 Rel 产物与阈值配置"
+
+    # ---- 短事务收尾：loader 关闭后另开短事务记录成功 ----
+    _record_terminal(
+        settings,
+        run_id,
+        "rel",
+        STATUS_SUCCESS,
+        message,
+        input_manifest=input_manifest,
+        target_manifest=build_target_manifest([neo4j_target]),
+    )
 
 
 class _StepBlocked(RuntimeError):

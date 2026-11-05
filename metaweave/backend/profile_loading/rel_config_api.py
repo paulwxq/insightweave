@@ -48,9 +48,11 @@ VALID_CARDINALITIES = {"N:1", "1:1", "M:N"}
 class RelConfigOutputMissingError(Exception):
     """404 rel_config_output_missing：rel 步骤行缺失/未成功或产物文件不存在。"""
 
-    def __init__(self, message: str):
-        super().__init__(message)
-        self.details: Dict[str, Any] = {}
+
+# 409 rel_publish_in_progress：同工作区有 running 的 Rel 发布（doc 8.1 §5.1.1）。
+# 错误类统一定义在 publishing.repository（domain/rel 配置保存共用），
+# 此处 re-export 供既有导入方使用。
+from backend.publishing.repository import RelPublishInProgressError  # noqa: F401,E402
 
 
 class RelConfigInvalidError(ValueError):
@@ -210,6 +212,10 @@ def _load_table_columns(json_dir: Path) -> Dict[str, List[str]]:
 def read_rel_config(settings: PlatformSettings, workspace_id) -> Dict[str, Any]:
     workspace_id = normalize_workspace_id(workspace_id)
     with platform_session(settings) as session:
+        # doc 8.1 §8.1：只读守卫（已删工作区 410；删除中仍可查看）
+        from backend.access_guards import require_workspace
+
+        require_workspace(session, workspace_id)
         workspace = _require_workspace(session, workspace_id)
         source = _require_registration(session, workspace.source_id)
 
@@ -567,15 +573,29 @@ def write_rel_config(
         ) from None
 
     with platform_session(settings) as session:
+        from backend.access_guards import require_workspace
+        from backend.deletion.locks import lock_source_row, lock_workspace_row
         from backend.persistence.models import WorkspaceInfo
         from backend.workspace_files.backups import (
             EditBackupFailedError,
             backup_files_before_edit,
         )
 
-        workspace_row = session.get(WorkspaceInfo, workspace_id, with_for_update=True)
+        # doc 8.1 §5.1.1：定位父级 → 锁源 → 锁工作区，锁内复查冻结；
+        # 保留原指纹并发校验（409 rel_regenerated），层级锁不替代它
+        probe = session.get(WorkspaceInfo, workspace_id)
+        if probe is not None:
+            lock_source_row(session, probe.source_id)
+        workspace_row = lock_workspace_row(session, workspace_id)
         if workspace_row is None:
             raise RelConfigOutputMissingError("工作区不存在")
+        require_workspace(session, workspace_id, for_write=True)
+        # doc 8.1 §5.1.1：Rel 发布执行期（含 Neo4j 调用）不再持工作区行锁，
+        # 配置保存以运行中检查互斥，发布期间不得改变输入
+        from backend.publishing.repository import rel_publish_in_progress
+
+        if rel_publish_in_progress(session, workspace_id) is not None:
+            raise RelPublishInProgressError()
         _require_workspace(session, workspace_id)
         source = _require_registration(session, workspace_row.source_id)
         if not source.is_active:

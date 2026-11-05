@@ -39,6 +39,8 @@ const ERROR_MESSAGES: Record<string, string> = {
   password_required: '连接信息已修改，请填写密码后重试',
   output_delete_failed: '该数据源的输出目录删除失败，登记记录仍保留',
   source_busy: '该数据源有正在执行的采集或发布步骤，请稍后再试。',
+  deletion_targets_changed: '存储目标已变化，请核对并确认是否继续。',
+  resource_has_unfinished_runs: '存在未结束运行，请查看运行清单；状态更新后可重新确认。',
   internal_error: '服务暂时无法处理请求。',
 }
 

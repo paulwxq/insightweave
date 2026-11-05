@@ -163,9 +163,24 @@ def test_route_platform_failure_is_503(monkeypatch):
 # ---- 服务层：信封构造、默认值与异常映射 -----------------------------------------
 
 
+def _fake_session_get(model, key, **_kwargs):
+    from backend.persistence.models import DbSourceInfo
+
+    if model is DbSourceInfo:
+        # 工作区所属源存在且有效（本假件不建模删除）
+        return SimpleNamespace(
+            source_id=key, deleted_at=None, deletion_state="active"
+        )
+    return None
+
+
 @contextmanager
 def _fake_platform_session():
-    yield SimpleNamespace()
+    yield SimpleNamespace(
+        # doc 8.1 §7.3：删除任务查询（本假件不建模任务表 → 无未解决任务）
+        scalars=lambda _statement: iter([]),
+        get=_fake_session_get,
+    )
 
 
 def _install_repo(monkeypatch, rows, total, collection_counts=None, publish_counts=None):
@@ -216,6 +231,10 @@ def test_service_builds_envelope_with_projection(monkeypatch):
         "updated_at": "2026-10-22T03:00:00.000000Z",
         "collection_job_count": 0,
         "publish_job_count": 0,
+        "deletion_task": None,
+        "effective_state": "active",
+        "blocked_by": None,
+        "blocked_reason": None,
     }
 
 

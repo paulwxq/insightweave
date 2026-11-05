@@ -390,17 +390,21 @@ def test_workspace_run_listing_validates_pagination(monkeypatch):
 
 
 def test_no_delete_routes_for_workspace_or_jobs():
-    """本期不提供工作区/作业/版本/运行删除入口（doc 6.2 §1.1）。
+    """doc 8.1 §7：删除入口就位（替换 doc 6.2 §1.1 的“无删除入口”约定）。
 
-    唯一的 DELETE 是数据源登记（受工作区关联检查保护），工作区路由
-    不出现任何 DELETE 方法。
+    工作区 DELETE（202 任务）、两类作业 DELETE（204 逻辑删除）、
+    数据源 DELETE（202 任务）与删除任务查询/重试路由均在。
     """
     workspace_paths = {
         (method, route.path)
         for route in workspaces_router.router.routes
         for method in route.methods
     }
-    assert not any(method == "DELETE" for method, _path in workspace_paths)
+    assert ("DELETE", "/api/workspaces/{workspace_id}") in workspace_paths
+    assert ("DELETE", "/api/collection-jobs/{job_id}") in workspace_paths
+    assert ("DELETE", "/api/publish-jobs/{job_id}") in workspace_paths
+    assert ("GET", "/api/deletion-tasks/{task_id}") in workspace_paths
+    assert ("POST", "/api/deletion-tasks/{task_id}/retry") in workspace_paths
     # 采集/发布运行创建与详情路由就位
     for method, path in workspace_paths:
         if method == "POST" and path.endswith("/runs"):
@@ -416,8 +420,14 @@ def test_no_delete_routes_for_workspace_or_jobs():
         for route in source_router_module.router.routes
         if "DELETE" in route.methods
     ]
-    # 唯一的 DELETE 入口是数据源登记（受工作区关联检查保护，A29）
+    # 数据源 DELETE 与知识清理（doc 8.1 §2.4/§3.2）
     assert source_deletes == ["/api/data-sources/{source_id}"]
+    source_posts = [
+        route.path
+        for route in source_router_module.router.routes
+        if "POST" in route.methods
+    ]
+    assert "/api/data-sources/{source_id}/published-data/clear" in source_posts
 
 
 def test_workspace_create_and_list_routes(monkeypatch):
@@ -443,6 +453,8 @@ def test_workspace_create_and_list_routes(monkeypatch):
             json={"workspace_name": "生产"},
         )
     assert listed.status_code == 200
-    assert listed.json() == {"source_id": "db_src_1", "items": [item]}
+    body = listed.json()
+    assert body["source_id"] == "db_src_1"
+    assert body["items"][0]["workspace_id"] == item["workspace_id"]
     assert created.status_code == 201
     assert created.json()["workspace_id"] == WORKSPACE_ID

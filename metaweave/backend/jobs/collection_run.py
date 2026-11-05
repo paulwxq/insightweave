@@ -215,9 +215,32 @@ def _claim_step(
     )
 
     with platform_session(settings) as session:
-        workspace_row = session.get(WorkspaceInfo, workspace_id, with_for_update=True)
-        if workspace_row is None:
+        # doc 8.1 §5.1.1：普通查询只用于定位父级，不在此处加锁、不作准入结论
+        from backend.deletion.locks import lock_source_row, lock_workspace_row
+
+        probe = session.get(WorkspaceInfo, workspace_id)
+        if probe is None:
             return "工作区不存在"
+        source_row = lock_source_row(session, probe.source_id)
+        workspace_row = lock_workspace_row(session, workspace_id)
+        if source_row is None or workspace_row is None:
+            return "数据源或工作区不存在"
+        if workspace_row.source_id != source_row.source_id:
+            return "工作区归属已变化，不能认领步骤"
+        if getattr(source_row, "deletion_state", "active") != "active":
+            return "数据源正在删除或已删除，不能认领步骤"
+        if getattr(workspace_row, "deletion_state", "active") != "active":
+            return "工作区正在删除，不能认领步骤"
+        if step_name in ("json", "domain", "rel"):
+            # doc 8.1 §5.1.1：Rel 发布执行期不再持工作区行锁；其输入
+            # （json/domain/rel 产物）的采集以运行中检查互斥
+            from backend.publishing.repository import rel_publish_in_progress
+
+            if rel_publish_in_progress(session, workspace_id) is not None:
+                return (
+                    "该工作区 Rel 发布正在执行，不能采集 "
+                    f"{step_name}（Rel 发布输入），请稍后重试"
+                )
         conflict = session.execute(
             select(CollectionRunInfo.collection_run_id)
             .join(
@@ -280,6 +303,23 @@ def create_collection_run(
             source = get_db_source(session, workspace.source_id)
             if source is None:
                 raise CollectionRunError("数据源不存在")
+            if not source.is_active:
+                raise CollectionRunError("数据源已禁用，不能发起采集")
+            # doc 8.1 §5.1.1：源 → 工作区 → 作业加锁，锁内经完整层级守卫复查
+            # （作业/工作区/源已删 410、删除中 409、知识清理冻结 409）
+            from backend.access_guards import require_job
+            from backend.deletion.locks import (
+                lock_job_row,
+                lock_source_row,
+                lock_workspace_row,
+            )
+
+            source = lock_source_row(session, workspace.source_id)
+            workspace = lock_workspace_row(session, job.workspace_id)
+            job = lock_job_row(session, "collection", job_id)
+            require_job(session, "collection", job_id, for_write=True)
+            if job is None or workspace is None or source is None:
+                raise CollectionRunError("作业、工作区或数据源不存在")
             if not source.is_active:
                 raise CollectionRunError("数据源已禁用，不能发起采集")
             resolved = resolve_run_request(

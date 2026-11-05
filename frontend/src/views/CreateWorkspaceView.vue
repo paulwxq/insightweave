@@ -11,6 +11,13 @@ import { ApiError } from '../api/http'
 import type { DataSourceListItem } from '../api/types'
 import { createSourceWorkspace } from '../api/workspaces'
 import EmptyState from '../components/EmptyState.vue'
+import PageBreadcrumbs from '../components/PageBreadcrumbs.vue'
+import {
+  resolveBack,
+  synthesizeWorkspaceCreatedFrom,
+  withFrom,
+  workspacesCrumbTo,
+} from '../navigation/from'
 
 const NAME_MAX = 200
 const DESC_MAX = 1000
@@ -135,8 +142,14 @@ async function save() {
       workspace_name: name.value.trim(),
       workspace_desc: desc.value.trim() || null,
     })
-    // 创建成功后进入工作区详情（doc 6.3 §4 编号 22）
-    await router.push(`/workspaces/${workspace.workspace_id}`)
+    // 创建成功后进入工作区详情（doc 6.3 §4 编号 22）；
+    // doc 9 §7.6：工作区详情的来源按进入新建页时的 from 四种情况合成
+    await router.push(
+      withFrom(
+        `/workspaces/${workspace.workspace_id}`,
+        synthesizeWorkspaceCreatedFrom(queryFrom(), sourceId.value),
+      ),
+    )
   } catch (cause) {
     saveError.value = cause instanceof ApiError ? cause.message : '工作区创建失败。'
   } finally {
@@ -144,10 +157,20 @@ async function save() {
   }
 }
 
+// ---- doc 9 §7.4：返回与来源 ----
+
+function queryFrom(): string | null {
+  const raw = route.query.from
+  return typeof raw === 'string' ? raw : null
+}
+
+/** 认 /workspaces…、数据源来源；默认按表单当前选择筛选列表 */
+const backSpec = computed(() =>
+  resolveBack('workspace-new', queryFrom(), { selectedSourceId: sourceId.value }),
+)
+
 function cancel() {
-  const query: Record<string, string> = {}
-  if (sourceId.value) query.source_id = sourceId.value
-  void router.push({ path: '/workspaces', query })
+  if (backSpec.value.target) void router.push(backSpec.value.target)
 }
 
 onMounted(load)
@@ -155,6 +178,12 @@ onMounted(load)
 
 <template>
   <div class="cw-page">
+    <PageBreadcrumbs
+      :segments="[
+        { label: '工作区管理', to: workspacesCrumbTo(queryFrom()) },
+        { label: '新建工作区' },
+      ]"
+    />
     <header class="ds-jobs-header">
       <div>
         <span class="ds-kicker">NEW WORKSPACE</span>
@@ -167,7 +196,7 @@ onMounted(load)
       <div class="cw-actions">
         <button type="button" class="ds-jobs-back" @click="cancel">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 12H5" /><path d="m12 19-7-7 7-7" /></svg>
-          返回
+          {{ backSpec.label }}
         </button>
       </div>
     </header>
@@ -292,12 +321,12 @@ onMounted(load)
   gap: 18px;
 }
 .cw-page .ds-jobs-header {
-  align-items: flex-end;
+  align-items: flex-start;
 }
 .cw-actions {
   display: flex;
+  align-items: flex-start;
   gap: 10px;
-  padding-bottom: 2px;
 }
 .cw-form {
   display: flex;
