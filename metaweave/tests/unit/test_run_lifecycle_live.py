@@ -314,8 +314,15 @@ def test_default_run_one_run_id_steps_and_markers(live_workspace, monkeypatch):
         run = get_run(COLLECTION_RUN, session, run_id)
         assert run.status == STATUS_SUCCESS
         steps = list_run_steps(COLLECTION_RUN, session, run_id)
-        assert [s.step_name for s in steps] == ["db", "ddl", "json"]
+        # doc 10.1 §4.6：返回顺序为启动时间线（started_at、step_name）——
+        # db 与 ddl 并行启动、次序不定，只约束依赖先后（json 晚于 ddl）。
+        assert sorted(s.step_name for s in steps) == ["db", "ddl", "json"]
+        assert [s.step_name for s in steps][-1] == "json"
         assert all(s.status == STATUS_SUCCESS for s in steps)
+        ddl_started = next(s for s in steps if s.step_name == "ddl").started_at
+        json_started = next(s for s in steps if s.step_name == "json").started_at
+        assert ddl_started is not None and json_started is not None
+        assert ddl_started <= json_started
         json_step = next(s for s in steps if s.step_name == "json")
         assert json_step.input_manifest["files"][0]["path"] == "ddl/a.sql"
         assert json_step.output_manifest == {"files": ["json/a.json"]}

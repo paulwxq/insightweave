@@ -62,7 +62,9 @@ def _run_detail(
         workspace_id = job.workspace_id if job else None
         run_id_field = "collection_run_id" if kind == "collection" else "publish_run_id"
         steps = list_run_steps(spec, session, run_id)
-        # 按固定顺序展示步骤（采集按执行顺序：started_at 已排序）
+        # 步骤按启动时间排列（list_run_steps：started_at、step_name，
+        # doc 10.1 §4.6）；同一启动时间按步骤名排序，未启动或被阻断且无
+        # 启动时间的步骤沿用该查询排列，不代表执行计划。
         detail = {
             run_id_field: str(getattr(run, run_id_field)),
             "job_id": getattr(run, spec.job_id_column),

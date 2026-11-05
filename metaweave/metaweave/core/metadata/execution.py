@@ -6,12 +6,13 @@
 - generate-domains 的参数规范化是两个入口唯一的语义事实源。
 """
 
+import contextvars
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
 from metaweave.utils.file_utils import clean_top_level_files
-from metaweave.utils.logger import set_current_step
+from metaweave.utils.logger import reset_current_step, set_current_step
 
 # metadata operation 标识；db 仅供独立 CLI，暂不加入 pipeline YAML 步骤集合。
 METADATA_OPERATIONS = (
@@ -210,12 +211,17 @@ class MetadataExecutionRequest:
         self.config_path = Path(self.config_path)
 
 
-def set_operation_step(operation: str, stage: Optional[str] = None) -> None:
-    """按固定映射设置日志 step（generate-sql-rag 允许阶段二次切换）。"""
+def set_operation_step(
+    operation: str, stage: Optional[str] = None
+) -> contextvars.Token:
+    """按固定映射设置日志 step（generate-sql-rag 允许阶段二次切换）。
+
+    返回 set_current_step 的 token，供调用方在任务结束时恢复上下文
+    （doc 10.1 §4.4）。
+    """
     if operation == "generate-sql-rag" and stage in ("generate", "validate"):
-        set_current_step(f"sql-rag-{stage}")
-        return
-    set_current_step(OPERATION_STEP_MAP[operation])
+        return set_current_step(f"sql-rag-{stage}")
+    return set_current_step(OPERATION_STEP_MAP[operation])
 
 
 # ---------------------------------------------------------------------------
@@ -257,7 +263,7 @@ def execute_generate_domains(request: MetadataExecutionRequest) -> dict:
     import click
 
     start = _time.perf_counter()
-    set_operation_step("generate-domains")
+    _step_token = set_operation_step("generate-domains")
     try:
         from metaweave.utils.file_utils import resolve_domains_yaml_path
         from metaweave.core.metadata.domain_generator import DomainGenerator
@@ -316,6 +322,9 @@ def execute_generate_domains(request: MetadataExecutionRequest) -> dict:
         )
     except Exception as e:  # noqa: BLE001 —— 共享层收敛一切异常为失败结果
         return _task_result(False, _time.perf_counter() - start, str(e))
+    finally:
+        # 任务结束恢复步骤上下文（doc 10.1 §4.4）
+        reset_current_step(_step_token)
 
 
 def execute_generate_dim_config(request: MetadataExecutionRequest) -> dict:
@@ -325,7 +334,7 @@ def execute_generate_dim_config(request: MetadataExecutionRequest) -> dict:
     import click
 
     start = _time.perf_counter()
-    set_operation_step("generate-dim-config")
+    _step_token = set_operation_step("generate-dim-config")
     try:
         from metaweave.utils.file_utils import (
             resolve_dim_tables_yaml_path,
@@ -426,6 +435,9 @@ def execute_generate_dim_config(request: MetadataExecutionRequest) -> dict:
         )
     except Exception as e:  # noqa: BLE001
         return _task_result(False, _time.perf_counter() - start, str(e))
+    finally:
+        # 任务结束恢复步骤上下文（doc 10.1 §4.4）
+        reset_current_step(_step_token)
 
 
 def execute_generate_sql_rag(request: MetadataExecutionRequest) -> dict:
@@ -437,7 +449,7 @@ def execute_generate_sql_rag(request: MetadataExecutionRequest) -> dict:
     import time as _time
 
     start = _time.perf_counter()
-    set_operation_step("generate-sql-rag", stage="generate")
+    _step_token = set_operation_step("generate-sql-rag", stage="generate")
     try:
         from metaweave.cli.metadata_cli import _run_generate_sql_rag
 
@@ -464,6 +476,9 @@ def execute_generate_sql_rag(request: MetadataExecutionRequest) -> dict:
         return _task_result(
             False, _time.perf_counter() - start, str(e) or type(e).__name__
         )
+    finally:
+        # 任务结束恢复步骤上下文（doc 10.1 §4.4）
+        reset_current_step(_step_token)
 
 
 def _clean_step_dir(step_name: str, config: dict) -> None:
@@ -533,7 +548,7 @@ def execute_cql(request: MetadataExecutionRequest) -> dict:
     from metaweave.utils.file_utils import resolve_domains_yaml_path
 
     start = _time.perf_counter()
-    set_operation_step("cql")
+    _step_token = set_operation_step("cql")
     try:
         from metaweave.core.cql_generator.generator import CQLGenerator
 
@@ -631,6 +646,9 @@ def execute_cql(request: MetadataExecutionRequest) -> dict:
         return _task_result(True, _time.perf_counter() - start, "CQL 生成完成")
     except Exception as e:  # noqa: BLE001
         return _task_result(False, _time.perf_counter() - start, str(e))
+    finally:
+        # 任务结束恢复步骤上下文（doc 10.1 §4.4）
+        reset_current_step(_step_token)
 
 
 def execute_rel(request: MetadataExecutionRequest) -> dict:
@@ -644,7 +662,7 @@ def execute_rel(request: MetadataExecutionRequest) -> dict:
     import click
 
     start = _time.perf_counter()
-    set_operation_step("rel")
+    _step_token = set_operation_step("rel")
     try:
         from metaweave.utils.file_utils import resolve_domains_yaml_path
         from metaweave.core.domains import DomainResolver
@@ -745,6 +763,9 @@ def execute_rel(request: MetadataExecutionRequest) -> dict:
         return _task_result(True, _time.perf_counter() - start, "关系发现完成")
     except Exception as e:  # noqa: BLE001
         return _task_result(False, _time.perf_counter() - start, str(e))
+    finally:
+        # 任务结束恢复步骤上下文（doc 10.1 §4.4）
+        reset_current_step(_step_token)
 
 
 def execute_ddl_json_md(request: MetadataExecutionRequest) -> dict:
@@ -758,7 +779,7 @@ def execute_ddl_json_md(request: MetadataExecutionRequest) -> dict:
     import click
 
     start = _time.perf_counter()
-    set_operation_step(request.operation)
+    _step_token = set_operation_step(request.operation)
     step = request.operation
     try:
         from metaweave.utils.file_utils import resolve_project_path
@@ -959,3 +980,6 @@ def execute_ddl_json_md(request: MetadataExecutionRequest) -> dict:
         return _task_result(True, _time.perf_counter() - start, "元数据生成完成")
     except Exception as e:  # noqa: BLE001
         return _task_result(False, _time.perf_counter() - start, str(e))
+    finally:
+        # 任务结束恢复步骤上下文（doc 10.1 §4.4）
+        reset_current_step(_step_token)

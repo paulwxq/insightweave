@@ -8,6 +8,7 @@
 """
 
 import logging
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from uuid import UUID
 
 from sqlalchemy.exc import SQLAlchemyError
@@ -51,6 +52,8 @@ from backend.persistence.platform_db import PlatformSettings, platform_session
 from backend.workspace_files.markers import write_collection_marker
 from backend.workspaces.repository import get_workspace
 from metaweave.core.metadata.execution import set_operation_step
+from metaweave.utils.logger import reset_current_step
+from services.logging_manager import submit_with_context
 
 logger = logging.getLogger("backend.jobs")
 
@@ -98,6 +101,15 @@ _STEP_DEPS = {
     REL_STEP: (JSON_STEP, DOMAIN_STEP),
     SQL_STEP: (MD_STEP, DOMAIN_STEP, REL_STEP),
 }
+
+# doc 10.1 §4.3：本阶段步骤并发上限 2（并行收益与资源占用的取舍），
+# 达到上限时按请求优先级等待空位；后续根据实测调整，不设页面参数。
+_MAX_PARALLEL_STEPS = 2
+
+
+def _same_request_deps(step: str, chosen: set[str]) -> list[str]:
+    """本次选择内的上游依赖（doc 10.1 §4.1：只对同选上游做启动门控）。"""
+    return [dep for dep in _STEP_DEPS.get(step, ()) if dep in chosen]
 
 
 def _ensure_managed_step_order(chosen: list[str]) -> list[str]:
@@ -370,11 +382,15 @@ def execute_collection_run(
 ) -> None:
     """后台执行本次请求新建的采集运行（doc 6.2 §6.3 步骤 5–6）。
 
-    只执行传入的那一个运行：仍为 pending 才置 running；各步骤执行前写
-    running、后写终态与 manifest；成功/失败写采集 marker，blocked 不写。
+    只执行传入的那一个运行：仍为 pending 才置 running；按依赖就绪并行
+    调度步骤（doc 10.1 §4.1，并发上限 `_MAX_PARALLEL_STEPS`）：同选上游
+    全部成功并完成结果提交后才启动下游，任一步骤完成即重新检查可启动
+    步骤，不以整批完成作为下一步的启动条件。各步骤执行前写 running、
+    后写终态与 manifest；成功/失败写采集 marker，blocked 不写。
     不扫描、不接管其他 pending/running 记录。
-    execution_steps 由创建运行的请求传入，保留本次选择的顺序；数据库步骤行
-    没有顺序字段，不能将查询结果的展示顺序当作执行计划。
+    execution_steps 由创建运行的请求传入，保留本次选择的顺序（作为多个
+    就绪步骤之间的调度优先级）；数据库步骤行没有顺序字段，不能将查询
+    结果的展示顺序当作执行计划。
     """
 
     from backend.persistence.models import CollectionJobInfo, CollectionRunInfo
@@ -418,89 +434,83 @@ def execute_collection_run(
         session.commit()
 
     results: list[dict] = []
-    for step_name in steps:
-        try:
-            # 日志设置、认领及上下文装配也可能失败，须纳入步骤异常处理，
-            # 避免后台任务退出后遗留 pending 步骤和 running 整体状态。
-            set_operation_step(step_name)
-            blocked_message = _blocked_by_same_request_upstream(
-                step_name, steps, results
-            )
-            if blocked_message is None:
-                blocked_message = _claim_step(settings, workspace_id, step_name, run_id)
-            if blocked_message is not None:
-                _record_terminal(
+    statuses: dict[str, str] = {}
+    running: dict = {}  # Future -> step_name，仅调度线程读写
+    running_steps: set[str] = set()
+    chosen = set(steps)
+
+    def record_result(row: dict) -> None:
+        results.append(row)
+        statuses[row["step"]] = row["status"]
+
+    with ThreadPoolExecutor(max_workers=_MAX_PARALLEL_STEPS) as pool:
+        while len(statuses) < len(steps):
+            # 1) 阻断级联：同选依赖全部终态且存在未成功 → 待依赖齐后按
+            #    既有文案优先级阻断（完成先后不改变文案，doc 10.1 §4.1）。
+            cascaded = True
+            while cascaded:
+                cascaded = False
+                for step in steps:
+                    if step in statuses or step in running_steps:
+                        continue
+                    deps = _same_request_deps(step, chosen)
+                    if not deps or not all(dep in statuses for dep in deps):
+                        continue
+                    if all(statuses[dep] == STATUS_SUCCESS for dep in deps):
+                        continue
+                    message = _blocked_by_same_request_upstream(step, steps, results)
+                    if message is None:  # 防御：不应到达的兜底文案
+                        message = f"本次请求的上游未成功，{step} 未启动"
+                    _record_terminal(settings, run_id, step, STATUS_BLOCKED, message)
+                    record_result({"step": step, "status": STATUS_BLOCKED})
+                    cascaded = True
+            # 2) 启动就绪步骤：同选上游全部 success 并完成结果提交后放行；
+            #    请求（拓扑）顺序作为多个就绪步骤之间的优先级，受并发上限约束。
+            for step in steps:
+                if len(running) >= _MAX_PARALLEL_STEPS:
+                    break
+                if step in statuses or step in running_steps:
+                    continue
+                deps = _same_request_deps(step, chosen)
+                if any(statuses.get(dep) != STATUS_SUCCESS for dep in deps):
+                    continue
+                future = submit_with_context(
+                    pool,
+                    _execute_one_step,
                     settings,
                     run_id,
-                    step_name,
-                    STATUS_BLOCKED,
-                    blocked_message,
+                    source_id,
+                    workspace_id,
+                    step,
+                    params_by_step.get(step),
                 )
-                results.append({"step": step_name, "status": STATUS_BLOCKED})
-                continue
-
-            from backend.data_sources.step_context import METADATA_CONFIG
-
-            ctx = load_step_context(
-                settings,
-                source_id=source_id,
-                workspace_id=workspace_id,
-                run_id=run_id,
-                step_name=step_name,
-                step_params=params_by_step.get(step_name),
-                config_path=METADATA_CONFIG,
-            )
-            # 认领即置 running（工作区行锁下原子完成）
-            outcome: StepOutcome = _WORKERS[step_name](ctx)
-        except (DbStepConfigError, SourceDisabledError) as exc:
-            # 步骤前置条件不满足（上游产物缺失、配置非法）：blocked 不写 marker
-            _record_terminal(settings, run_id, step_name, STATUS_BLOCKED, str(exc))
-            results.append({"step": step_name, "status": STATUS_BLOCKED})
-            continue
-        except Exception as exc:  # noqa: BLE001 —— 非受控故障按步骤失败计
-            logger.exception(
-                "采集步骤非受控失败 run_id=%s step=%s type=%s",
-                run_id,
-                step_name,
-                type(exc).__name__,
-            )
-            _write_marker_for_step(
-                source_id, workspace_id, step_name, run_id, failed=True
-            )
-            _record_terminal(
-                settings,
-                run_id,
-                step_name,
-                STATUS_FAILED,
-                f"步骤执行失败（{type(exc).__name__}）",
-            )
-            results.append({"step": step_name, "status": STATUS_FAILED})
-            continue
-
-        input_manifest = _manifest_or_none(build_input_manifest, outcome.input_files)
-        output_manifest = (
-            _manifest_or_none(build_output_manifest, outcome.output_files)
-            if outcome.success
-            else None
-        )
-        _write_marker_for_step(
-            source_id,
-            workspace_id,
-            step_name,
-            run_id,
-            failed=not outcome.success,
-        )
-        status = STATUS_SUCCESS if outcome.success else STATUS_FAILED
-        _record_terminal(
-            settings,
-            run_id,
-            step_name,
-            status,
-            outcome.message,
-            input_manifest=input_manifest,
-            output_manifest=output_manifest,
-        )
-        results.append({"step": step_name, "status": status})
+                running[future] = step
+                running_steps.add(step)
+            if len(statuses) >= len(steps):
+                break
+            if not running:  # 防御：无在执行任务则不得空转等待
+                logger.error(
+                    "采集调度无进展 run_id=%s pending=%s",
+                    run_id,
+                    sorted(set(steps) - set(statuses)),
+                )
+                break
+            # 3) 单一调度线程统一收集 Future 完成结果，更新终态表并推进任务；
+            #    worker 不直接修改共享终态表（doc 10.1 §4.1）。
+            done, _ = wait(list(running), return_when=FIRST_COMPLETED)
+            for future in done:
+                step = running.pop(future)
+                running_steps.discard(step)
+                try:
+                    record_result(future.result())
+                except Exception as exc:  # noqa: BLE001 —— 兜底：任务不应抛出
+                    logger.exception(
+                        "采集步骤结果收集失败 run_id=%s step=%s type=%s",
+                        run_id,
+                        step,
+                        type(exc).__name__,
+                    )
+                    record_result({"step": step, "status": STATUS_FAILED})
 
     with platform_session(settings) as session:
         try:
@@ -519,6 +529,143 @@ def execute_collection_run(
     )
 
 
+def _execute_one_step(
+    settings: PlatformSettings,
+    run_id: UUID,
+    source_id: str,
+    workspace_id: str,
+    step_name: str,
+    step_params: dict | None,
+) -> dict:
+    """执行一个采集步骤的完整流程（doc 10.1 §4.1）。
+
+    包含日志步骤设置、认领、上下文装配、worker 调用、异常处理、产物
+    清单、marker 与状态写回；Future 完成即代表上述流程全部结束——
+    下游由调度器在收到结果后才放行。worker 成功但 marker 或状态写回
+    失败时按 failed 降级返回，不凭内存成功放行（doc 10.1 §4.1）。
+    在线程池任务内运行：经 submit_with_context 复制调度线程上下文，
+    步骤 ContextVar 的设置与恢复（finally）只作用于本任务。
+    返回结果行 {"step", "status"} 供调度线程汇总；不抛出。
+    """
+    step_token = None
+    try:
+        try:
+            # 日志设置、认领及上下文装配也可能失败，须纳入步骤异常处理，
+            # 避免后台任务退出后遗留 pending 步骤和 running 整体状态。
+            step_token = set_operation_step(step_name)
+            blocked_message = _claim_step(settings, workspace_id, step_name, run_id)
+            if blocked_message is not None:
+                _record_terminal(
+                    settings, run_id, step_name, STATUS_BLOCKED, blocked_message
+                )
+                return {"step": step_name, "status": STATUS_BLOCKED}
+
+            from backend.data_sources.step_context import METADATA_CONFIG
+
+            ctx = load_step_context(
+                settings,
+                source_id=source_id,
+                workspace_id=workspace_id,
+                run_id=run_id,
+                step_name=step_name,
+                step_params=step_params,
+                config_path=METADATA_CONFIG,
+            )
+            # 认领即置 running（工作区行锁下原子完成）
+            outcome: StepOutcome = _WORKERS[step_name](ctx)
+        except (DbStepConfigError, SourceDisabledError) as exc:
+            # 步骤前置条件不满足（上游产物缺失、配置非法）：blocked 不写 marker
+            _record_terminal(settings, run_id, step_name, STATUS_BLOCKED, str(exc))
+            return {"step": step_name, "status": STATUS_BLOCKED}
+        except Exception as exc:  # noqa: BLE001 —— 非受控故障按步骤失败计
+            logger.exception(
+                "采集步骤非受控失败 run_id=%s step=%s type=%s",
+                run_id,
+                step_name,
+                type(exc).__name__,
+            )
+            _write_marker_for_step(
+                source_id, workspace_id, step_name, run_id, failed=True
+            )
+            _record_terminal(
+                settings,
+                run_id,
+                step_name,
+                STATUS_FAILED,
+                f"步骤执行失败（{type(exc).__name__}）",
+            )
+            return {"step": step_name, "status": STATUS_FAILED}
+
+        input_manifest = _manifest_or_none(build_input_manifest, outcome.input_files)
+        output_manifest = (
+            _manifest_or_none(build_output_manifest, outcome.output_files)
+            if outcome.success
+            else None
+        )
+        marker_written = _write_marker_for_step(
+            source_id,
+            workspace_id,
+            step_name,
+            run_id,
+            failed=not outcome.success,
+        )
+        status = STATUS_SUCCESS if outcome.success else STATUS_FAILED
+        recorded = _record_terminal(
+            settings,
+            run_id,
+            step_name,
+            status,
+            outcome.message,
+            input_manifest=input_manifest,
+            output_manifest=output_manifest,
+        )
+        if status == STATUS_SUCCESS and not (marker_written and recorded):
+            # doc 10.1 §4.1：状态或 marker 未能可靠写入时，不得仅凭内存中
+            # 的成功结果放行——降级为 failed，下游走级联阻断与既定文案。
+            failures = []
+            if not marker_written:
+                failures.append("marker 写入失败")
+            if not recorded:
+                failures.append("状态写回失败")
+                # marker 已写 success 而状态写回失败时有意保留 success marker：
+                # worker 实际成功、产物完整，marker 如实反映产物状态，后续运行
+                # 可按 §4.2 复用有效产物；同运行内下游已因本步骤 failed 级联
+                # 阻断，不存在错误放行（Kimi R2 S1）。
+            logger.error(
+                "采集步骤结果提交失败，按失败处理 run_id=%s step=%s parts=%s",
+                run_id,
+                step_name,
+                failures,
+            )
+            try:
+                if not marker_written:
+                    _write_marker_for_step(
+                        source_id, workspace_id, step_name, run_id, failed=True
+                    )
+                _record_terminal(
+                    settings,
+                    run_id,
+                    step_name,
+                    STATUS_FAILED,
+                    f"步骤执行成功，但结果提交失败（{'、'.join(failures)}），"
+                    "按失败处理（doc 10.1 §4.1）",
+                )
+            except Exception as exc:  # noqa: BLE001 —— 降级写回异常不改变 failed 结论
+                logger.exception(
+                    "采集步骤降级写回失败 run_id=%s step=%s type=%s",
+                    run_id,
+                    step_name,
+                    type(exc).__name__,
+                )
+            return {"step": step_name, "status": STATUS_FAILED}
+        return {"step": step_name, "status": status}
+    finally:
+        # 任务结束恢复步骤上下文（doc 10.1 §4.4）；set 失败（如映射缺失）
+        # 时 token 为 None，无需恢复。
+        if step_token is not None:
+            reset_current_step(step_token)
+
+
 def _write_marker_for_step(
     source_id: str,
     workspace_id: str,
@@ -526,8 +673,12 @@ def _write_marker_for_step(
     run_id: UUID,
     *,
     failed: bool,
-) -> None:
-    """成功/失败写采集 marker（doc 6 §6）；blocked/pending 不写。"""
+) -> bool:
+    """成功/失败写采集 marker（doc 6 §6）；blocked/pending 不写。
+
+    返回是否写入成功——调用方在成功路径必须核对（doc 10.1 §4.1：
+    marker 未能可靠写入时不得仅凭内存成功放行下游）。
+    """
     try:
         directory = _step_output_dir(source_id, workspace_id, step_name)
         write_collection_marker(directory, run_id, "failed" if failed else "success")
@@ -538,14 +689,8 @@ def _write_marker_for_step(
             step_name,
             type(exc).__name__,
         )
-
-
-def _mark_step_running(
-    settings: PlatformSettings, run_id: UUID, step_name: str
-) -> None:
-    with platform_session(settings) as session:
-        mark_step_running(COLLECTION_RUN, session, run_id, step_name)
-        session.commit()
+        return False
+    return True
 
 
 def _record_terminal(
@@ -557,7 +702,11 @@ def _record_terminal(
     *,
     input_manifest: dict | None = None,
     output_manifest: dict | None = None,
-) -> None:
+) -> bool:
+    """写回步骤终态与清单；返回是否写回成功（doc 10.1 §4.1）。
+
+    写回失败不抛出（避免中断其余步骤收集），由调用方决定降级处理。
+    """
     with platform_session(settings) as session:
         try:
             finish_step(
@@ -578,3 +727,5 @@ def _record_terminal(
                 step_name,
                 type(exc).__name__,
             )
+            return False
+    return True

@@ -159,7 +159,14 @@ class SQLValidator:
         return any(kw in error_msg for kw in _RETRYABLE_KEYWORDS)
 
     def validate_batch(self, sqls: List[str]) -> List[ValidationResult]:
-        """并发批量校验"""
+        """并发批量校验
+
+        doc 10.1 §4.4：逐条提交（submit_with_context 复制上下文，步骤
+        ContextVar 在校验线程可继承），按输入顺序保存 Future、按该顺序取
+        结果——完成次序不影响返回顺序与 r.index 对应关系。
+        """
+        from services.logging_manager import submit_with_context
+
         max_concurrent = self.config.get("sql_validation_max_concurrent", 5)
         pool_max = (
             self.connector.pool.max_size if self.connector.pool else max_concurrent
@@ -167,7 +174,10 @@ class SQLValidator:
         max_workers = min(max_concurrent, pool_max)
 
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            results = list(executor.map(self.validate_sql, sqls))
+            futures = [
+                submit_with_context(executor, self.validate_sql, sql) for sql in sqls
+            ]
+            results = [future.result() for future in futures]
 
         for i, r in enumerate(results):
             r.index = i

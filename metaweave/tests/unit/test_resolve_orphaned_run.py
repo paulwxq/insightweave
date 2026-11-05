@@ -129,6 +129,54 @@ def test_preview_is_readonly_with_transition_plan():
     assert session.commits == 0
 
 
+def test_apply_resolves_multiple_leftover_running_steps():
+    """doc 10.1 §6.10/§4.5：并行中断可遗留多个 running——收尾须逐一切
+    failed、pending 置 blocked、已有终态保留并汇总；预览仍只读。"""
+    session = OrphanFakeSession()
+
+    def row(step, status):
+        return SimpleNamespace(
+            collection_run_id=RUN_ID,
+            step_name=step,
+            status=status,
+            message="",
+            input_manifest=None,
+            output_manifest=None,
+        )
+
+    session.run_steps = [
+        row("db", "success"),
+        row("ddl", "running"),
+        row("json", "running"),
+        row("md", "pending"),
+        row("dim", "success"),
+    ]
+    report = preview(session, "collection", RUN_ID)
+    assert report["actionable"] is True
+    transitions = {item["step"]: item["transition"] for item in report["steps"]}
+    assert transitions == {
+        "db": "保持不变",
+        "ddl": "running→failed",
+        "json": "running→failed",
+        "md": "pending→blocked",
+        "dim": "保持不变",
+    }
+    assert session.commits == 0  # 预览只读
+
+    result = apply_resolution(session, "collection", RUN_ID, "并行中断人工收尾")
+    assert result["changed"] is True
+    assert result["final_status"] == "partial_success"
+    statuses = {s.step_name: s.status for s in session.run_steps}
+    assert statuses == {
+        "db": "success",
+        "ddl": "failed",
+        "json": "failed",
+        "md": "blocked",
+        "dim": "success",
+    }
+    assert session.commits == 1
+
+
 def test_apply_resolves_steps_and_rolls_up():
     session = OrphanFakeSession()
     result = apply_resolution(session, "collection", RUN_ID, "维护窗口收尾")

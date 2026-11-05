@@ -792,10 +792,15 @@ function switchStep(step: string) {
             </strong>
             <strong v-else class="rx-confirm-steps">
               <template v-for="(step, index) in confirmSteps" :key="step">
-                <span v-if="index > 0" class="rx-step-arrow" aria-hidden="true">→</span>
+                <!-- 采集按依赖调度可并行（doc 10.1 §4.6）：标签保留计划（拓扑）顺序但不画串行箭头；
+                     发布仍为固定顺序，保留箭头串联 -->
+                <span v-if="index > 0 && kind === 'publish'" class="rx-step-arrow" aria-hidden="true">→</span>
                 <span class="rx-step-chip">{{ step }}</span>
               </template>
             </strong>
+          </p>
+          <p v-if="kind === 'collection'" class="rx-confirm-order-hint" role="status">
+            按依赖调度，可并行执行；标签按计划顺序排列。
           </p>
         </div>
         <p v-if="execError" class="ds-jobs-state error">{{ execError }}</p>
@@ -1015,6 +1020,11 @@ function switchStep(step: string) {
   color: #8aa0b8;
   font-size: 12px;
   font-weight: 400;
+}
+.rx-confirm-order-hint {
+  margin: 0;
+  color: #66788f;
+  font-size: 11px;
 }
 /* 发布校验（与新建页/详情页同款标记；按钮在执行确认卡） */
 .rx-check-btn {

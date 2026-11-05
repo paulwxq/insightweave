@@ -116,6 +116,10 @@ function stepTitle(step: { step_name: string; message: string | null; step_confi
         </li>
       </ul>
       <p class="run-panel-note">点击步骤行可查看步骤详情（参数、读取/生成文件与下游目标）。</p>
+      <!-- doc 10.1 §4.6：采集按依赖调度可并行，结果沿用 API 启动时间排序 -->
+      <p v-if="kind === 'collection'" class="run-panel-note">
+        结果按启动时间排列，未启动步骤的排列不代表执行顺序。
+      </p>
       <p v-if="pendingState" class="run-panel-note" role="status">
         运行尚未结束，每 3 秒自动刷新；离开本页不会取消执行。
       </p>

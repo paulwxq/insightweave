@@ -176,6 +176,72 @@ class TestValidateBatch:
         # index 已注入
         assert [r.index for r in results] == [0, 1, 2]
 
+    def test_batch_preserves_input_order_when_completions_invert(self):
+        """doc 10.1 §4.4/§6.11：后提交的校验先完成，结果仍按输入顺序返回。
+
+        逐条提交替代 executor.map 后，返回顺序与 r.index 的一一对应
+        不能因完成次序而乱序。
+        """
+        import threading
+
+        from metaweave.core.sql_rag.models import ValidationResult
+
+        connector = FakeConnector()
+        validator = SQLValidator(
+            connector=connector,
+            config={"sql_validation_max_concurrent": 2, "timeout": 10},
+        )
+        second_done = threading.Event()
+
+        def fake_validate(sql: str) -> ValidationResult:
+            if sql == "SELECT 1":
+                # 首条等待：让后提交的 SELECT 2 先完成
+                second_done.wait(timeout=5)
+            else:
+                second_done.set()
+            return ValidationResult(
+                sql=sql, valid=True, execution_time=0.0, retry_count=0
+            )
+
+        validator.validate_sql = fake_validate
+        sqls = ["SELECT 1", "SELECT 2"]
+        results = validator.validate_batch(sqls)
+        assert [r.sql for r in results] == sqls
+        assert [r.index for r in results] == [0, 1]
+
+    def test_batch_workers_inherit_step_context(self):
+        """doc 10.1 §4.4：校验线程池须继承步骤 ContextVar，script 分流不回归。"""
+        import threading
+
+        from metaweave.core.sql_rag.models import ValidationResult
+        from metaweave.utils import logger as mw_logger
+
+        connector = FakeConnector()
+        validator = SQLValidator(
+            connector=connector,
+            config={"sql_validation_max_concurrent": 2, "timeout": 10},
+        )
+        observed = {}
+        ready = threading.Barrier(2, timeout=5)
+
+        def fake_validate(sql: str) -> ValidationResult:
+            ready.wait()
+            observed[sql] = mw_logger.get_current_step()
+            return ValidationResult(
+                sql=sql, valid=True, execution_time=0.0, retry_count=0
+            )
+
+        validator.validate_sql = fake_validate
+        token = mw_logger.set_current_step("sql-rag-validate")
+        try:
+            validator.validate_batch(["SELECT 1", "SELECT 2"])
+        finally:
+            mw_logger.reset_current_step(token)
+        assert observed == {
+            "SELECT 1": "sql-rag-validate",
+            "SELECT 2": "sql-rag-validate",
+        }
+
 
 class TestValidateFile:
     def test_validate_file(self, tmp_path):

@@ -73,6 +73,7 @@ def install_run(monkeypatch, module, selected_steps, *, collection):
     def finish(settings, run_id, step, status, message, **kwargs):
         rows[step].status = status
         rows[step].message = message
+        return True  # 写回成功（doc 10.1 §4.1：_record_terminal 返回是否成功）
 
     def finalize(*args):
         assert all(
@@ -104,7 +105,8 @@ def install_run(monkeypatch, module, selected_steps, *, collection):
         monkeypatch.setattr(
             module,
             "_write_marker_for_step",
-            lambda source, workspace, step, run_id, **kwargs: markers.append(step),
+            lambda source, workspace, step, run_id, **kwargs: markers.append(step)
+            or True,
         )
 
         def worker(ctx):
@@ -147,8 +149,13 @@ def test_collection_executes_dependencies_before_downstream(
     )
     plan = collection_run.normalize_collection_steps(requested)
     collection_run.execute_collection_run(None, RUN_ID, plan)
-    assert calls == expected
-    assert markers == expected
+    # doc 10.1：独立步骤可并行，完成交错合法；只约束依赖先后。
+    assert set(calls) == set(expected)
+    for downstream in expected:
+        for upstream in collection_run._STEP_DEPS.get(downstream, ()):
+            if upstream in calls:
+                assert calls.index(upstream) < calls.index(downstream)
+    assert set(markers) == set(expected)
     assert run.status == "success"
 
 
@@ -210,7 +217,9 @@ def test_collection_propagates_unsuccessful_upstream(monkeypatch, upstream_statu
 
     monkeypatch.setitem(collection_run._WORKERS, "json", unsuccessful_json)
     collection_run.execute_collection_run(None, RUN_ID, ALL_COLLECTION_STEPS)
-    assert calls == ["db", "ddl", "json"]
+    # db 与 ddl 并行启动、完成交错合法（doc 10.1）；json 依赖 ddl，须后于 ddl。
+    assert set(calls) == {"db", "ddl", "json"}
+    assert calls.index("ddl") < calls.index("json")
     assert rows["json"].status == upstream_status
     for step in ["md", "domain", "dim", "rel", "sql"]:
         assert rows[step].status == "blocked"
