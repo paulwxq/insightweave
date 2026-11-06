@@ -17,6 +17,11 @@ const ERROR_MESSAGES: Record<string, string> = {
   step_not_ready: '步骤尚未采集成功',
   step_config_invalid: '步骤或参数不合法，请检查步骤与参数选择。',
   publish_precheck_failed: '发布预检未通过，本次请求未创建发布运行。',
+  // doc 10.2 §5.1–§5.3：发布并行准入与双向保留 409（正常时服务端文案优先）
+  source_publish_active: '该数据源已有进行中的发布运行，请等待完成或收尾后重试。',
+  workspace_publish_active: '该工作区存在进行中的发布，请完成或收尾后重试。',
+  workspace_collection_active: '该工作区存在进行中的采集，请完成或收尾后重试。',
+  publish_capacity_exhausted: '发布容量已满，请稍后重试。',
   workspace_name_exists: '同一数据源下已存在同名工作区。',
   workspace_directory_failed: '工作区目录创建失败。',
   job_name_exists: '同一工作区内已存在同名作业。',
@@ -41,6 +46,7 @@ const ERROR_MESSAGES: Record<string, string> = {
   source_busy: '该数据源有正在执行的采集或发布步骤，请稍后再试。',
   deletion_targets_changed: '存储目标已变化，请核对并确认是否继续。',
   resource_has_unfinished_runs: '存在未结束运行，请查看运行清单；状态更新后可重新确认。',
+  run_resolve_active: '该运行正在本进程执行中，不能终止；若确认执行已中止，请重启后端后重试。',
   internal_error: '服务暂时无法处理请求。',
 }
 

@@ -54,6 +54,15 @@ class _RolledBackWorkError(Exception):
         self.original = original
 
 
+class LockLostError(RuntimeError):
+    """目标锁存活探测失败（doc 10.2 §5.1）。
+
+    由发布/删除侧注入的 ``lock_probe`` 在锁专用连接断开时抛出；
+    loader/cleaner 必须原样传播、不得当作业务失败回滚结果处理。
+    backend.publishing.target_lock.TargetLockLostError 继承本类。
+    """
+
+
 def normalize_neo4j_section(neo4j_section: Dict[str, Any]) -> Dict[str, Any]:
     """校验并规范化 ``loaders.cql_loader.neo4j`` 配置段（共享严格边界）。
 
@@ -128,17 +137,21 @@ class CQLLoader(BaseLoader):
     - 约束语句事务外逐条执行（幂等）
     """
 
-    def __init__(self, config: Dict[str, Any], source_id=None):
+    def __init__(self, config: Dict[str, Any], source_id=None, lock_probe=None):
         """初始化 CQL 加载器
 
         Args:
             config: 配置字典，必须包含 cql_loader 字段
             source_id: 本次发布的 source_id（后端已验证；受管发布链路注入）。
                 缺省时从脚本头 ``// source_id:`` 解析（CLI 调试路径）。
+            lock_probe: 目标锁存活探测回调（doc 10.2 §5.1）。每次目标
+                schema/数据操作边界调用；抛 ``LockLostError`` 时原样传播，
+                不得继续后续操作。受管发布链路注入；CLI 调试路径缺省。
         """
         super().__init__(config)
         self.neo4j_config = self._get_neo4j_config()
         self.neo4j_manager: Optional[Neo4jConnectionManager] = None
+        self._lock_probe = lock_probe
         # 后端传入的删除范围（doc 4 §4.4-2：删除目标必须是已验证的 source_id）
         self.source_id: Optional[str] = (
             None if source_id is None else str(normalize_source_id(source_id))
@@ -275,6 +288,9 @@ class CQLLoader(BaseLoader):
         #    子图未动（已执行的约束语句幂等无害）
         try:
             self._apply_constraint_statements(sections)
+        except LockLostError:
+            # 锁失活探测失败：不是业务回滚，原样传播（doc 10.2 §5.1）
+            raise
         except Exception as e:
             logger.error("CQL 约束语句执行失败: %s", e)
             return self._failure_result(
@@ -295,10 +311,13 @@ class CQLLoader(BaseLoader):
         logger.info(f"开始按源替换加载（source_id={source_id}）...")
         data_sections = [s for s in sections if not self._is_constraint_section(s)]
         counts: Dict[str, int] = {}
+        self._probe_lock()  # 数据事务开始前（doc 10.2 §5.1）
         try:
             counts = self._execute_replacement_transaction(
                 source_id, data_sections, expected_stats
             )
+        except LockLostError:
+            raise
         except _RolledBackWorkError as exc:
             # 事务回调内部失败：driver 已回滚，图确认保留
             e = exc.original
@@ -339,6 +358,8 @@ class CQLLoader(BaseLoader):
                 ],
                 rolled_back=False,
             )
+
+        self._probe_lock()  # 数据事务提交后（doc 10.2 §5.1）
 
         result = {
             "success": True,
@@ -428,8 +449,16 @@ class CQLLoader(BaseLoader):
                 continue
             cypher_text = self._fix_json_quotes(section["cypher"])
             for stmt in self._split_statements(cypher_text):
+                # doc 10.2 §5.1：每条独立 schema 请求前探测锁连接；
+                # 失锁抛 LockLostError 原样传播，不继续后续语句。
+                self._probe_lock()
                 logger.info("  应用约束: %s", stmt.strip()[:80])
                 self.neo4j_manager.execute_write_transaction(stmt)
+
+    def _probe_lock(self) -> None:
+        """目标锁存活探测（未注入时为空操作；doc 10.2 §5.1）。"""
+        if self._lock_probe is not None:
+            self._lock_probe()
 
     def _execute_replacement_transaction(
         self,

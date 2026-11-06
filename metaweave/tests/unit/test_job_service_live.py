@@ -268,6 +268,9 @@ def test_run_state_machine_partial_success(live_source_and_workspace):
             "完成",
             output_manifest={"files": ["ddl/orders.sql"]},
         )
+        # doc 10.2 §5.3：success/failed 只能来自 running（真实链路先认领），
+        # 补认领后再写回；blocked 允许来自 pending（未启动即阻断）。
+        assert mark_step_running(COLLECTION_RUN, session, run_id, "json")
         finish_step(COLLECTION_RUN, session, run_id, "json", STATUS_SUCCESS, "完成")
         finish_step(
             COLLECTION_RUN,

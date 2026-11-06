@@ -94,18 +94,26 @@ def create_run(
     steps: list[str],
     step_params: dict[str, dict],
     trigger_type: str = "manual",
+    execution_plan: dict | None = None,
 ) -> object:
-    """同一事务创建 pending 运行与全部已选步骤行（doc 6.2 §6.3.3）。"""
-    info = spec.info_table(
+    """同一事务创建 pending 运行与全部已选步骤行（doc 6.2 §6.3.3）。
+
+    ``execution_plan`` 仅发布运行使用（doc 10.2 §8）：创建时冻结的调度
+    计划审计快照；采集运行不传。
+    """
+    info_kwargs: dict = {
         **{
             spec.run_id_column: run_id,
             spec.job_id_column: job_id,
         },
-        revision_no=revision_no,
-        trigger_type=trigger_type,
-        status=STATUS_PENDING,
-        run_by_user_id=None,
-    )
+        "revision_no": revision_no,
+        "trigger_type": trigger_type,
+        "status": STATUS_PENDING,
+        "run_by_user_id": None,
+    }
+    if execution_plan is not None and hasattr(spec.info_table, "execution_plan"):
+        info_kwargs["execution_plan"] = execution_plan
+    info = spec.info_table(**info_kwargs)
     session.add(info)
     session.flush()
     run_fk = {spec.run_id_column: run_id}
@@ -125,24 +133,50 @@ def create_run(
 
 
 def mark_run_running(spec: RunSpec, session: Session, run_id: uuid.UUID) -> bool:
-    """运行仍为 pending 时置 running 并写 started_at；否则不动。"""
-    info = get_run(spec, session, run_id)
-    if info is None or info.status != STATUS_PENDING:
-        return False
-    info.status = STATUS_RUNNING
-    info.started_at = func.now()
-    return True
+    """条件 UPDATE：pending → running（doc 10.2 §5.3 原子认领）。
+
+    检查 affected rows——先读再改在并发下可能双执行；认领失败返回 False。
+    """
+    from sqlalchemy import update
+
+    run_column = getattr(spec.info_table, spec.run_id_column)
+    result = session.execute(
+        update(spec.info_table)
+        .where(run_column == run_id, spec.info_table.status == STATUS_PENDING)
+        .values(status=STATUS_RUNNING, started_at=func.now())
+        .execution_options(synchronize_session="fetch")
+    )
+    return bool(result.rowcount)
 
 
 def mark_step_running(
     spec: RunSpec, session: Session, run_id: uuid.UUID, step_name: str
 ) -> bool:
-    step = get_run_step(spec, session, run_id, step_name)
-    if step is None or step.status != STATUS_PENDING:
-        return False
-    step.status = STATUS_RUNNING
-    step.started_at = func.now()
-    return True
+    """条件 UPDATE：步骤 pending → running（doc 10.2 §5.3 原子认领）。"""
+    from sqlalchemy import update
+
+    column = getattr(spec.step_table, spec.run_id_column)
+    result = session.execute(
+        update(spec.step_table)
+        .where(
+            column == run_id,
+            spec.step_table.step_name == step_name,
+            spec.step_table.status == STATUS_PENDING,
+        )
+        .values(status=STATUS_RUNNING, started_at=func.now())
+        .execution_options(synchronize_session="fetch")
+    )
+    return bool(result.rowcount)
+
+
+# finish_step 的合法来源状态（doc 10.2 §5.3：限定来源，防终态覆盖）。
+# blocked 允许来自 pending（复查不就绪/认领前超时未认领）与 running；
+# success/failed 只允许来自 running（认领后执行）。
+_FINISH_SOURCES = {
+    STATUS_BLOCKED: (STATUS_PENDING, STATUS_RUNNING),
+    STATUS_SUCCESS: (STATUS_RUNNING,),
+    STATUS_FAILED: (STATUS_RUNNING,),
+}
 
 
 def finish_step(
@@ -156,22 +190,57 @@ def finish_step(
     input_manifest: dict | None = None,
     output_manifest: dict | None = None,
     target_manifest: dict | None = None,
-) -> None:
-    """写回步骤终态与清单（成功产物清单只在 success 时落盘）。"""
+) -> str:
+    """条件 UPDATE 写回步骤终态，返回最终生效的状态（doc 10.2 §5.3）。
+
+    原子性：UPDATE 带 ``status IN (合法来源)`` 条件并检查 rowcount——
+    读-改-写在并发下可能双写覆盖。结果语义：
+    - rowcount=1：本次提交生效，返回 ``status``；
+    - rowcount=0：重读当前行——同一终态为幂等重放，返回该状态；
+      其他状态（含其他终态）说明本执行者未取得写回权（可能已被其他
+      执行者终结），**不覆盖**，返回行上实际状态供调用方对齐数据库
+      事实，不再当作已按本意图终结。
+    """
     if status not in _RUN_TERMINAL:
         raise ValueError(f"未知的步骤终态: {status!r}")
-    step = get_run_step(spec, session, run_id, step_name)
+    from sqlalchemy import update
+
+    allowed = _FINISH_SOURCES.get(status, ())
+    values: dict = {"status": status, "message": message, "finished_at": func.now()}
+    if input_manifest is not None:
+        values["input_manifest"] = input_manifest
+    if output_manifest is not None and status == STATUS_SUCCESS:
+        values["output_manifest"] = output_manifest
+    if target_manifest is not None:
+        values["target_manifest"] = target_manifest
+    column = getattr(spec.step_table, spec.run_id_column)
+    result = session.execute(
+        update(spec.step_table)
+        .where(
+            column == run_id,
+            spec.step_table.step_name == step_name,
+            spec.step_table.status.in_(allowed),
+        )
+        .values(**values)
+        .execution_options(synchronize_session="fetch")
+    )
+    if result.rowcount:
+        return status
+    # rowcount=0：绕过 identity map 强制读库（doc 10.2 §6.1——数据库事实
+    # 优先；缓存对象可能仍是 UPDATE 前的旧状态）
+    from sqlalchemy import select as _select
+
+    column = getattr(spec.step_table, spec.run_id_column)
+    step = session.execute(
+        _select(spec.step_table)
+        .where(
+            column == run_id, spec.step_table.step_name == step_name
+        )
+        .execution_options(populate_existing=True)
+    ).scalar_one_or_none()
     if step is None:
         raise LookupError(f"步骤行不存在: {run_id}/{step_name}")
-    step.status = status
-    step.message = message
-    if input_manifest is not None:
-        step.input_manifest = input_manifest
-    if output_manifest is not None and status == STATUS_SUCCESS:
-        step.output_manifest = output_manifest
-    if target_manifest is not None and hasattr(step, "target_manifest"):
-        step.target_manifest = target_manifest
-    step.finished_at = func.now()
+    return step.status
 
 
 def rollup_run_status(statuses: list[str]) -> str:

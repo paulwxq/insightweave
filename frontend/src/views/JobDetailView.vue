@@ -704,6 +704,7 @@ function switchStep(step: string) {
       @close="closeHistoryRun"
       @retry="historyRun.retry()"
       @open-step="openStep"
+      @terminated="historyRun.refresh()"
     />
 
     <!-- 步骤详情抽屉（?step= 深链；不修改作业定义） -->

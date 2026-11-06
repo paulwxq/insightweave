@@ -28,6 +28,8 @@ import type {
   RunCreateRequest,
   RunDetail,
   RunListItem,
+  ResolveRunRequest,
+  ResolveRunResponse,
   RunListResponse,
   WorkspaceCreateRequest,
   WorkspaceItem,
@@ -172,13 +174,27 @@ export function createRun(kind: JobKind, jobId: string, payload: RunCreateReques
   }>(path, {
     method: 'POST',
     body: JSON.stringify(payload),
-  })
+    // doc 10.2 §5.1–§5.3：四类 409（source_publish_active 等）的阻塞
+    // 说明由服务端 message 给出，优先透传
+  }, 'create', true)
 }
 
 export function getRunDetail(kind: JobKind, runId: string) {
   const path =
     kind === 'collection' ? `/api/collection-runs/${runId}` : `/api/publish-runs/${runId}`
   return apiRequest<RunDetail>(path, {}, 'create', true)
+}
+
+/** doc 11 §4.3：僵尸运行 Web 收尾；优先透出后端 409/400 文案 */
+export function resolveRun(kind: JobKind, runId: string, payload: ResolveRunRequest) {
+  const path =
+    kind === 'collection'
+      ? `/api/collection-runs/${runId}/resolve`
+      : `/api/publish-runs/${runId}/resolve`
+  return apiRequest<ResolveRunResponse>(path, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  }, 'create', true)
 }
 
 export interface RunPageQuery {

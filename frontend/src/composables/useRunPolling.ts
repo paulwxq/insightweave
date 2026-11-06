@@ -59,6 +59,13 @@ export function useRunPolling(kind: JobKind) {
     void pollOnce()
   }
 
+  /** 立即刷新一次（doc 11 §4.4.2：终止成功后不等下一轮 3 秒轮询）。 */
+  function refresh() {
+    if (!runId.value) return
+    stopTimer()
+    void pollOnce()
+  }
+
   function close() {
     stopTimer()
     requestSeq++
@@ -70,5 +77,5 @@ export function useRunPolling(kind: JobKind) {
 
   onUnmounted(stopTimer)
 
-  return { runId, detail, loading, error, open, retry, close }
+  return { runId, detail, loading, error, open, retry, refresh, close }
 }

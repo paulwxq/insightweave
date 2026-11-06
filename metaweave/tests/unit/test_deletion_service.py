@@ -238,6 +238,8 @@ class FakeDeps:
             "pg_purge": self.pg_purge,
             "workspace_tree": self.workspace_tree,
             "source_tree": self.source_tree,
+            # doc 10.2 §5.1：Neo4j 目标互斥替身（不建真连接、不建模保留记录）
+            "neo4j_target_enter": lambda settings, targets, task_id: None,
         }
 
 
@@ -280,7 +282,9 @@ def env(monkeypatch, tmp_path):
     }
     monkeypatch.setattr(service, "load_main_config_snapshot", lambda _path: config)
     monkeypatch.setattr(service, "clean_milvus_source", lambda ops, sid, cols: {})
-    monkeypatch.setattr(service, "clean_neo4j_source", lambda ops, sid: {})
+    monkeypatch.setattr(
+        service, "clean_neo4j_source", lambda ops, sid, lock_probe=None: {}
+    )
     return SimpleNamespace(session=session, lock=lock, config=config)
 
 
@@ -844,3 +848,127 @@ def test_step_error_with_valid_lock_still_fails_normally(env):
     assert "Milvus 清理故障" in result["error"]
     assert env.session.tasks[0].status == "failed"
     assert env.session.source.deletion_state == "delete_failed"
+
+
+class TestNeo4jTargetMutexIntegration:
+    """doc 10.2 §5.1/§9.15：删除侧目标互斥集成路径（此前全部替身为 None，
+    安全分支零覆盖——Kimi R1 意见 3）。"""
+
+    def _fake_mutex(self, task_id):
+        from types import SimpleNamespace as _NS
+
+        return _NS(
+            conn=_NS(closed=False),
+            key=12345,
+            target_key="neo4j://t:7687|neo4j",
+            owner_id=str(task_id),
+        )
+
+    def test_success_clears_guard_once(self, env, monkeypatch, tmp_path):
+        import backend.publishing.target_lock as target_lock_module
+
+        exits, releases = [], []
+        monkeypatch.setattr(
+            service,
+            "_exit_neo4j_target_mutex",
+            lambda settings, mutex: exits.append(mutex.target_key),
+        )
+        monkeypatch.setattr(
+            target_lock_module, "release_target_lock",
+            lambda conn, key: releases.append(key),
+        )
+        monkeypatch.setattr(
+            target_lock_module, "ensure_target_lock_alive", lambda conn: None
+        )
+        submitted = _submit(env, "delete_source")
+        deps = FakeDeps()
+        mutex = self._fake_mutex(submitted["task_id"])
+        deps_map = deps._as_deps()
+        deps_map["neo4j_target_enter"] = lambda settings, targets, tid: mutex
+        result = service.execute_task(SETTINGS, submitted["task_id"], deps=deps_map)
+        assert result["status"] == "success"
+        assert exits == [mutex.target_key], "成功后按 owner 清除保留记录恰好一次"
+
+    def test_business_failure_retains_guard_and_releases_lock(
+        self, env, monkeypatch, tmp_path
+    ):
+        import backend.publishing.target_lock as target_lock_module
+
+        exits, releases = [], []
+        monkeypatch.setattr(
+            service,
+            "_exit_neo4j_target_mutex",
+            lambda settings, mutex: exits.append(mutex.target_key),
+        )
+        monkeypatch.setattr(
+            target_lock_module, "release_target_lock",
+            lambda conn, key: releases.append(key),
+        )
+        monkeypatch.setattr(
+            target_lock_module, "ensure_target_lock_alive", lambda conn: None
+        )
+        submitted = _submit(env, "delete_source")
+        deps = FakeDeps(fail_step="files")
+        mutex = self._fake_mutex(submitted["task_id"])
+        deps_map = deps._as_deps()
+        deps_map["neo4j_target_enter"] = lambda settings, targets, tid: mutex
+        result = service.execute_task(SETTINGS, submitted["task_id"], deps=deps_map)
+        assert result["status"] == "failed"
+        assert exits == [], "失败一律保留保留记录（人工核验后清除）"
+        assert releases == [mutex.key], "锁连接仍释放"
+
+    def test_occupied_guard_rejects_as_failed(self, env, monkeypatch, tmp_path):
+        submitted = _submit(env, "delete_source")
+        deps = FakeDeps()
+        occupied = RuntimeError(
+            "Neo4j 目标保留记录存在（owner=deletion_task:old），"
+            "请人工核验清除后重试"
+        )
+        deps_map = deps._as_deps()
+        deps_map["neo4j_target_enter"] = lambda settings, targets, tid: occupied
+        result = service.execute_task(SETTINGS, submitted["task_id"], deps=deps_map)
+        assert result["status"] == "failed"
+        assert "目标保留记录存在" in result["error"]
+
+    def test_probe_lock_loss_keeps_task_running_and_guard(
+        self, env, monkeypatch, tmp_path
+    ):
+        import backend.publishing.target_lock as target_lock_module
+        from backend.publishing.target_lock import TargetLockLostError
+
+        exits, releases = [], []
+        monkeypatch.setattr(
+            service,
+            "_exit_neo4j_target_mutex",
+            lambda settings, mutex: exits.append(mutex.target_key),
+        )
+        monkeypatch.setattr(
+            target_lock_module, "release_target_lock",
+            lambda conn, key: releases.append(key),
+        )
+        monkeypatch.setattr(
+            target_lock_module,
+            "ensure_target_lock_alive",
+            lambda conn: (_ for _ in ()).throw(
+                TargetLockLostError("目标锁连接已失效")
+            ),
+        )
+        from backend.deletion import repository as deletion_repo
+
+        failed_calls = []
+        monkeypatch.setattr(
+            deletion_repo,
+            "mark_task_failed",
+            lambda session, tid, error_message=None: failed_calls.append(tid),
+        )
+        submitted = _submit(env, "delete_source")
+        deps = FakeDeps()
+        mutex = self._fake_mutex(submitted["task_id"])
+        deps_map = deps._as_deps()
+        deps_map["neo4j_target_enter"] = lambda settings, targets, tid: mutex
+        result = service.execute_task(SETTINGS, submitted["task_id"], deps=deps_map)
+        # 失锁：不改写任务终态（§7.1 语义），保留记录不清
+        assert result["status"] == "lock_lost"
+        assert exits == []
+        assert releases == [mutex.key]
+        assert failed_calls == [], "失锁不得由旧执行者改写任务终态"

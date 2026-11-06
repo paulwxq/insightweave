@@ -10,6 +10,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Query, Response
 
+from backend.api.errors import RunResolveError
 from backend.api.routers.data_sources import get_platform_settings
 from backend.api.schemas import (
     CollectionRunDetail,
@@ -43,16 +44,21 @@ from backend.api.schemas import (
     RevisionListResponse,
     RunCreateRequest,
     RunListResponse,
+    RunResolveRequest,
+    RunResolveResponse,
     WorkspaceCreateRequest,
     WorkspaceItem,
     WorkspaceListResponse,
     WorkspacePageResponse,
     WorkspacePatchRequest,
 )
+from backend.jobs import active_runs
 from backend.jobs.collection_run import (
     create_collection_run,
     execute_collection_run,
 )
+from backend.jobs.run_repository import COLLECTION_RUN, PUBLISH_RUN, job_of_run, new_run_id
+from backend.jobs.run_resolution import RUN_NOT_FOUND_MESSAGE, apply_resolution
 from backend.jobs.job_service import (
     JobConfigPayload as JobConfigPayloadData,
     add_revision,
@@ -74,7 +80,7 @@ from backend.jobs.listing import (
     list_workspace_collection_runs,
     list_workspace_publish_runs,
 )
-from backend.persistence.platform_db import PlatformSettings
+from backend.persistence.platform_db import PlatformSettings, platform_session
 from backend.profile_loading.dim_value_config_api import (
     list_dim_value_objects,
     read_dim_value_config,
@@ -395,23 +401,15 @@ async def create_collection_run_route(
     background: BackgroundTasks,
     settings: PlatformSettings = Depends(get_platform_settings),
 ):
-    result = await asyncio.to_thread(
+    return await _create_and_dispatch_run(
+        "collection",
         create_collection_run,
-        settings,
-        job_id,
-        revision_no=payload.revision_no,
-        mode=payload.mode,
-        steps=payload.steps,
-        step_config=payload.step_config,
-    )
-    background.add_task(
-        _run_in_thread,
         execute_collection_run,
         settings,
-        UUID(result["collection_run_id"]),
-        result["steps"],
+        job_id,
+        payload,
+        background,
     )
-    return result
 
 
 @router.post("/publish-jobs/{job_id}/runs", status_code=202)
@@ -421,18 +419,54 @@ async def create_publish_run_route(
     background: BackgroundTasks,
     settings: PlatformSettings = Depends(get_platform_settings),
 ):
-    result = await asyncio.to_thread(
+    return await _create_and_dispatch_run(
+        "publish",
         create_publish_run,
+        execute_publish_run,
         settings,
         job_id,
-        revision_no=payload.revision_no,
-        mode=payload.mode,
-        steps=payload.steps,
-        step_config=payload.step_config,
+        payload,
+        background,
     )
-    background.add_task(
-        _run_in_thread, execute_publish_run, settings, UUID(result["publish_run_id"])
-    )
+
+
+async def _create_and_dispatch_run(
+    kind: str,
+    create_fn,
+    execute_fn,
+    settings: PlatformSettings,
+    job_id: str,
+    payload: RunCreateRequest,
+    background: BackgroundTasks,
+):
+    """doc 11 §4.2 规则 1：提交前注册。
+
+    先生成 run_id 并注册本进程执行者，再创建运行行（创建函数接受外部
+    run_id），最后交付后台任务；创建/交付失败注销并向上抛错。不变式：
+    可能被本进程执行的运行，在其运行行对他人可见（提交）前已注册。
+    """
+    run_id = new_run_id()
+    active_runs.register(kind, run_id)
+    try:
+        result = await asyncio.to_thread(
+            create_fn,
+            settings,
+            job_id,
+            run_id=run_id,
+            revision_no=payload.revision_no,
+            mode=payload.mode,
+            steps=payload.steps,
+            step_config=payload.step_config,
+        )
+        if kind == "collection":
+            # 采集执行器需要本次选择的步骤清单（doc 6.2 §6.3）
+            task_args = (settings, run_id, result["steps"])
+        else:
+            task_args = (settings, run_id)
+        background.add_task(_run_in_thread, execute_fn, kind, *task_args)
+    except BaseException:
+        active_runs.unregister(kind, run_id)
+        raise
     return result
 
 
@@ -456,9 +490,15 @@ async def precheck_publish_job_route(
     )
 
 
-def _run_in_thread(func, settings, run_id, *args):
-    """BackgroundTasks 对同步函数自动使用线程池（doc 6.2 §6.3：同进程线程执行）。"""
-    func(settings, run_id, *args)
+def _run_in_thread(func, kind, settings, run_id, *args):
+    """BackgroundTasks 对同步函数自动使用线程池（doc 6.2 §6.3：同进程线程执行）。
+
+    doc 11 §4.2 规则 2：执行结束（含异常退出）注销本进程执行者注册。
+    """
+    try:
+        func(settings, run_id, *args)
+    finally:
+        active_runs.unregister(kind, run_id)
 
 
 @router.get("/collection-runs/{collection_run_id}", response_model=CollectionRunDetail)
@@ -475,6 +515,80 @@ def get_publish_run_route(
     settings: PlatformSettings = Depends(get_platform_settings),
 ):
     return get_publish_run_detail(settings, publish_run_id)
+
+
+@router.post(
+    "/collection-runs/{collection_run_id}/resolve",
+    response_model=RunResolveResponse,
+)
+def resolve_collection_run_route(
+    collection_run_id: UUID,
+    payload: RunResolveRequest,
+    settings: PlatformSettings = Depends(get_platform_settings),
+):
+    """doc 11 §4.3：僵尸运行 Web 收尾（采集）。"""
+    return _resolve_run("collection", COLLECTION_RUN, collection_run_id, payload, settings)
+
+
+@router.post(
+    "/publish-runs/{publish_run_id}/resolve", response_model=RunResolveResponse
+)
+def resolve_publish_run_route(
+    publish_run_id: UUID,
+    payload: RunResolveRequest,
+    settings: PlatformSettings = Depends(get_platform_settings),
+):
+    """doc 11 §4.3：僵尸运行 Web 收尾（发布）。"""
+    return _resolve_run("publish", PUBLISH_RUN, publish_run_id, payload, settings)
+
+
+def _resolve_run(
+    kind: str,
+    spec,
+    run_id: UUID,
+    payload: RunResolveRequest,
+    settings: PlatformSettings,
+) -> dict:
+    """收尾编排：注册表拦截（§4.2 规则 3）→ 参数校验 → 共享收尾模块。
+
+    与 CLI 完全同一份收尾逻辑（run_resolution.apply_resolution），仅 note
+    前缀 origin=「Web 终止」；响应字段按 doc 11 §4.3 映射（workspace_id
+    取自运行所属作业）。
+    """
+    if active_runs.is_active(kind, run_id):
+        raise RunResolveError(
+            409,
+            "run_resolve_active",
+            "该运行正在本进程执行中，不能收尾；若确认执行已中止，请重启后端后重试",
+        )
+    reason = (payload.reason or "").strip()
+    if not reason:
+        raise RunResolveError(400, "invalid_request", "处理原因不能为空")
+    if payload.confirm_executors_stopped is not True:
+        raise RunResolveError(400, "invalid_request", "需确认执行该运行的进程已停止")
+
+    with platform_session(settings) as session:
+        result = apply_resolution(session, spec, run_id, reason, origin="Web 终止")
+        if "error" in result:
+            if result["error"] == RUN_NOT_FOUND_MESSAGE:
+                raise RunResolveError(404, "not_found", result["error"])
+            raise RunResolveError(400, "invalid_request", result["error"])
+        if not result.get("changed"):
+            return {
+                "changed": False,
+                "message": result.get("message", ""),
+                "run_id": str(run_id),
+            }
+        _info, job = job_of_run(spec, session, run_id)
+        return {
+            "changed": True,
+            "final_status": result["final_status"],
+            "steps": result["steps"],
+            "note": result["note"],
+            "run_id": result["run_id"],
+            "job_id": result["job_id"],
+            "workspace_id": job.workspace_id if job else None,
+        }
 
 
 @router.get("/collection-jobs/{job_id}/runs", response_model=RunListResponse)

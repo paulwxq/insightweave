@@ -180,7 +180,12 @@ def test_collection_initialization_error_finishes_run(monkeypatch, failure_at):
 
     monkeypatch.setattr(collection_run, failure_at, fail_sql)
     collection_run.execute_collection_run(None, RUN_ID, ["sql", "db"])
-    assert rows["sql"].status == "failed"
+    # doc 10.2 §6.1（DeepSeek R1 #2）：认领前初始化异常（set_operation_step/
+    # _claim_step）记 blocked——failed 的合法来源不含 pending，记 failed 会被
+    # 条件 UPDATE 拒绝导致运行无法汇总；认领后（load_step_context）异常
+    # 仍记 failed（步骤已 running）。
+    expected_sql = "failed" if failure_at == "load_step_context" else "blocked"
+    assert rows["sql"].status == expected_sql
     assert "RuntimeError" in rows["sql"].message
     assert calls == ["db"]
     assert rows["db"].status == "success"
@@ -197,7 +202,8 @@ def test_collection_sql_logging_error_finishes_failed_run(monkeypatch):
 
     monkeypatch.setattr(collection_run, "set_operation_step", missing_mapping)
     collection_run.execute_collection_run(None, RUN_ID, ["sql"])
-    assert rows["sql"].status == "failed"
+    # 认领前（日志步骤设置）异常 → blocked（DeepSeek R1 #2 新契约）
+    assert rows["sql"].status == "blocked"
     assert "KeyError" in rows["sql"].message
     assert calls == []
     assert run.status == "failed"
@@ -240,12 +246,23 @@ def test_collection_rejects_plan_that_differs_from_run_rows(monkeypatch):
 @pytest.mark.parametrize(
     "selected", [ALL_PUBLISH_STEPS, ["table_schema", "sql", "dim_value", "json"]]
 )
-def test_publish_executes_fixed_order_after_loading_rows(monkeypatch, selected):
+def test_publish_executes_channel_order_without_global_serial(monkeypatch, selected):
+    """并行唯一模式（2026-11-06 裁定移除调度开关）：跨通道无固定全局
+    顺序，通道内保持相邻顺序（doc 10.2 §4）；运行行缺 execution_plan
+    时按已选步骤即时重建计划（NULL 防御分支）。"""
     run, rows, calls, markers = install_run(
         monkeypatch, publish_service, selected, collection=False
     )
     publish_service.execute_publish_run(None, RUN_ID)
-    assert calls == [step for step in ALL_PUBLISH_STEPS if step in selected]
+    assert set(calls) == set(selected)
+    chains = (
+        ["db", "ddl", "json", "domain"],
+        ["table_schema", "dim_value", "sql"],
+        ["rel"],
+    )
+    for chain in chains:
+        positions = [calls.index(step) for step in chain if step in selected]
+        assert positions == sorted(positions)
     assert run.status == "success"
 
 
@@ -253,6 +270,8 @@ def test_collection_route_passes_created_plan_to_background_task(monkeypatch):
     plan = ["ddl", "json", "dim", "md"]
     result = {"collection_run_id": str(RUN_ID), "steps": plan}
     calls = []
+    # doc 11 §4.2：run_id 由路由生成（提交前注册）后传入创建函数
+    monkeypatch.setattr(workspaces, "new_run_id", lambda: RUN_ID)
     monkeypatch.setattr(
         workspaces, "create_collection_run", lambda *args, **kwargs: result
     )
@@ -270,3 +289,49 @@ def test_collection_route_passes_created_plan_to_background_task(monkeypatch):
     assert calls == []
     asyncio.run(background())
     assert calls == [(None, RUN_ID, plan)]
+
+
+def test_upstream_worker_crash_keeps_cascade_message(monkeypatch):
+    """DeepSeek R2 新问题 1 回归：上游 worker 抛未捕获异常时步骤状态
+    必须是终态常量（failed），同选下游的级联阻断消息保持 doc 10.1 §4.1
+    既定文案，而非 bool 导致的通用兜底。"""
+    import backend.jobs.collection_run as collection_run
+    from backend.jobs.run_repository import STATUS_BLOCKED, STATUS_FAILED
+
+    run, rows, calls, markers = install_run(
+        monkeypatch, collection_run, ["json", "rel"], collection=True
+    )
+
+    def crash(ctx):
+        raise RuntimeError("worker 崩溃")
+
+    monkeypatch.setitem(collection_run._WORKERS, "json", crash)
+    collection_run.execute_collection_run(None, RUN_ID, ["json", "rel"])
+    assert rows["json"].status == STATUS_FAILED
+    assert rows["rel"].status == STATUS_BLOCKED
+    assert "JSON" in rows["rel"].message and "未成功" in rows["rel"].message
+    assert run.status == "failed"
+
+
+def test_preclaim_crash_keeps_cascade_message(monkeypatch):
+    """DeepSeek R3 非阻断 1：认领前异常（set_operation_step 抛错）→
+    blocked，同选下游级联文案仍为既定"JSON 未成功"口径。"""
+    import backend.jobs.collection_run as collection_run
+    from backend.jobs.run_repository import STATUS_BLOCKED
+
+    run, rows, calls, markers = install_run(
+        monkeypatch, collection_run, ["json", "rel"], collection=True
+    )
+    original = collection_run.set_operation_step
+
+    def crash(step_name):
+        if step_name == "json":
+            raise RuntimeError("认领前崩溃")
+        return original(step_name)
+
+    monkeypatch.setattr(collection_run, "set_operation_step", crash)
+    collection_run.execute_collection_run(None, RUN_ID, ["json", "rel"])
+    assert rows["json"].status == STATUS_BLOCKED
+    assert rows["rel"].status == STATUS_BLOCKED
+    assert "JSON" in rows["rel"].message and "未成功" in rows["rel"].message
+    assert run.status == "failed"

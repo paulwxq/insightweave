@@ -34,9 +34,11 @@ def executed(monkeypatch):
     """记录后台任务是否被排入并执行（202 之后同线程执行）。"""
     recorder = {"created": None, "executed": []}
 
-    def fake_create(settings, publish_job_id, *, revision_no, mode, steps, step_config):
+    def fake_create(
+        settings, publish_job_id, *, run_id=None, revision_no, mode, steps, step_config
+    ):
         recorder["created"] = {
-            "publish_run_id": str(RUN_ID),
+            "publish_run_id": str(run_id or RUN_ID),
             "publish_job_id": publish_job_id,
             "revision_no": revision_no,
             "steps": steps or ["db"],
@@ -47,6 +49,8 @@ def executed(monkeypatch):
     def fake_execute(settings, run_id):
         recorder["executed"].append(run_id)
 
+    # doc 11 §4.2：run_id 由路由生成（提交前注册）后传入创建函数
+    monkeypatch.setattr(workspaces_router, "new_run_id", lambda: RUN_ID)
     monkeypatch.setattr(workspaces_router, "create_publish_run", fake_create)
     monkeypatch.setattr(workspaces_router, "execute_publish_run", fake_execute)
     return recorder

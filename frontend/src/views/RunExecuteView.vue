@@ -657,7 +657,7 @@ function switchStep(step: string) {
         </template>
         <p v-if="kind === 'publish' && checkError" class="status-message" role="alert">{{ checkError }}</p>
         <p v-if="kind === 'publish'" class="ds-new-job-hint" role="status">
-          发布步骤按固定顺序执行：db → ddl → json → domain → table_schema → dim_value → rel → sql。
+          按约束调度执行：同一数据库的步骤保持固定顺序（PG：db → ddl → json → domain；Milvus：table_schema → dim_value → sql；Neo4j：rel），不同数据库的步骤可并行。
         </p>
 
         <StepGrid
@@ -742,6 +742,10 @@ function switchStep(step: string) {
           <div>
             <span class="ds-kicker ds-kicker-sm">CONFIRM</span>
             <h2>执行确认</h2>
+            <!-- doc 10.2 §7.4：确认区说明按约束调度（同库通道有序、跨库可并行） -->
+            <p v-if="kind === 'publish'" class="rx-schedule-note">
+              提交后按约束调度执行：同一数据库的步骤保持先后顺序，不同数据库的步骤可并行。
+            </p>
           </div>
           <div class="rx-confirm-actions">
             <template v-if="kind === 'publish'">
@@ -793,8 +797,8 @@ function switchStep(step: string) {
             <strong v-else class="rx-confirm-steps">
               <template v-for="(step, index) in confirmSteps" :key="step">
                 <!-- 采集按依赖调度可并行（doc 10.1 §4.6）：标签保留计划（拓扑）顺序但不画串行箭头；
-                     发布仍为固定顺序，保留箭头串联 -->
-                <span v-if="index > 0 && kind === 'publish'" class="rx-step-arrow" aria-hidden="true">→</span>
+                     发布按约束调度（doc 10.2 §7.4）：同库通道有序、跨库可并行，
+                     串行箭头会误导，同样不画 -->
                 <span class="rx-step-chip">{{ step }}</span>
               </template>
             </strong>
@@ -829,6 +833,7 @@ function switchStep(step: string) {
           :error="activeRun.error.value"
           @retry="activeRun.retry()"
           @open-step="openStep"
+          @terminated="activeRun.refresh()"
         />
         <div v-if="showPublishCta" class="rx-run-publish-cta">
           <RouterLink class="rx-run-publish-link" :to="publishCtaTo">创建或执行发布作业 →</RouterLink>
@@ -978,10 +983,6 @@ function switchStep(step: string) {
 .rx-confirm p > span,
 .rx-confirm strong,
 .rx-step-chip,
-.rx-step-arrow {
-  font-size: 12px;
-  line-height: 1.4;
-}
 .rx-confirm p > span {
   flex-shrink: 0;
   color: #66788f;
@@ -1016,16 +1017,17 @@ function switchStep(step: string) {
   font-size: 12px;
   font-weight: 500;
 }
-.rx-step-arrow {
-  color: #8aa0b8;
-  font-size: 12px;
-  font-weight: 400;
-}
 .rx-confirm-order-hint {
   margin: 0;
   color: #66788f;
   font-size: 11px;
 }
+.rx-schedule-note {
+  margin: 4px 0 0;
+  color: var(--ds-text-secondary, #6b7280);
+  font-size: 13px;
+}
+
 /* 发布校验（与新建页/详情页同款标记；按钮在执行确认卡） */
 .rx-check-btn {
   min-height: 34px;

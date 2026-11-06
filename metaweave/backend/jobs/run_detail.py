@@ -9,6 +9,7 @@ from uuid import UUID
 from sqlalchemy.exc import SQLAlchemyError
 
 from backend.data_sources.registration_service import PlatformUnavailableError
+from backend.jobs.active_runs import is_active as _is_executor_active
 from backend.jobs.job_repository import COLLECTION_JOB, PUBLISH_JOB, JobSpec
 from backend.paging import DEFAULT_LIMIT, validate_page
 from backend.jobs.run_repository import (
@@ -78,6 +79,11 @@ def _run_detail(
             "started_at": _iso(run.started_at),
             "finished_at": _iso(run.finished_at),
             "run_type": kind,
+            # doc 11 §4.7：本进程执行者状态（纯注册表读取，不加数据库锁）
+            "executor_active": _is_executor_active(kind, run_id),
+            # doc 10.2 §8：只读可选字段——创建时冻结的执行计划审计快照；
+            # 旧记录无该列值返回 None（legacy serial），旧客户端兼容。
+            "execution_plan": getattr(run, "execution_plan", None),
             "steps": [_step_item(step, kind) for step in steps],
         }
         # 步骤参数一并返回（运行详情可看实际生效参数）

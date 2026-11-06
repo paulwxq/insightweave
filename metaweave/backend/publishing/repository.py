@@ -156,6 +156,189 @@ class RelPublishInProgressError(Exception):
         self.message = message
 
 
+# ---- doc 10.2 §5.1–§5.3：活动运行查询与准入/保留 409 ----
+
+
+class _RunConflictError(Exception):
+    """带阻塞运行定位信息的 409 基类（doc 10.2 §5.1–§5.3）。"""
+
+    def __init__(self, code: str, message: str, blocking: dict | None = None):
+        super().__init__(message)
+        self.code = code
+        self.message = message
+        self.blocking = blocking or {}
+
+
+class SourcePublishActiveError(_RunConflictError):
+    """409 source_publish_active：同源已有 pending/running 发布运行。
+
+    遗留检查只认同工作区同名 running 步骤；并行后同源任何工作区的
+    活动发布都会交错清理 Milvus/Neo4j 同目标内容，创建时按源拒绝。
+    """
+
+    def __init__(self, blocking: dict):
+        super().__init__(
+            "source_publish_active",
+            "该数据源已有进行中的发布运行，请等待完成或收尾后重试",
+            blocking,
+        )
+
+
+class WorkspacePublishActiveError(_RunConflictError):
+    """409 workspace_publish_active：同工作区有 pending/running 发布运行。
+
+    doc 10.2 §5.2 双向保留：发布期间拒绝采集创建/认领与文件配置保存。
+    """
+
+    def __init__(self, blocking: dict):
+        super().__init__(
+            "workspace_publish_active",
+            "该工作区存在进行中的发布，请完成或收尾后重试",
+            blocking,
+        )
+
+
+class WorkspaceCollectionActiveError(_RunConflictError):
+    """409 workspace_collection_active：同工作区有 pending/running 采集运行。"""
+
+    def __init__(self, blocking: dict):
+        super().__init__(
+            "workspace_collection_active",
+            "该工作区存在进行中的采集，请完成或收尾后重试",
+            blocking,
+        )
+
+
+class PublishCapacityExhaustedError(_RunConflictError):
+    """409 publish_capacity_exhausted：全局活动发布运行名额已满。"""
+
+    def __init__(self, limit: int):
+        super().__init__(
+            "publish_capacity_exhausted",
+            f"发布容量已满（活动运行上限 {limit}），请稍后重试",
+            {"limit": limit},
+        )
+
+
+def _run_brief(run_id, job_id, status, kind: str) -> dict:
+    return {
+        "kind": kind,
+        "run_id": str(run_id),
+        "job_id": str(job_id),
+        "status": status,
+    }
+
+
+def active_publish_runs_for_source(session: Session, source_id: str) -> list[dict]:
+    """该源所有关联工作区的 pending/running 发布运行（doc 10.2 §5.1）。
+
+    供创建准入使用：返回阻塞运行定位信息（run_id/job_id/status）。
+    """
+    from sqlalchemy import select
+
+    from backend.persistence.models import PublishJobInfo, PublishRunInfo, WorkspaceInfo
+
+    rows = session.execute(
+        select(
+            PublishRunInfo.publish_run_id,
+            PublishRunInfo.publish_job_id,
+            PublishRunInfo.status,
+        )
+        .join(
+            PublishJobInfo,
+            PublishJobInfo.publish_job_id == PublishRunInfo.publish_job_id,
+        )
+        .join(WorkspaceInfo, WorkspaceInfo.workspace_id == PublishJobInfo.workspace_id)
+        .where(
+            WorkspaceInfo.source_id == source_id,
+            PublishRunInfo.status.in_(("pending", "running")),
+        )
+        .order_by(PublishRunInfo.created_at)
+    ).all()
+    return [
+        _run_brief(row[0], row[1], row[2], "publish") for row in rows
+    ]
+
+
+def active_publish_run_for_workspace(session: Session, workspace_id: str) -> dict | None:
+    """该工作区是否有 pending/running 发布运行（doc 10.2 §5.2）。
+
+    pending 也占用：发布创建后、后台启动前同样要保护输入不被改写。
+    """
+    from sqlalchemy import select
+
+    from backend.persistence.models import PublishJobInfo, PublishRunInfo
+
+    row = session.execute(
+        select(
+            PublishRunInfo.publish_run_id,
+            PublishRunInfo.publish_job_id,
+            PublishRunInfo.status,
+        )
+        .join(
+            PublishJobInfo,
+            PublishJobInfo.publish_job_id == PublishRunInfo.publish_job_id,
+        )
+        .where(
+            PublishJobInfo.workspace_id == workspace_id,
+            PublishRunInfo.status.in_(("pending", "running")),
+        )
+        .order_by(PublishRunInfo.created_at)
+        .limit(1)
+    ).first()
+    if row is None:
+        return None
+    return _run_brief(row[0], row[1], row[2], "publish")
+
+
+def active_collection_run_for_workspace(
+    session: Session, workspace_id: str
+) -> dict | None:
+    """该工作区是否有 pending/running 采集运行（doc 10.2 §5.2）。"""
+    from sqlalchemy import select
+
+    from backend.persistence.models import CollectionJobInfo, CollectionRunInfo
+
+    row = session.execute(
+        select(
+            CollectionRunInfo.collection_run_id,
+            CollectionRunInfo.collection_job_id,
+            CollectionRunInfo.status,
+        )
+        .join(
+            CollectionJobInfo,
+            CollectionJobInfo.collection_job_id == CollectionRunInfo.collection_job_id,
+        )
+        .where(
+            CollectionJobInfo.workspace_id == workspace_id,
+            CollectionRunInfo.status.in_(("pending", "running")),
+        )
+        .order_by(CollectionRunInfo.created_at)
+        .limit(1)
+    ).first()
+    if row is None:
+        return None
+    return _run_brief(row[0], row[1], row[2], "collection")
+
+
+def count_active_publish_runs(session: Session) -> int:
+    """全部 pending/running 发布运行数（doc 10.2 §5.3 全局名额计数）。
+
+    pending 行即占用名额；全部 step 终态但 run 未汇总仍占用。
+    """
+    from sqlalchemy import func, select
+
+    from backend.persistence.models import PublishRunInfo
+
+    return int(
+        session.execute(
+            select(func.count())
+            .select_from(PublishRunInfo)
+            .where(PublishRunInfo.status.in_(("pending", "running")))
+        ).scalar_one()
+    )
+
+
 # Rel 发布生成器实际读取的采集输入目录步骤（json/domain/rel）
 REL_PUBLISH_INPUT_STEPS = ("json", "domain", "rel")
 

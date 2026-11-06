@@ -10,7 +10,13 @@ defineProps<{
   error: string
 }>()
 
-const emit = defineEmits<{ close: []; retry: []; 'open-step': [step: string] }>()
+const emit = defineEmits<{
+  close: []
+  retry: []
+  'open-step': [step: string]
+  /** 终止成功（doc 11 §4.4.2）→ 调用方立即刷新运行详情 */
+  terminated: []
+}>()
 
 function onKeydown(event: KeyboardEvent) {
   if (event.key === 'Escape') emit('close')
@@ -35,6 +41,7 @@ function onKeydown(event: KeyboardEvent) {
         :error="error"
         @retry="emit('retry')"
         @open-step="(step: string) => emit('open-step', step)"
+        @terminated="emit('terminated')"
       />
     </div>
   </div>

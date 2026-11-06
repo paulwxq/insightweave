@@ -94,16 +94,28 @@ _COUNT_NODES = "MATCH (n) WHERE n.source_id = $source_id RETURN count(n) AS coun
 _COUNT_RELS = "MATCH ()-[r]->() WHERE r.source_id = $source_id RETURN count(r) AS count"
 
 
-def clean_neo4j_source(ops: Any, source_id: str) -> dict:
+def clean_neo4j_source(ops: Any, source_id: str, *, lock_probe=None) -> dict:
     """参数化 Cypher 清理该源节点与残留关系，并核验归零（§6.3）。
 
     计数查询返回空行或缺 ``count`` 视为核验失败，不得默认当零；
     查询异常经 ops.single 抛出，由执行器转为任务 failed。
+    ``lock_probe``（doc 10.2 §5.1）：每次独立删除/查询请求前后探测目标
+    锁连接；失锁抛 ``LockLostError`` 原样传播，不继续下一次请求。
     """
+
+    def _probe():
+        if lock_probe is not None:
+            lock_probe()
+
+    _probe()
     ops.run(_DETACH_DELETE_NODES, source_id=source_id)
+    _probe()
     ops.run(_DELETE_TAGGED_RELS, source_id=source_id)
+    _probe()
     nodes_row = ops.single(_COUNT_NODES, source_id=source_id)
+    _probe()
     rels_row = ops.single(_COUNT_RELS, source_id=source_id)
+    _probe()
     if (
         not isinstance(nodes_row, dict)
         or not isinstance(rels_row, dict)

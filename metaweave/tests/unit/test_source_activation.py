@@ -235,6 +235,18 @@ class FakePlatformSession:
         # doc 8.1 §7.3：删除任务查询（本假件不建模任务表）
         return iter([])
 
+    def execute(self, _statement):
+        # doc 10.2 §5.2：启停入口的活动发布检查（本假件不建模发布运行
+        # → 无阻塞，.all() 等结果形状一并支持）
+        from types import SimpleNamespace as _NS
+
+        return _NS(
+            all=lambda: [],
+            first=lambda: None,
+            scalar_one_or_none=lambda: None,
+            scalar_one=lambda: 0,
+        )
+
     def commit(self):
         self.commits += 1
 
@@ -293,9 +305,16 @@ def _fake_session(monkeypatch, result=None, error=None):
         if error is not None:
             raise error
         # doc 8.1 §8.1：启停入口锁源 + 守卫（get 供锁/守卫读行；无删除任务）
+        # doc 10.2 §5.2：活动发布检查（本假件无发布运行 → 无阻塞）
         yield SimpleNamespace(
             get=lambda _model, _key, **_kw: source_row,
             scalars=lambda _statement: iter([]),
+            execute=lambda _statement: SimpleNamespace(
+                all=lambda: [],
+                first=lambda: None,
+                scalar_one_or_none=lambda: None,
+                scalar_one=lambda: 0,
+            ),
         )
 
     monkeypatch.setattr(registration_service, "platform_session", fake_platform_session)
@@ -389,3 +408,37 @@ def test_service_platform_error_is_unavailable(monkeypatch):
     )
     with pytest.raises(PlatformUnavailableError):
         registration_service.set_source_activation(settings, SOURCE_ID, False)
+
+
+def test_activation_rejected_while_publish_active(monkeypatch):
+    """doc 10.2 §5.2：同源活动发布期间启停被拒（409 source_publish_active）。"""
+    from types import SimpleNamespace as _NS
+
+    row = _row(True)
+    session = FakePlatformSession(row)
+    blocking = [("run-1", "job-1", "running")]
+
+    def execute_with_blocking(_statement):
+        return _NS(
+            all=lambda: list(blocking),
+            first=lambda: blocking[0],
+            scalar_one_or_none=lambda: None,
+            scalar_one=lambda: 0,
+        )
+
+    session.execute = execute_with_blocking
+
+    @contextmanager
+    def fake_platform_session(_settings):
+        yield session
+
+    monkeypatch.setattr(registration_service, "platform_session", fake_platform_session)
+    with _client() as client:
+        response = _patch(client, {"is_active": False})
+
+    assert response.status_code == 409
+    body = response.json()
+    assert body["code"] == "source_publish_active"
+    assert body["details"]["run_id"] == "run-1"
+    assert row.is_active is True, "被拒时不修改激活状态"
+    assert session.commits == 0

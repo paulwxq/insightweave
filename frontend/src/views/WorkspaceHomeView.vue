@@ -497,6 +497,7 @@ const crumbSegments = computed(() => [
       @close="drawer[openRunKind].close(); stepDrawerStep = ''"
       @retry="drawer[openRunKind].retry()"
       @open-step="stepDrawerStep = $event"
+      @terminated="drawer[openRunKind].refresh()"
     />
 
     <StepDetailDrawer

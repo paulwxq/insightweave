@@ -2,12 +2,16 @@
 /**
  * 运行详情面板（采集/发布通用）：展示整体状态与逐步骤结果，
  * 未到终态时每 3 秒自动刷新；blocked 不混为失败，partial_success 单列。
+ * doc 11 §4.4.1/§4.7：pending/running 显示「终止」按钮，按 executor_active
+ * 三态门控；成功终止后由调用方（轮询持有方）触发立即刷新。
  */
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import { displayDate } from '../api/format'
 import type { JobKind, RunDetail, RunStepItem } from '../api/types'
 import { runStatusText, stepStatusText } from '../utils/steps'
 import { stepDuration } from '../utils/manifests'
+import { terminateButtonState } from '../utils/terminateRun'
+import TerminateRunDialog from './TerminateRunDialog.vue'
 
 const props = defineProps<{
   kind: JobKind
@@ -20,6 +24,8 @@ const emit = defineEmits<{
   retry: []
   /** 点击步骤行 → 打开步骤详情抽屉（doc 6.3 §4 26.2/27.2） */
   'open-step': [step: string]
+  /** 终止成功（doc 11 §4.4.2）→ 调用方立即刷新运行详情 */
+  terminated: []
 }>()
 
 const runUuid = computed(() =>
@@ -30,6 +36,8 @@ const runUuid = computed(() =>
 const pendingState = computed(
   () => props.run?.status === 'pending' || props.run?.status === 'running',
 )
+const terminate = computed(() => terminateButtonState(props.run))
+const terminateOpen = ref(false)
 
 function triggerText(trigger: string) {
   if (trigger === 'manual') return '手动'
@@ -81,6 +89,17 @@ function stepTitle(step: { step_name: string; message: string | null; step_confi
           <span class="home-status" :class="run.status">{{ runStatusText(run.status) }}</span>
           <span>版本 {{ run.revision_no }}</span>
           <span>{{ triggerText(run.trigger_type) }}</span>
+          <!-- doc 11 §4.4.1：状态徽标旁「终止」按钮，executor_active 门控（§4.7） -->
+          <button
+            v-if="terminate.visible"
+            type="button"
+            class="run-terminate-btn"
+            :disabled="terminate.disabled"
+            :title="terminate.disabled ? terminate.hint : '收尾中断运行的状态记录（不停止线程、不改产物）'"
+            @click="terminateOpen = true"
+          >
+            终止
+          </button>
         </div>
         <p class="run-summary-id">
           <span>运行 ID</span>
@@ -94,6 +113,13 @@ function stepTitle(step: { step_name: string; message: string | null; step_confi
       </div>
       <p v-if="run.message" class="run-panel-message" :class="{ bad: run.status !== 'success' }">
         {{ run.message }}
+      </p>
+      <!-- doc 10.2 §7.4：发布失败/部分成功须指出可能已有外部内容更新 -->
+      <p
+        v-if="kind === 'publish' && ['failed', 'partial_success'].includes(run.status)"
+        class="run-panel-message"
+      >
+        部分 target 内容可能已更新（跨库无整体事务），请核对运行结果后重跑受影响步骤。
       </p>
       <ul class="run-steps">
         <li v-for="step in run.steps" :key="step.step_name" :class="step.status">
@@ -123,6 +149,17 @@ function stepTitle(step: { step_name: string; message: string | null; step_confi
       <p v-if="pendingState" class="run-panel-note" role="status">
         运行尚未结束，每 3 秒自动刷新；离开本页不会取消执行。
       </p>
+      <p v-if="terminate.disabled" class="run-panel-note" role="status">
+        {{ terminate.hint }}
+      </p>
+      <TerminateRunDialog
+        v-if="terminateOpen && run"
+        :kind="kind"
+        :run-id="runUuid"
+        :steps="run.steps"
+        @cancel="terminateOpen = false"
+        @success="terminateOpen = false; emit('terminated')"
+      />
     </template>
   </div>
 </template>
@@ -295,5 +332,22 @@ function stepTitle(step: { step_name: string; message: string | null; step_confi
   margin: 0;
   color: #66788f;
   font-size: 11px;
+}
+.run-terminate-btn {
+  margin-left: auto;
+  min-height: 28px;
+  padding: 4px 14px;
+  border-radius: 20px;
+  border: 1px solid #efc4c4;
+  background: #fff5f5;
+  color: #c0504f;
+  font-size: 12px;
+  font-weight: 700;
+}
+.run-terminate-btn:not(:disabled):hover {
+  background: #fdeaea;
+}
+.run-terminate-btn:disabled {
+  opacity: 0.55;
 }
 </style>

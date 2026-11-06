@@ -253,6 +253,15 @@ def _claim_step(
                     "该工作区 Rel 发布正在执行，不能采集 "
                     f"{step_name}（Rel 发布输入），请稍后重试"
                 )
+        # doc 10.2 §5.2 双向保留：认领复查遇同工作区 pending/running 发布
+        # → 记 blocked，不创建替代运行（pending 也占用：发布可能尚未启动）。
+        from backend.publishing.repository import active_publish_run_for_workspace
+
+        if active_publish_run_for_workspace(session, workspace_id) is not None:
+            return (
+                "该工作区存在进行中的发布，不能认领采集步骤，"
+                "请等待发布完成或收尾后重试"
+            )
         conflict = session.execute(
             select(CollectionRunInfo.collection_run_id)
             .join(
@@ -277,7 +286,11 @@ def _claim_step(
         if conflict is not None:
             session.rollback()
             return "该工作区此步骤可能正在执行（其他运行占用），请稍后重试"
-        mark_step_running(COLLECTION_RUN, session, run_id, step_name)
+        if not mark_step_running(COLLECTION_RUN, session, run_id, step_name):
+            # doc 10.2 §5.3：条件认领失败——已被其他执行者认领或已终结，
+            # 不得执行 worker（与发布侧一致）
+            session.rollback()
+            return "步骤已不在 pending（可能已被认领或已终结），本次不执行"
         session.commit()
     return None
 
@@ -286,6 +299,7 @@ def create_collection_run(
     settings: PlatformSettings,
     job_id: str,
     *,
+    run_id: UUID | None = None,
     revision_no: int,
     mode: str,
     steps: object,
@@ -294,7 +308,8 @@ def create_collection_run(
     """校验并创建一次采集运行（doc 6.2 §6.3 步骤 1–4）；不执行。
 
     返回 202 载荷与后台执行计划。请求不合法、作业/版本/工作区/来源不满足
-    时不创建运行、不写业务记录。
+    时不创建运行、不写业务记录。``run_id`` 由创建路由在注册执行者后传入
+    （doc 11 §4.2 提交前注册）；缺省时内部生成，CLI/测试路径行为不变。
     """
     from metaweave.utils.source_id import normalize_collection_job_id
 
@@ -344,7 +359,20 @@ def create_collection_run(
                 params_table=COLLECTION_STEP_PARAMS,
             )
             ordered = normalize_collection_steps(list(resolved.steps))
-            run_id = new_run_id()
+            # doc 10.2 §5.2 双向保留：同工作区有 pending/running 发布运行时
+            # 拒绝创建采集（409 workspace_publish_active，携带阻塞运行定位）。
+            from backend.publishing.repository import (
+                WorkspacePublishActiveError,
+                active_publish_run_for_workspace,
+            )
+
+            publish_active = active_publish_run_for_workspace(
+                session, job.workspace_id
+            )
+            if publish_active is not None:
+                raise WorkspacePublishActiveError(publish_active)
+            if run_id is None:
+                run_id = new_run_id()
             create_run(
                 COLLECTION_RUN,
                 session,
@@ -548,6 +576,7 @@ def _execute_one_step(
     返回结果行 {"step", "status"} 供调度线程汇总；不抛出。
     """
     step_token = None
+    claimed = False
     try:
         try:
             # 日志设置、认领及上下文装配也可能失败，须纳入步骤异常处理，
@@ -559,6 +588,7 @@ def _execute_one_step(
                     settings, run_id, step_name, STATUS_BLOCKED, blocked_message
                 )
                 return {"step": step_name, "status": STATUS_BLOCKED}
+            claimed = True
 
             from backend.data_sources.step_context import METADATA_CONFIG
 
@@ -584,16 +614,43 @@ def _execute_one_step(
                 step_name,
                 type(exc).__name__,
             )
+            if not claimed:
+                # 认领前/认领中异常（如 _claim_step 数据库故障）：步骤仍
+                # pending，failed 的合法来源不含 pending，会被条件 UPDATE
+                # 拒绝导致运行无法汇总——记 blocked（DeepSeek R1 #2）。
+                # 调度器回传状态必须是终态常量：bool 会使下游级联文案退化
+                # 为兜底（DeepSeek R2 新问题 1）。
+                recorded = _record_terminal(
+                    settings,
+                    run_id,
+                    step_name,
+                    STATUS_BLOCKED,
+                    f"步骤启动失败（{type(exc).__name__}）：未认领即异常，"
+                    "按 blocked 收尾",
+                )
+                if not recorded:
+                    logger.error(
+                        "采集步骤 blocked 写回未生效 run_id=%s step=%s",
+                        run_id,
+                        step_name,
+                    )
+                return {"step": step_name, "status": STATUS_BLOCKED}
             _write_marker_for_step(
                 source_id, workspace_id, step_name, run_id, failed=True
             )
-            _record_terminal(
+            recorded = _record_terminal(
                 settings,
                 run_id,
                 step_name,
                 STATUS_FAILED,
                 f"步骤执行失败（{type(exc).__name__}）",
             )
+            if not recorded:
+                logger.error(
+                    "采集步骤 failed 写回未生效 run_id=%s step=%s",
+                    run_id,
+                    step_name,
+                )
             return {"step": step_name, "status": STATUS_FAILED}
 
         input_manifest = _manifest_or_none(build_input_manifest, outcome.input_files)
@@ -705,11 +762,14 @@ def _record_terminal(
 ) -> bool:
     """写回步骤终态与清单；返回是否写回成功（doc 10.1 §4.1）。
 
-    写回失败不抛出（避免中断其余步骤收集），由调用方决定降级处理。
+    doc 10.2 §5.3 口径说明：finish_step 为条件 UPDATE，rowcount=0 时返回
+    行上实际状态而不抛异常——本侧返回值只表达"是否成功提交了本次写回"，
+    协议内（提交前注册 + 条件认领保证单执行者）不会出现行已被他人终结
+    的分支；若未来放开多执行者，应对照返回的实际状态（与发布侧一致）。
     """
     with platform_session(settings) as session:
         try:
-            finish_step(
+            recorded = finish_step(
                 COLLECTION_RUN,
                 session,
                 run_id,
@@ -719,6 +779,18 @@ def _record_terminal(
                 input_manifest=input_manifest,
                 output_manifest=output_manifest,
             )
+            if recorded != status:
+                # 条件 UPDATE 未生效（行处于其他状态）：不以"commit 成功"
+                # 冒充"状态生效"（DeepSeek R1 #2，与发布侧 §6.1 口径一致）
+                logger.error(
+                    "采集步骤终态写回未生效 run_id=%s step=%s 意图=%s 实际=%s",
+                    run_id,
+                    step_name,
+                    status,
+                    recorded,
+                )
+                session.rollback()
+                return False
             session.commit()
         except Exception as exc:  # noqa: BLE001
             logger.error(

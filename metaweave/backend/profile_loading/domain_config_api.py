@@ -441,16 +441,16 @@ def write_domain_config(
         if workspace_row is None:
             raise DomainConfigOutputMissingError("工作区不存在")
         require_workspace(session, workspace_id, for_write=True)
-        # doc 8.1 §5.1.1：Rel 发布执行期读取本 YAML；发布运行中不得保存
+        # doc 8.1 §5.1.1 + doc 10.2 §5.2：发布运行中不得保存（双向保留，
+        # pending/running 均占用；409 workspace_publish_active）
         from backend.publishing.repository import (
-            RelPublishInProgressError,
-            rel_publish_in_progress,
+            WorkspacePublishActiveError,
+            active_publish_run_for_workspace,
         )
 
-        if rel_publish_in_progress(session, workspace_id) is not None:
-            raise RelPublishInProgressError(
-                "Rel 发布正在执行，请等待完成后再保存 Domain 配置"
-            )
+        publish_active = active_publish_run_for_workspace(session, workspace_id)
+        if publish_active is not None:
+            raise WorkspacePublishActiveError(publish_active)
         source_id = workspace_row.source_id
         source = _require_context(session, source_id, workspace_id)
         path = _yaml_path(source_id, workspace_id)

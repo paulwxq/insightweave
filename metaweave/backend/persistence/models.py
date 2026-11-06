@@ -531,6 +531,11 @@ class PublishRunInfo(Base):
     )
     run_by_user_id: Mapped[UUID | None] = mapped_column(PGUUID(as_uuid=True))
     message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # doc 10.2 §8：创建时冻结的执行计划审计快照（mode/plan_version/
+    # selected_steps/data_dependencies/order_predecessors/channel_limits/
+    # run_concurrency）。旧记录 NULL = legacy serial 固定顺序；新代码
+    # 创建记录不得省略。不放进用户 step_config。
+    execution_plan: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=text("now()"), nullable=False
     )
@@ -539,6 +544,38 @@ class PublishRunInfo(Base):
     )
     finished_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
+    )
+
+
+class PublishTargetGuard(Base):
+    """Neo4j 目标保留记录（doc 10.2 §5.1）：目标互斥的持久占位。
+
+    目标 advisory lock 只能保证持锁期间的互斥；失锁/崩溃后旧请求可能
+    仍在途。遗留保留记录对任何重新进入的执行尝试一律生效（同 owner_id
+    也不放行，删除 retry_task 以同一 task_id 重入同理），只能人工核验
+    旧执行者与外部请求已结束、核对目标结果后清除。发布侧按 rel 执行段
+    建立/清除，删除侧按任务建立/清除。
+    """
+
+    __tablename__ = "publish_target_guard"
+    __table_args__ = (
+        CheckConstraint(
+            "owner_kind IN ('publish_run', 'deletion_task')",
+            name="publish_target_guard_owner_kind_check",
+        ),
+        Index(
+            "publish_target_guard_owner_idx",
+            "owner_kind",
+            "owner_id",
+        ),
+        {"schema": "public"},
+    )
+
+    target_key: Mapped[str] = mapped_column(Text, primary_key=True)
+    owner_kind: Mapped[str] = mapped_column(Text, nullable=False)
+    owner_id: Mapped[str] = mapped_column(Text, nullable=False)
+    reserved_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("now()"), nullable=False
     )
 
 

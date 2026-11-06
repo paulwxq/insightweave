@@ -51,8 +51,18 @@ class LockOrderSession:
         return None
 
     def execute(self, statement):
-        # 两处认领的三表 join 冲突查询：无冲突
-        return SimpleNamespace(scalar_one_or_none=lambda: None)
+        from sqlalchemy.sql.elements import TextClause
+
+        if isinstance(statement, TextClause):
+            # doc 10.2：SET LOCAL lock_timeout，假件不建模
+            return SimpleNamespace(scalar_one_or_none=lambda: None)
+        # 认领的三表 join 冲突查询与 doc 10.2 §5.2 准入查询：无冲突/无活动运行
+        return SimpleNamespace(
+            scalar_one_or_none=lambda: None,
+            first=lambda: None,
+            all=lambda: [],
+            scalar_one=lambda: 0,
+        )
 
     def commit(self):
         self.commits += 1
@@ -79,8 +89,9 @@ def session_env(monkeypatch):
     # publish 侧在函数体内 from ... import mark_step_running，补丁打在源模块
     import backend.jobs.run_repository as run_repository
 
-    monkeypatch.setattr(collection_run, "mark_step_running", lambda *a, **k: None)
-    monkeypatch.setattr(run_repository, "mark_step_running", lambda *a, **k: None)
+    # doc 10.2 §5.3：条件认领返回 True 才继续执行
+    monkeypatch.setattr(collection_run, "mark_step_running", lambda *a, **k: True)
+    monkeypatch.setattr(run_repository, "mark_step_running", lambda *a, **k: True)
     return session
 
 
@@ -113,3 +124,29 @@ def test_claims_probe_workspace_without_lock_first(session_env):
     first = session_env.get_calls[0]
     # §5.1.1：普通查询只用于定位父级，不在此处加锁、不作准入结论
     assert first == ("WorkspaceInfo", WORKSPACE_ID, False)
+
+
+def test_collection_claim_rejects_when_not_pending(session_env, monkeypatch):
+    """doc 10.2 §5.3（DeepSeek R2 #3）：mark_step_running 条件认领失败时
+    _claim_step 返回冲突文案，不进入 worker。"""
+    import backend.jobs.collection_run as collection_run
+    from uuid import uuid4 as _uuid4
+
+    monkeypatch.setattr(collection_run, "mark_step_running", lambda *a, **k: False)
+    reason = collection_run._claim_step(SETTINGS, WORKSPACE_ID, "ddl", _uuid4())
+    assert reason is not None and "不在 pending" in reason
+
+
+def test_collection_claim_proceeds_when_marked(session_env, monkeypatch):
+    import backend.jobs.collection_run as collection_run
+    from uuid import uuid4 as _uuid4
+
+    marked = []
+    monkeypatch.setattr(
+        collection_run,
+        "mark_step_running",
+        lambda *a, **k: marked.append(a) or True,
+    )
+    reason = collection_run._claim_step(SETTINGS, WORKSPACE_ID, "ddl", _uuid4())
+    assert reason is None
+    assert len(marked) == 1

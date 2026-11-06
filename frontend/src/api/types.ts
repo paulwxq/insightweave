@@ -333,7 +333,32 @@ export interface RunDetail {
   started_at: string | null
   finished_at: string | null
   run_type: JobKind
+  /** doc 11 §4.7：本进程执行者状态；可选——字段缺失不门控（后端 409 兜底） */
+  executor_active?: boolean
   steps: RunStepItem[]
+}
+
+/** POST /{kind}-runs/{id}/resolve 请求（doc 11 §4.3） */
+export interface ResolveRunRequest {
+  reason: string
+  confirm_executors_stopped: boolean
+}
+
+export interface ResolveRunStepChange {
+  step: string
+  to: string
+}
+
+/** POST /{kind}-runs/{id}/resolve 响应（changed:false 时仅 message 有值） */
+export interface ResolveRunResponse {
+  changed: boolean
+  final_status?: string
+  steps?: ResolveRunStepChange[]
+  note?: string
+  message?: string
+  run_id: string
+  job_id?: string | null
+  workspace_id?: string | null
 }
 
 /**

@@ -169,6 +169,10 @@ class FakeSession:
         self.table_column_profiles: list = []
         self.table_domains: list = []
         self.pending: list = []
+        self.guard_releases: list = []
+        # doc 10.2 §5.1（DeepSeek R2 #2）：目标互斥事件顺序（先清 guard
+        # 后放锁）的回归断言载体
+        self.target_mutex_events: list = []
         self.commit_errors: list = []
         self.rolled_back = 0
         self.commits = 0
@@ -263,6 +267,66 @@ class FakeSession:
         return rows[0] if rows else None
 
     def execute(self, statement):
+        from sqlalchemy.sql.elements import TextClause
+
+        if isinstance(statement, TextClause):
+            # doc 10.2：准入 advisory lock / SET LOCAL lock_timeout 真实库生效，
+            # 假件不建模锁等待
+            return SimpleNamespace(
+                scalar_one_or_none=lambda: None,
+                first=lambda: None,
+                all=lambda: [],
+                scalar_one=lambda: 0,
+            )
+        if getattr(statement, "is_update", False):
+            return self._apply_update(statement)
+        sql_text = str(statement)
+        if getattr(statement, "_setup_joins", None):
+            if "workspace_info" in sql_text and "publish_run_info" in sql_text:
+                # doc 10.2 §5.1 准入查询 active_publish_runs_for_source：
+                # 本假件不建模其他运行 → 无活动发布
+                return SimpleNamespace(
+                    all=lambda: [],
+                    first=lambda: None,
+                    scalar_one_or_none=lambda: None,
+                )
+            if (
+                "publish_run_info" in sql_text
+                and "publish_run_info.created_at" in sql_text.lower()
+            ):
+                # doc 10.2 §5.2 准入查询 active_publish_run_for_workspace
+                #（带 order_by created_at；认领冲突查询无 order_by）。
+                # 按池语义计算：pending/running 发布 + 作业同工作区即命中。
+                params = statement.compile().params
+                workspace_id = params.get("workspace_id_1")
+                hit = None
+                for run in self.runs:
+                    if getattr(run, "status", None) not in ("pending", "running"):
+                        continue
+                    job = next(
+                        (
+                            item
+                            for item in self.publish_jobs
+                            if item.publish_job_id == run.publish_job_id
+                        ),
+                        None,
+                    )
+                    if job is not None and job.workspace_id == workspace_id:
+                        hit = (run.publish_run_id, run.publish_job_id, run.status)
+                        break
+                return SimpleNamespace(
+                    first=lambda: hit,
+                    all=lambda: ([hit] if hit else []),
+                    scalar_one_or_none=lambda: hit,
+                )
+            if "collection_run_info" in sql_text:
+                # doc 8.1 §5.1.1：Rel 发布认领的反向检查（采集输入运行中）；
+                # doc 10.2 §5.2 准入查询（.first()）——本假件不建模采集运行
+                return SimpleNamespace(
+                    scalar_one_or_none=lambda: None,
+                    first=lambda: None,
+                    all=lambda: [],
+                )
         if getattr(statement, "is_delete", False):
             where = statement.whereclause
             conditions = (
@@ -353,9 +417,53 @@ class FakeSession:
         rows = self._select_rows(statement)
         return SimpleNamespace(
             scalar_one_or_none=lambda: rows[0] if rows else None,
+            # doc 10.2 §5.3：count_active_publish_runs 的 func.count 查询
+            scalar_one=lambda: rows[0] if rows else 0,
             scalars=lambda: rows,
             all=lambda: rows,
         )
+
+    def _apply_update(self, statement):
+        """doc 10.2 §5.3 条件状态更新（mark_*_running / finish_step）。
+
+        按 where 条件（等值 / in / ne）过滤对应池，应用字面量 values
+        （func.now() 以当前时间代替），返回 affected rowcount 语义。
+        """
+        table = statement.table.name
+        pool = {
+            "publish_run_info": self.runs,
+            "publish_run_step": self.run_steps,
+        }.get(table, [])
+        where = statement.whereclause
+
+        def _match(row, name, op, value):
+            actual = getattr(row, name, None)
+            op_name = getattr(op, "__name__", "")
+            if op_name == "ne":
+                return actual != value
+            if isinstance(value, (tuple, list, set, frozenset)):
+                return actual in value
+            return actual == value
+
+        matched = list(pool)
+        if where is not None:
+            for name, (op, value) in self._clause_pairs(where):
+                matched = [
+                    row for row in matched if _match(row, name, op, value)
+                ]
+        updates: dict[str, object] = {}
+        for column, clause in statement._values.items():
+            name = getattr(column, "key", None) or getattr(column, "name", None)
+            raw = getattr(clause, "value", None)
+            if isinstance(raw, (str, dict, list)):
+                updates[name] = raw
+            elif name in ("started_at", "finished_at"):
+                updates[name] = datetime.now(timezone.utc)
+        for row in matched:
+            for key, value in updates.items():
+                if hasattr(row, key):
+                    setattr(row, key, value)
+        return SimpleNamespace(rowcount=len(matched))
 
     def add(self, row):
         self.pending.append(row)
@@ -422,6 +530,40 @@ def install(monkeypatch, tmp_path, session=None):
             raise
 
     monkeypatch.setattr(publish_service, "platform_session", fake_platform_session)
+    # doc 10.2 §5.1：rel 发布的 Neo4j 目标互斥——假件不建真连接；
+    # 目标锁恒可取得、保留记录恒为空（个别用例自行覆盖以测互斥语义）。
+    # publish_service 顶层 from-import 了这些名字，补丁打在其模块属性上。
+    from types import SimpleNamespace as _NS
+
+    monkeypatch.setattr(
+        publish_service, "acquire_target_lock",
+        lambda settings, key, *, wait_timeout_s: _NS(closed=False),
+    )
+    monkeypatch.setattr(
+        publish_service, "release_target_lock", lambda conn, key: None
+    )
+    monkeypatch.setattr(
+        publish_service, "ensure_target_lock_alive", lambda conn: None
+    )
+    monkeypatch.setattr(
+        publish_service,
+        "reserve_target_guard",
+        lambda session, target_key, owner_kind, owner_id: None,
+    )
+    def _record_guard_release(session, target_key, owner_kind, owner_id):
+        # doc 10.2 §5.1（Kimi R1 意见 3）：记录 guard 清除调用供断言
+        holder.guard_releases.append((target_key, owner_kind, owner_id))
+        holder.target_mutex_events.append("guard")
+        return True
+
+    def _record_lock_release(conn, key):
+        holder.target_mutex_events.append("lock")
+        return None
+
+    monkeypatch.setattr(
+        publish_service, "release_target_guard", _record_guard_release
+    )
+    monkeypatch.setattr(publish_service, "release_target_lock", _record_lock_release)
     return holder
 
 
@@ -1060,7 +1202,8 @@ class TestClaimPublishStep:
             hand.commit()
         marked = []
         monkeypatch.setattr(
-            run_repository, "mark_step_running", lambda *a, **k: marked.append(a)
+            # doc 10.2 §5.3：条件认领需返回 True 才继续执行 publisher
+            run_repository, "mark_step_running", lambda *a, **k: marked.append(a) or True
         )
         assert self._claim(session) is None
         assert marked and marked[0][2] == RUN and marked[0][3] == "db"
@@ -1087,3 +1230,26 @@ class TestClaimPublishStep:
         session.workspace = None
         install(monkeypatch, tmp_path, session)
         assert self._claim(session) == "工作区不存在"
+
+
+def test_finish_success_rolls_back_when_row_already_terminal(monkeypatch, tmp_path):
+    """doc 10.2 §6.1（Kimi R2 发现 2）：步骤行已被并发终结时，_finish_success
+    抛错使 PG 内容写入随同一事务回滚，不产生"内容已写而状态未变"。"""
+    session = FakeSession()
+    install(monkeypatch, tmp_path, session)
+    import backend.publishing.publish_service as _ps
+    from backend.publishing.publish_service import _finish_success
+
+    monkeypatch.setattr(
+        _ps, "finish_step", lambda *args, **kwargs: "failed"
+    )  # 模拟条件 UPDATE 未生效（行已 failed）
+
+    with pytest.raises(RuntimeError, match="内容写入回滚"):
+        _finish_success(
+            session,
+            RUN,
+            "db",
+            "数据库画像发布完成",
+            input_manifest=None,
+            target_manifest=None,
+        )

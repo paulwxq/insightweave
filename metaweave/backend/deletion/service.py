@@ -286,8 +286,11 @@ def _step_milvus(settings, deps, task, targets) -> dict:
 
 def _step_neo4j(settings, deps, task, targets) -> dict:
     ops = deps["neo4j_ops_factory"]()
+    # doc 10.2 §5.1：每次目标删除/查询请求前后探测目标锁连接（deps
+    # 注入，由 _execute_locked 在持有目标互斥时写入；替身缺省为空）
+    lock_probe = (deps or {}).get("neo4j_lock_probe")
     try:
-        return clean_neo4j_source(ops, task.source_id)
+        return clean_neo4j_source(ops, task.source_id, lock_probe=lock_probe)
     finally:
         ops.close()
 
@@ -453,33 +456,182 @@ def _execute_locked(
                     },
                 )
 
-    for step_name, step_fn in _steps_for(ref.action):
-        # 每个破坏性步骤前后复检锁连接（§7.1：失锁停止后续动作，不承诺恰好一次）
-        if ensure_lock is not None:
-            ensure_lock()
-        try:
-            result = step_fn(settings, deps, ref, targets)
-        except task_lock.TaskLockLostError:
-            raise
-        except Exception as exc:  # noqa: BLE001 —— 步骤失败转为任务 failed
-            return fail_with_lock_check(step_name, exc)
-        if ensure_lock is not None:
-            ensure_lock()
-        with platform_session(settings) as session:
-            repo.record_step(session, task_id, step_name, result)
-            session.commit()
+    # doc 10.2 §5.1：删除与发布共享 Neo4j 目标互斥协议——任务 advisory 锁
+    # 之后、破坏性清理步骤之前取得部署级目标 advisory lock 并建立持久保留
+    # （claim 事务已提交，不与源/工作区行锁嵌套）。遗留保留记录（含同
+    # task_id 的重试重入）一律拒绝进入，人工核验清除后才能重试。
+    target_mutex = None
+    if ref.action != ACTION_DELETE_WORKSPACE:
+        # deps 可注入替身（测试不建真连接，返回 None 表示不建模目标互斥）；
+        # 生产缺省走真实目标互斥（doc 10.2 §5.1）。
+        enter_target = (deps or {}).get("neo4j_target_enter") or (
+            _enter_neo4j_target_mutex
+        )
+        target_mutex = enter_target(settings, targets, task_id)
+        if isinstance(target_mutex, Exception):
+            return fail_with_lock_check("neo4j_target", target_mutex)
 
-    with platform_session(settings) as session:
-        lock_source_row(session, ref.source_id)
-        if ref.action == ACTION_DELETE_WORKSPACE:
-            lock_workspace_row(session, ref.workspace_id)
-        # 最终标记对象已删除前复检锁连接（§7.1）
-        if ensure_lock is not None:
-            ensure_lock()
-        _finalize_rows(session, ref)
-        repo.mark_task_success(session, task_id)
-        session.commit()
-    return {"task_id": str(task_id), "status": "success"}
+    from backend.publishing.target_lock import (
+        TargetLockLostError,
+        ensure_target_lock_alive,
+        release_target_lock,
+    )
+
+    terminal_recorded = False
+    task_succeeded = False
+    if target_mutex is not None:
+        # 每次目标请求边界探测锁连接（doc 10.2 §5.1）；失锁抛
+        # TargetLockLostError → 转任务锁失锁语义（不改写终态、保留记录）
+        deps["neo4j_lock_probe"] = lambda: ensure_target_lock_alive(
+            target_mutex.conn
+        )
+    try:
+        for step_name, step_fn in _steps_for(ref.action):
+            # 每个破坏性步骤前后复检锁连接（§7.1：失锁停止后续动作，不承诺恰好一次）
+            if ensure_lock is not None:
+                ensure_lock()
+            if target_mutex is not None:
+                try:
+                    ensure_target_lock_alive(target_mutex.conn)
+                except TargetLockLostError as exc:
+                    raise task_lock.TaskLockLostError(str(exc)) from exc
+            try:
+                result = step_fn(settings, deps, ref, targets)
+            except task_lock.TaskLockLostError:
+                raise
+            except TargetLockLostError as exc:
+                # 目标锁失锁与任务锁失锁同语义：不改写任务终态，保留记录
+                raise task_lock.TaskLockLostError(str(exc)) from exc
+            except Exception as exc:  # noqa: BLE001 —— 步骤失败转为任务 failed
+                outcome = fail_with_lock_check(step_name, exc)
+                terminal_recorded = True
+                return outcome
+            if ensure_lock is not None:
+                ensure_lock()
+            if target_mutex is not None:
+                try:
+                    ensure_target_lock_alive(target_mutex.conn)
+                except TargetLockLostError as exc:
+                    raise task_lock.TaskLockLostError(str(exc)) from exc
+            with platform_session(settings) as session:
+                repo.record_step(session, task_id, step_name, result)
+                session.commit()
+
+        with platform_session(settings) as session:
+            lock_source_row(session, ref.source_id)
+            if ref.action == ACTION_DELETE_WORKSPACE:
+                lock_workspace_row(session, ref.workspace_id)
+            # 最终标记对象已删除前复检锁连接（§7.1）
+            if ensure_lock is not None:
+                ensure_lock()
+            _finalize_rows(session, ref)
+            repo.mark_task_success(session, task_id)
+            session.commit()
+        terminal_recorded = True
+        task_succeeded = True
+        return {"task_id": str(task_id), "status": "success"}
+    finally:
+        if target_mutex is not None:
+            if terminal_recorded and task_succeeded:
+                # 任务成功（全部清理步骤完成且终态可靠提交）：按 owner
+                # 匹配清除保留记录后释放锁。失败一律保留——失败路径的
+                # 外部请求结果无法逐一确认（网络中断时服务端可能仍在
+                # 执行），重试由遗留保留记录挡住、人工核验后清除
+                # （doc 10.2 §5.1，Codex R1 意见 3）。
+                _exit_neo4j_target_mutex(settings, target_mutex)
+            else:
+                # 未达终态或失败：保留记录，只关闭锁连接；释放失败不得
+                # 遮蔽正在传播的失锁主异常（Codex R2 意见 4 同源）
+                try:
+                    release_target_lock(target_mutex.conn, target_mutex.key)
+                except Exception:  # noqa: BLE001
+                    logger.exception("释放 Neo4j 目标锁失败（不遮蔽主异常）")
+
+
+class _Neo4jTargetMutex:
+    """Neo4j 目标互斥句柄（doc 10.2 §5.1，删除侧按任务粒度持有）。"""
+
+    def __init__(self, conn, key: int, target_key: str, owner_id: str):
+        self.conn = conn
+        self.key = key
+        self.target_key = target_key
+        self.owner_id = owner_id
+
+
+def _enter_neo4j_target_mutex(settings: PlatformSettings, targets, task_id):
+    """取得 Neo4j 目标锁并建立持久保留；失败返回异常对象（不抛出）。
+
+    成功返回 ``_Neo4jTargetMutex``。保留记录已存在（任何 owner，含同
+    task_id 重试重入）时拒绝进入——重新取得 advisory lock 不等于有权
+    沿用历史记录（doc 10.2 §5.1）。
+    """
+    from backend.publishing.scheduling import publish_lock_timeout_ms
+    from backend.publishing.target_lock import (
+        TargetLockTimeoutError,
+        acquire_target_lock,
+        neo4j_target_guard_key,
+        neo4j_target_lock_key,
+        release_target_lock,
+        reserve_target_guard,
+    )
+
+    neo = (targets or {}).get("neo4j") or {}
+    uri = str(neo.get("uri") or "")
+    database = str(neo.get("database") or "neo4j")
+    # 可读键与锁键同一规范化口径（主机+端口+database；协议/别名写法
+    # 不区分实例，2026-11-06 堵别名坑）
+    target_key = neo4j_target_guard_key(uri, database)
+    key = neo4j_target_lock_key(uri, database)
+    try:
+        conn = acquire_target_lock(
+            settings, key, wait_timeout_s=publish_lock_timeout_ms() / 1000
+        )
+    except TargetLockTimeoutError as exc:
+        return exc
+    except Exception as exc:  # noqa: BLE001 —— 连接级失败也受控转任务 failed，
+        # 不从 _execute_locked 逃逸遗留 running（Kimi R1 意见 4）
+        return exc
+    existing = None
+    try:
+        with platform_session(settings) as session:
+            existing = reserve_target_guard(
+                session, target_key, "deletion_task", str(task_id)
+            )
+            session.commit()
+    except Exception as exc:  # noqa: BLE001 —— 保留记录建立失败：释放锁并转为任务失败
+        release_target_lock(conn, key)
+        return exc
+    if existing is not None:
+        release_target_lock(conn, key)
+        return RuntimeError(
+            "Neo4j 目标保留记录存在（"
+            f"owner={existing['owner_kind']}:{existing['owner_id']}），"
+            "上次执行中断且结果未核验，请人工核验清除后重试"
+        )
+    return _Neo4jTargetMutex(
+        conn=conn, key=key, target_key=target_key, owner_id=str(task_id)
+    )
+
+
+def _exit_neo4j_target_mutex(settings: PlatformSettings, mutex) -> None:
+    """任务终态可靠提交后按 owner 匹配清除保留记录并释放目标锁。"""
+    from backend.publishing.target_lock import (
+        release_target_guard,
+        release_target_lock,
+    )
+
+    try:
+        with platform_session(settings) as session:
+            release_target_guard(
+                session, mutex.target_key, "deletion_task", mutex.owner_id
+            )
+            session.commit()
+    except Exception:  # noqa: BLE001 —— 清除失败：记录保留待人工核验
+        logger.exception(
+            "清除 Neo4j 目标保留记录失败（需人工核验）task=%s", mutex.owner_id
+        )
+    finally:
+        release_target_lock(mutex.conn, mutex.key)
 
 
 def _fail(settings, task_id, *, ref: _TaskRef, step, exc) -> dict:

@@ -73,7 +73,14 @@ class StepFilter(logging.Filter):
         }
 
     def filter(self, record: logging.LogRecord) -> bool:
-        return get_current_step() in self.allowed_steps
+        # doc 10.2 §7.5：改用记录工厂注入的 record.step（记录创建时刻的
+        # 上下文快照），不再实时读取当前上下文——并行任务交错时实时读取
+        # 会把日志路由到错误步骤文件。工厂未安装（record 无 step）时回退
+        # 实时读取，保持 API 配置等场景行为不变。
+        step = getattr(record, "step", None)
+        if step is None:
+            step = get_current_step()
+        return step in self.allowed_steps
 
 
 def setup_metaweave_logging(config_path: Optional[str] = None) -> None:

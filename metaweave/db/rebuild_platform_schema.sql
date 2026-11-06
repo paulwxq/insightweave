@@ -506,6 +506,7 @@ CREATE TABLE public.publish_run_info (
     status text NOT NULL DEFAULT 'pending',
     run_by_user_id uuid,
     message text,
+    execution_plan jsonb,
     created_at timestamptz NOT NULL DEFAULT now(),
     started_at timestamptz,
     finished_at timestamptz,
@@ -552,6 +553,22 @@ COMMENT ON COLUMN public.publish_run_info.started_at IS
     '本次发布实际开始执行的时间，尚未开始时为空';
 COMMENT ON COLUMN public.publish_run_info.finished_at IS
     '本次发布结束时间，尚未结束时为空';
+
+CREATE TABLE public.publish_target_guard (
+    target_key text PRIMARY KEY,
+    owner_kind text NOT NULL,
+    owner_id text NOT NULL,
+    reserved_at timestamptz NOT NULL DEFAULT now(),
+
+    CONSTRAINT publish_target_guard_owner_kind_check
+        CHECK (owner_kind IN ('publish_run', 'deletion_task'))
+);
+
+CREATE INDEX publish_target_guard_owner_idx
+    ON public.publish_target_guard (owner_kind, owner_id);
+
+COMMENT ON TABLE public.publish_target_guard IS
+    'Neo4j 目标保留记录（doc 10.2 §5.1）：目标 advisory lock 失锁/崩溃后的持久占位，遗留记录对任何重新进入的执行尝试一律生效，人工核验后清除';
 
 CREATE TABLE public.publish_run_step (
     publish_run_id uuid NOT NULL

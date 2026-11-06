@@ -816,6 +816,15 @@ def write_dim_value_config(
         if workspace_row is None:
             raise DimConfigOutputMissingError("工作区不存在")
         require_workspace(session, workspace_id, for_write=True)
+        # doc 10.2 §5.2 双向保留：发布运行中（pending/running）不得保存配置
+        from backend.publishing.repository import (
+            WorkspacePublishActiveError,
+            active_publish_run_for_workspace,
+        )
+
+        publish_active = active_publish_run_for_workspace(session, workspace_id)
+        if publish_active is not None:
+            raise WorkspacePublishActiveError(publish_active)
         _require_workspace(session, workspace_id)
         source = _require_registration(session, workspace_row.source_id)
 

@@ -132,8 +132,19 @@ class RunGuardSession:
         return None
 
     def execute(self, statement):
-        if getattr(statement, "_setup_joins", None):
+        from sqlalchemy.sql.elements import TextClause
+
+        if isinstance(statement, TextClause):
+            # doc 10.2：准入 advisory lock，假件不建模
             return SimpleNamespace(scalar_one_or_none=lambda: None)
+        if getattr(statement, "_setup_joins", None):
+            # 含 doc 10.2 §5.2 准入查询（.first()）：无活动运行
+            return SimpleNamespace(
+                scalar_one_or_none=lambda: None,
+                first=lambda: None,
+                all=lambda: [],
+                scalar_one=lambda: 0,
+            )
         columns = [c["entity"] for c in statement.column_descriptions]
         if columns and columns[0] in (CollectionJobRevision, PublishJobRevision):
             params = statement.compile().params

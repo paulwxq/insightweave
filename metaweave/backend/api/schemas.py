@@ -307,11 +307,38 @@ class CollectionRunDetail(BaseModel):
     started_at: str | None = None
     finished_at: str | None = None
     run_type: str
+    # doc 11 §4.7：本进程执行者注册表读取；字段缺失（旧载荷）按 false 容忍
+    executor_active: bool = False
     steps: list[RunStepItem]
 
 
 class PublishRunDetail(CollectionRunDetail):
+    # doc 10.2 §8：只读可选字段（创建时冻结的执行计划；旧记录为 None）
+    execution_plan: dict[str, Any] | None = None
     publish_run_id: str
+
+
+class RunResolveRequest(BaseModel):
+    """doc 11 §4.3 收尾请求：缺省值统一走 400（reason 空 / 承诺未勾选）。"""
+
+    reason: str = ""
+    confirm_executors_stopped: bool = False
+
+
+class RunResolveStepChange(BaseModel):
+    step: str
+    to: str
+
+
+class RunResolveResponse(BaseModel):
+    changed: bool
+    final_status: str | None = None
+    steps: list[RunResolveStepChange] = []
+    note: str | None = None
+    message: str | None = None
+    run_id: str
+    job_id: str | None = None
+    workspace_id: str | None = None
 
 
 class RunListItem(BaseModel):

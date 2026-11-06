@@ -90,6 +90,20 @@ from metaweave.core.metadata.db_step import (
 logger = logging.getLogger("backend.api")
 
 
+class RunResolveError(Exception):
+    """Web 收尾端点的受控错误（doc 11 §4.3 错误与边界映射）。
+
+    HTTP 语义（状态码/错误码）只属于 API 层：共享收尾模块 run_resolution
+    保持纯领域返回（dict），CLI 不感知 HTTP。
+    """
+
+    def __init__(self, status: int, code: str, message: str):
+        super().__init__(message)
+        self.status = status
+        self.code = code
+        self.message = message
+
+
 def _route_template(request: Request) -> str:
     """取路由模板（doc 15 §4：不把请求输入的原始路径写进日志）。"""
     return getattr(request.scope.get("route"), "path", None) or "-"
@@ -112,6 +126,11 @@ def register_exception_handlers(app: FastAPI) -> None:
     async def invalid_request(_request: Request, _exc: RequestValidationError):
         # 不访问 exc.errors()：其中可能包含完整请求体或明文密码。
         return _response(422, "invalid_request", "请求字段不合法")
+
+    @app.exception_handler(RunResolveError)
+    async def run_resolve(_request: Request, exc: RunResolveError):
+        # doc 11 §4.3：409 注册表拦截 / 400 参数 / 404 未知运行
+        return _response(exc.status, exc.code, exc.message)
 
     # ---- 数据源 ----
 
@@ -348,6 +367,41 @@ def register_exception_handlers(app: FastAPI) -> None:
         # doc 8.1 §5.1.1：发布执行期与配置保存的互斥（替代原工作区行锁）；
         # 错误类统一来自 publishing.repository（domain/rel 配置保存共用）
         return _response(409, "rel_publish_in_progress", exc.message)
+
+    # ---- doc 10.2 §5.1–§5.3：发布并行准入与双向保留 409 ----
+
+    from backend.publishing.repository import (  # noqa: PLC0415
+        PublishCapacityExhaustedError,
+        SourcePublishActiveError,
+        WorkspaceCollectionActiveError,
+        WorkspacePublishActiveError,
+    )
+
+    @app.exception_handler(SourcePublishActiveError)
+    async def source_publish_active(_request: Request, exc: SourcePublishActiveError):
+        # 同源互斥（§5.1）：携带阻塞运行定位信息，前端可分别引导
+        return _response(409, exc.code, exc.message, details=exc.blocking)
+
+    @app.exception_handler(WorkspacePublishActiveError)
+    async def workspace_publish_active(
+        _request: Request, exc: WorkspacePublishActiveError
+    ):
+        # 双向保留（§5.2）：发布期间拒绝采集创建/认领与配置保存
+        return _response(409, exc.code, exc.message, details=exc.blocking)
+
+    @app.exception_handler(WorkspaceCollectionActiveError)
+    async def workspace_collection_active(
+        _request: Request, exc: WorkspaceCollectionActiveError
+    ):
+        # 双向保留（§5.2）：采集期间拒绝发布创建
+        return _response(409, exc.code, exc.message, details=exc.blocking)
+
+    @app.exception_handler(PublishCapacityExhaustedError)
+    async def publish_capacity_exhausted(
+        _request: Request, exc: PublishCapacityExhaustedError
+    ):
+        # 全局名额（§5.3）：满额 409，不排队、不自动重发
+        return _response(409, exc.code, exc.message, details=exc.blocking)
 
     @app.exception_handler(RelWriteFailedError)
     async def rel_write_failed(_request: Request, exc: RelWriteFailedError):

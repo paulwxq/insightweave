@@ -277,6 +277,17 @@ def set_source_activation(
 
             lock_source_row(session, source_id)
             require_source(session, source_id, for_write=True)
+            # doc 10.2 §5.2：禁用等影响加载的修改在源锁下检查活动发布后
+            # 拒绝（409 source_publish_active）；启用方向一并拦截保持一致，
+            # 避免"禁用-启用"绕开窗口
+            from backend.publishing.repository import (
+                SourcePublishActiveError,
+                active_publish_runs_for_source,
+            )
+
+            blocking_runs = active_publish_runs_for_source(session, source_id)
+            if blocking_runs:
+                raise SourcePublishActiveError(blocking_runs[0])
             row = set_db_source_active(session, source_id, is_active)
             if row is None:
                 raise SourceNotFoundError("数据源不存在")
@@ -361,6 +372,16 @@ def update_registered_source(
 
             lock_source_row(session, source_id)
             require_source(session, source_id, for_write=True)
+            # doc 10.2 §5.2：连接/schema 等影响加载的修改在源锁下检查
+            # 活动发布后拒绝（409 source_publish_active）
+            from backend.publishing.repository import (
+                SourcePublishActiveError,
+                active_publish_runs_for_source,
+            )
+
+            blocking_runs = active_publish_runs_for_source(session, source_id)
+            if blocking_runs:
+                raise SourcePublishActiveError(blocking_runs[0])
             row = update_db_source(
                 session,
                 source_id,

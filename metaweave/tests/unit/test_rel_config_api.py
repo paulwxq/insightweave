@@ -50,10 +50,16 @@ class FakeSession:
         return iter([])
 
     def execute(self, _statement):
-        # doc 8.1 §5.1.1：Rel 发布运行中检查（本假件不建模发布运行 → 无冲突）
+        # doc 8.1 §5.1.1 + doc 10.2 §5.2：运行中/活动发布检查
+        #（本假件不建模发布运行 → 无冲突；准入查询 .first() 一并支持）
         from types import SimpleNamespace as _NS
 
-        return _NS(scalar_one_or_none=lambda: None)
+        return _NS(
+            scalar_one_or_none=lambda: None,
+            first=lambda: None,
+            all=lambda: [],
+            scalar_one=lambda: 0,
+        )
 
     def get(self, model, key, **kwargs):
         from backend.persistence.models import DbSourceInfo, WorkspaceInfo

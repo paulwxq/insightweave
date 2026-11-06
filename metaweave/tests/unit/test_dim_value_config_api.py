@@ -47,6 +47,17 @@ class FakeSession:
         # doc 8.1 §7.3：删除任务查询（本假件不建模任务表 → 无未解决任务）
         return iter([])
 
+    def execute(self, _statement):
+        # doc 10.2 §5.2：活动发布准入查询（本假件不建模发布运行 → 无冲突）
+        from types import SimpleNamespace as _NS
+
+        return _NS(
+            scalar_one_or_none=lambda: None,
+            first=lambda: None,
+            all=lambda: [],
+            scalar_one=lambda: 0,
+        )
+
     def get(self, model, key, **kwargs):
         from backend.persistence.models import DbSourceInfo, WorkspaceInfo
 
@@ -1073,3 +1084,61 @@ def test_recommendations_endpoint_workspace_missing_404(monkeypatch, tmp_path):
     )
     with pytest.raises(DimConfigOutputMissingError):
         api.read_dim_value_recommendations(SETTINGS, WORKSPACE_ID)
+
+
+def test_write_rejected_while_publish_active(monkeypatch, tmp_path):
+    """doc 10.2 §5.2（DeepSeek R1 #4）：活动发布期间 dim 配置保存 409。"""
+    from types import SimpleNamespace as _NS
+
+    import backend.profile_loading.dim_value_config_api as dim_api
+    from backend.publishing.repository import (
+        WorkspacePublishActiveError,
+    )
+    from backend.persistence.models import WorkspaceInfo, DbSourceInfo
+
+    workspace_row = SimpleNamespace(
+        workspace_id="ws_41",
+        source_id="db_src_41",
+        deletion_state="active",
+        deleted_at=None,
+    )
+    source_row = SimpleNamespace(
+        source_id="db_src_41", is_active=True, db_name="d",
+        updated_at=None, selected_schemas=["public"],
+    )
+
+    blocking = [("run-9", "job-9", "running")]
+
+    class BusySession:
+        def get(self, model, key, **_kw):
+            if model is WorkspaceInfo and key == "ws_41":
+                return workspace_row
+            if model is DbSourceInfo:
+                return source_row
+            return None
+
+        def execute(self, _statement):
+            return _NS(
+                all=lambda: list(blocking),
+                first=lambda: blocking[0],
+                scalar_one_or_none=lambda: None,
+                scalar_one=lambda: 0,
+            )
+
+        def scalars(self, _statement):
+            return iter([])
+
+        def commit(self):
+            raise AssertionError("拒绝路径不应提交")
+
+    from contextlib import contextmanager
+
+    @contextmanager
+    def fake_ps(_settings):
+        yield BusySession()
+
+    monkeypatch.setattr(dim_api, "platform_session", fake_ps)
+    with pytest.raises(WorkspacePublishActiveError):
+        dim_api.write_dim_value_config(
+            SETTINGS, "ws_41", {"tables": [], "fingerprint": "x"}
+        )
