@@ -16,7 +16,7 @@ from metaweave.core.cql_generator.models import (
 )
 
 SOURCE_ID = "db_src_1"
-PUBLISH_ID = "1a2b3c4d-5e6f-4a5b-8c9d-0e1f2a3b4c5d"
+PUBLISH_RUN_ID = "1a2b3c4d-5e6f-4a5b-8c9d-0e1f2a3b4c5d"
 
 
 def test_import_all_includes_db_prefixed_ids_and_database_property(tmp_path):
@@ -56,7 +56,7 @@ def test_import_all_includes_db_prefixed_ids_and_database_property(tmp_path):
         columns,
         has_column_rels,
         join_on_rels,
-        provenance=(SOURCE_ID, PUBLISH_ID),
+        provenance=(SOURCE_ID, PUBLISH_RUN_ID),
     )
     assert str(tmp_path / "import_all.store_db.cypher") in output_files
 
@@ -84,7 +84,7 @@ def test_import_all_includes_db_prefixed_ids_and_database_property(tmp_path):
     assert f'"entity_id": "{SOURCE_ID}:store_db.public.dim_region"' in content
     assert f'"entity_id": "{SOURCE_ID}:store_db.public.dim_region.city_name"' in content
     assert f'"source_id": "{SOURCE_ID}"' in content
-    assert f'"publish_id": "{PUBLISH_ID}"' in content
+    assert f'"publish_run_id": "{PUBLISH_RUN_ID}"' in content
     assert f"// source_id: {SOURCE_ID}" in content
     assert "// 统计: 1 张表, 1 个列, 1 个关系" in content
 

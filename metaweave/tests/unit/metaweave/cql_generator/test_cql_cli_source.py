@@ -1,7 +1,7 @@
 """CLI --step cql 来源参数传递测试（doc 4 §4.2：实体键身份必填）
 
 - execute_cql 缺 cql_source_id：明确失败提示（不再落到 writer 深处报错）；
-- 提供合法 source_id：provenance=(source_id, 随机 publish_id) 注入生成器；
+- 提供合法 source_id：provenance=(source_id, 随机 publish_run_id) 注入生成器；
 - CLI --step cql 未带 --source-id 时以可读提示退出非零。
 """
 
@@ -89,7 +89,7 @@ class TestExecuteCqlSourceId:
         provenance = captured["provenance"]
         assert provenance is not None
         assert provenance[0] == SOURCE_ID  # source_id 归一化传入
-        assert provenance[1]  # 调试 publish_id（随机 UUID，不写平台库）
+        assert provenance[1]  # 调试 publish_run_id（随机 UUID，不写平台库）
 
 
 class TestCliStepCql:

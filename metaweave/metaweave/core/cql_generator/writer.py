@@ -4,8 +4,8 @@
 
 doc 4（多数据源知识隔离）改造：
 - Table/Column 按 ``entity_id = source_id:逻辑id`` MERGE，保留原业务 id 与
-  full_name 属性；source_id/publish_id 由 provenance 服务端上下文提供并写入
-  全部节点与边；
+  full_name 属性；source_id/publish_run_id 由 provenance 服务端上下文提供并写入
+  全部节点与边（doc 12.1：发布运行字段统一为 publish_run_id）；
 - HAS_COLUMN/JOIN_ON 端点按实体键定位；JOIN_ON 保留按 relationship_id
   MERGE 的端点间业务标识；
 - 约束脚本只生成 Table.entity_id / Column.entity_id 唯一约束（完整与分步
@@ -69,27 +69,27 @@ class CypherWriter:
     def _normalize_provenance(
         provenance: Optional[Tuple],
     ) -> Tuple[str, str]:
-        """校验并规范化 (source_id, publish_id) 溯源对。
+        """校验并规范化 (source_id, publish_run_id) 溯源对。
 
         doc 4 §4.2：实体身份按源构造，provenance 为必填——缺失即配置错误。
         """
         if provenance is None:
             raise ValueError(
-                "CQL 生成需要 provenance=(source_id, publish_id)（受管发布链路"
+                "CQL 生成需要 provenance=(source_id, publish_run_id)（受管发布链路"
                 "注入）；实体键身份依赖 source_id，无法省略"
             )
         if not isinstance(provenance, tuple) or len(provenance) != 2:
-            raise ValueError("provenance 必须是 (source_id, publish_id) 二元组")
-        source_id, publish_id = provenance
+            raise ValueError("provenance 必须是 (source_id, publish_run_id) 二元组")
+        source_id, publish_run_id = provenance
         try:
             from metaweave.utils.source_id import normalize_run_uuid
 
             source_str = str(normalize_source_id(source_id))
             # 第二元素为发布运行 UUID（doc 6 §1），不得按短 ID 校验
-            publish_str = str(normalize_run_uuid(publish_id))
+            publish_run_str = str(normalize_run_uuid(publish_run_id))
         except (ValueError, TypeError) as exc:
             raise ValueError(f"provenance 校验失败: {exc}") from exc
-        return source_str, publish_str
+        return source_str, publish_run_str
 
     @staticmethod
     def _build_entity_maps(
@@ -145,13 +145,13 @@ class CypherWriter:
             columns: Column 节点列表
             has_column_rels: HAS_COLUMN 关系列表
             join_on_rels: JOIN_ON 关系列表
-            provenance: (source_id, publish_id) 溯源对——**必填**（doc 4 §4.2：
+            provenance: (source_id, publish_run_id) 溯源对——**必填**（doc 4 §4.2：
                 实体键身份依赖 source_id）；Table/Column/边统一注入归属属性
 
         Returns:
             生成的文件路径列表
         """
-        source_id, publish_id = self._normalize_provenance(provenance)
+        source_id, publish_run_id = self._normalize_provenance(provenance)
 
         output_files = []
 
@@ -167,7 +167,7 @@ class CypherWriter:
             join_on_rels,
             database_name=database_name,
             source_id=source_id,
-            publish_id=publish_id,
+            publish_run_id=publish_run_id,
         )
         output_files.append(str(import_all_file))
 
@@ -203,7 +203,7 @@ class CypherWriter:
         join_on_rels: List[JOINOnRelation],
         database_name: str,
         source_id: str,
-        publish_id: str,
+        publish_run_id: str,
     ) -> Path:
         """生成 import_all.{db}.cypher（完整的 global 模式 CQL 脚本）"""
         output_file = self.output_dir / f"import_all.{database_name}.cypher"
@@ -219,18 +219,18 @@ class CypherWriter:
         for row, table in zip(tables_data, tables):
             row["entity_id"] = table_entity[table.full_name]
             row["source_id"] = source_id
-            row["publish_id"] = publish_id
+            row["publish_run_id"] = publish_run_id
         columns_data = [c.to_cypher_dict() for c in columns]
         for row, column in zip(columns_data, columns):
             row["entity_id"] = column_entity[column.full_name]
             row["source_id"] = source_id
-            row["publish_id"] = publish_id
+            row["publish_run_id"] = publish_run_id
         has_column_data = [
             {
                 "table_entity_id": table_entity[rel.table_full_name],
                 "column_entity_id": column_entity[rel.column_full_name],
                 "source_id": source_id,
-                "publish_id": publish_id,
+                "publish_run_id": publish_run_id,
             }
             for rel in has_column_rels
         ]
@@ -239,7 +239,7 @@ class CypherWriter:
             join_on_data[i]["src_entity_id"] = table_entity[rel.src_full_name]
             join_on_data[i]["dst_entity_id"] = table_entity[rel.dst_full_name]
             join_on_data[i]["source_id"] = source_id
-            join_on_data[i]["publish_id"] = publish_id
+            join_on_data[i]["publish_run_id"] = publish_run_id
 
         tables_json = json.dumps(tables_data, ensure_ascii=False, indent=2)
         columns_json = json.dumps(columns_data, ensure_ascii=False, indent=2)
@@ -267,7 +267,7 @@ class CypherWriter:
 	MERGE (n:Table {{entity_id: t.entity_id}})
 	SET n.entity_id = t.entity_id,
 	    n.source_id = t.source_id,
-	    n.publish_id = t.publish_id,
+	    n.publish_run_id = t.publish_run_id,
 	    n.id        = t.id,
 	    n.full_name = t.full_name,
 	    n.database  = t.database,
@@ -297,7 +297,7 @@ class CypherWriter:
 	MERGE (n:Column {{entity_id: c.entity_id}})
 	SET n.entity_id = c.entity_id,
 	    n.source_id = c.source_id,
-	    n.publish_id = c.publish_id,
+	    n.publish_run_id = c.publish_run_id,
 	    n.id           = c.id,
 	    n.full_name    = c.full_name,
 	    n.database     = c.database,
@@ -325,7 +325,7 @@ MATCH (t:Table {{entity_id: hc.table_entity_id}})
 MATCH (c:Column {{entity_id: hc.column_entity_id}})
 MERGE (t)-[r:HAS_COLUMN]->(c)
 SET r.source_id = hc.source_id,
-    r.publish_id = hc.publish_id;
+    r.publish_run_id = hc.publish_run_id;
 
 // =====================================================================
 // 5. 建立 JOIN_ON 关系
@@ -336,7 +336,7 @@ MATCH (src:Table {{entity_id: j.src_entity_id}})
 MATCH (dst:Table {{entity_id: j.dst_entity_id}})
 MERGE (src)-[r:JOIN_ON {{relationship_id: j.relationship_id}}]->(dst)
 SET r.source_id = j.source_id,
-    r.publish_id = j.publish_id,
+    r.publish_run_id = j.publish_run_id,
     r.cardinality     = j.cardinality,
     r.constraint_name = j.constraint_name,
     r.join_type       = coalesce(j.join_type, 'INNER JOIN'),

@@ -106,8 +106,8 @@ def read_managed_pairs(json_dir, md_dir, expected_json_marker=None, database_nam
     return pairs
 
 
-# 预检阶段尚无真实 publish_id：用 36 字节的规范化 UUID 占位，其长度与真实值一致。
-_PLACEHOLDER_PUBLISH_ID = "00000000-0000-0000-0000-000000000000"
+# 预检阶段尚无真实 publish_run_id：用 36 字节的规范化 UUID 占位，其长度与真实值一致。
+_PLACEHOLDER_PUBLISH_RUN_ID = "00000000-0000-0000-0000-000000000000"
 
 
 @dataclass
@@ -195,7 +195,9 @@ def prepare_managed_table_schema_input(
 
         for obj in objects:
             check_record_lengths(
-                obj.to_milvus_dict(source_id=source, publish_id=_PLACEHOLDER_PUBLISH_ID)
+                obj.to_milvus_dict(
+                    source_id=source, publish_run_id=_PLACEHOLDER_PUBLISH_RUN_ID
+                )
             )
         result.groups.append(objects)
 

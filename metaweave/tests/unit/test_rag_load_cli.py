@@ -178,7 +178,7 @@ class TestTableSchemaDebugCli:
     ):
         config = _write_config(tmp_path)
         loader = _ok_loader()
-        loader.publish_id = "11111111-2222-4333-8444-555555555555"
+        loader.publish_run_id = "11111111-2222-4333-8444-555555555555"
         loader.close = mock.MagicMock()
         seen = []
         import metaweave.core.clean_targets as clean_targets
@@ -208,6 +208,9 @@ class TestTableSchemaDebugCli:
             loader.load.assert_called_once_with(clean=False)
             assert "清空目标数据库" not in result.output
             assert "调试批次 UUID" in result.output
+            # doc 12.1：断言输出含实际批次 UUID 值——属性改名后 getattr
+            # 静默取空串时此处失败，防止打印空批次标识
+            assert "11111111-2222-4333-8444-555555555555" in result.output
         assert seen == []
         assert loader.close.call_count == 2
 
@@ -279,7 +282,7 @@ class TestTableSchemaDebugCli:
     def test_loader_closed_even_when_load_fails(self, tmp_path, monkeypatch):
         config = _write_config(tmp_path)
         loader = _fail_loader("Milvus 超时")
-        loader.publish_id = "x"
+        loader.publish_run_id = "x"
         monkeypatch.setattr(loader_cli.LoaderFactory, "create", lambda *a, **k: loader)
         result = CliRunner().invoke(
             loader_cli.rag_load_command,

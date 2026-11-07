@@ -1,7 +1,7 @@
 """doc 20.1 §10.3：受管加载的调用顺序与失败边界（假 Embedding / Milvus）。
 
 断代改造适配（doc 6）：source_id 为短 ID（db_src_1）、loader 的 job_id 槽
-装工作区短 ID（ws_1）、publish_id 为发布运行 UUID（normalize_run_uuid）。
+装工作区短 ID（ws_1）、publish_run_id 为发布运行 UUID（normalize_run_uuid）。
 """
 
 from uuid import uuid4
@@ -51,7 +51,7 @@ class Env:
         self.ensure_kwargs = None
 
 
-def build(dirs, env, publish_id=None, **options):
+def build(dirs, env, publish_run_id=None, **options):
     class FakeEmbedding:
         def __init__(self, cfg):
             pass
@@ -116,23 +116,23 @@ def build(dirs, env, publish_id=None, **options):
         milvus_client_cls=FakeMilvus,
         embedding_service_cls=FakeEmbedding,
         metadata_config=METADATA_CONFIG,
-        publish_id=publish_id,
+        publish_run_id=publish_run_id,
     )
 
 
 def test_managed_identity_uses_short_source_and_workspace_slot(dirs):
     """受管身份（doc 6 §1/§5.1）：source_id 短 ID、job_id 槽装工作区短 ID、
-    publish_id 规范化为发布运行 UUID。"""
+    publish_run_id 规范化为发布运行 UUID。"""
     from uuid import uuid4
 
     write_md(dirs[1], FULL)
     env = Env()
-    publish_id = str(uuid4())
-    loader = build(dirs, env, publish_id)
+    publish_run_id = str(uuid4())
+    loader = build(dirs, env, publish_run_id)
     assert loader.managed is True
     assert loader.source_id == SOURCE_ID
     assert loader.job_id == WORKSPACE_ID
-    assert loader.publish_id == publish_id
+    assert loader.publish_run_id == publish_run_id
     assert loader.load()["success"]
 
 
@@ -156,7 +156,7 @@ def test_managed_loader_rejects_non_short_source_id(dirs):
             milvus_client_cls=_NoClient,
             embedding_service_cls=_NoEmbedding,
             metadata_config=METADATA_CONFIG,
-            publish_id=str(uuid4()),
+            publish_run_id=str(uuid4()),
         )
 
 
@@ -205,8 +205,8 @@ def test_order_records_and_cleanup(dirs):
         dirs[1], "- order_id (integer) - 订单ID\n- amount (numeric(10,2)) - 无注释\n"
     )
     env = Env()
-    publish_id = str(_uuid())
-    loader = build(dirs, env, publish_id)
+    publish_run_id = str(_uuid())
+    loader = build(dirs, env, publish_run_id)
     loader.prepare_input()
     result = loader.load()
 
@@ -223,7 +223,7 @@ def test_order_records_and_cleanup(dirs):
     records = env.upserts[0]
     assert [r["object_id"] for r in records] == [NAME, f"{NAME}.order_id"]
     for r in records:
-        assert r["source_id"] == SOURCE_ID and r["publish_id"] == publish_id
+        assert r["source_id"] == SOURCE_ID and r["publish_run_id"] == publish_run_id
         # 短 ID 身份键（doc 6 §1）：entity_id = <source_id>:<object_id>
         assert r["entity_id"] == f"{SOURCE_ID}:{r['object_id']}"
         assert isinstance(r["embedding"], list) and len(r["embedding"]) == DIM
@@ -234,7 +234,7 @@ def test_order_records_and_cleanup(dirs):
     assert result["replacement_started"] is True
     # 按源替换条件使用短 ID + 本次发布运行 UUID（doc 6 §8.3）
     assert env.delete_expr == (
-        f'source_id == "{SOURCE_ID}" and publish_id != "{publish_id}"'
+        f'source_id == "{SOURCE_ID}" and publish_run_id != "{publish_run_id}"'
     )
 
 

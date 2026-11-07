@@ -243,12 +243,12 @@ def test_delete_by_expr_passes_filter_and_does_not_flush(monkeypatch):
     _patch_upsert_collection(monkeypatch, SimpleNamespace(delete_count=3))
 
     deleted = MilvusClient(config={}).delete_by_expr(
-        "c", 'source_id == "s" and publish_id != "p"'
+        "c", 'source_id == "s" and publish_run_id != "p"'
     )
 
     assert deleted == 3
     assert _UpsertCollection.calls == [
-        ("delete", 'source_id == "s" and publish_id != "p"')
+        ("delete", 'source_id == "s" and publish_run_id != "p"')
     ]
 
 

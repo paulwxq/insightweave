@@ -57,5 +57,5 @@ def build_sql_example_loader(source_id, workspace_id, publish_run_id):
         loaders,
         metadata_config=snapshot,
         source_id=source_id,
-        publish_id=publish_run_id,
+        publish_run_id=publish_run_id,
     )

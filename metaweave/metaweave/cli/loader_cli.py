@@ -177,8 +177,8 @@ def _run_single_load(
 
         # 支持 clean 参数的加载器（dim 别名已从 CLI 移除，doc 27 §3）
         if load_type == "table_schema":
-            # 调试批次 UUID 仅作 Milvus publish_id 标记，不登记平台库（doc 20.1 §10.7）
-            click.echo(f"🏷️  调试批次 UUID: {getattr(loader, 'publish_id', '')}")
+            # 调试批次 UUID 仅作 Milvus publish_run_id 标记，不登记平台库（doc 20.1 §10.7）
+            click.echo(f"🏷️  调试批次 UUID: {getattr(loader, 'publish_run_id', '')}")
             try:
                 if not loader.validate():
                     click.echo("❌ 验证失败", err=True)

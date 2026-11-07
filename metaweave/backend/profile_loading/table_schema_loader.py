@@ -54,5 +54,5 @@ def build_table_schema_loader(source_id, workspace_id, publish_run_id=None):
     options["skip_empty_desc"] = WEB_LOADER_OPTIONS.skip_empty_desc
     cfg["options"] = options
     return TableSchemaLoader(
-        loaders, metadata_config=snapshot, publish_id=publish_run_id
+        loaders, metadata_config=snapshot, publish_run_id=publish_run_id
     )

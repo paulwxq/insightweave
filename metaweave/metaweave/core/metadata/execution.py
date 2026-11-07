@@ -567,7 +567,7 @@ def execute_cql(request: MetadataExecutionRequest) -> dict:
         resolver = _DR(default_path) if default_path.exists() else None
 
         # doc 4 §4.2：实体键身份依赖 source_id，CLI 生成入口必须显式携带
-        # （调试 publish_id 用随机 UUID；不写平台库发布记录）
+        # （调试 publish_run_id 用随机 UUID；不写平台库发布记录）
         from uuid import uuid4
 
         from metaweave.utils.source_id import normalize_source_id

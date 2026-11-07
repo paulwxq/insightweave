@@ -1542,7 +1542,7 @@ class TestMilvusConfigShapeRejected:
                 "vector_database": {"active": "milvus", "providers": {"milvus": bad}},
             },
             source_id="db_src_1",
-            publish_id="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeffff",
+            publish_run_id="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeffff",
         )
         assert loader.validate() is False
 
@@ -1569,7 +1569,7 @@ class TestMilvusActiveAndProviderRequired:
     def test_sql_loader_validate_false(self, tmp_path, caplog, vd, frag):
         """经**注入参数**提供配置，断言具体错误原因且 Milvus 客户端未被创建。
 
-        受管口径（doc 25.2）：input_dir 目录即输入、source_id/publish_id
+        受管口径（doc 25.2）：input_dir 目录即输入、source_id/publish_run_id
         必须注入——vector_database 约束校验仍在其后按序生效。
         """
         import logging
@@ -1615,7 +1615,7 @@ class TestMilvusActiveAndProviderRequired:
             milvus_client_cls=_FakeMilvus,
             embedding_service_cls=_FakeEmb,
             source_id="db_src_1",
-            publish_id="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeffff",
+            publish_run_id="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeffff",
         )
         with caplog.at_level(logging.ERROR):
             assert loader.validate() is False

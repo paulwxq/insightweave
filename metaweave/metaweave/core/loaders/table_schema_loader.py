@@ -36,7 +36,7 @@ class TableSchemaLoader(BaseLoader):
         milvus_client_cls: Type[MilvusClient] = MilvusClient,
         embedding_service_cls: Type[EmbeddingService] = EmbeddingService,
         metadata_config: Optional[Dict[str, Any]] = None,
-        publish_id: Optional[str] = None,
+        publish_run_id: Optional[str] = None,
     ):
         super().__init__(config)
         # doc 26 §6.2：完整主配置快照注入优先；缺失时经
@@ -58,14 +58,14 @@ class TableSchemaLoader(BaseLoader):
         self.managed = bool(loader_cfg.get("source_id"))
         self.source_id: Optional[str] = None
         self.job_id: Optional[str] = None
-        self.publish_id: Optional[str] = None
+        self.publish_run_id: Optional[str] = None
         if self.managed:
             # doc 20.1 §10.1：同一批记录共用规范化的 source_id / publish_run_id。
             # 未传 publish_run_id（调试 CLI）时生成仅作 Milvus 批次标记的 UUID。
             self.source_id = str(normalize_source_id(loader_cfg["source_id"]))
             if loader_cfg.get("job_id"):
                 self.job_id = str(loader_cfg["job_id"])
-            self.publish_id = str(normalize_run_uuid(publish_id or uuid4()))
+            self.publish_run_id = str(normalize_run_uuid(publish_run_id or uuid4()))
         self._prepared = None
         self._prepared_objects = None
         self._embedding_dim: Optional[int] = None
@@ -242,7 +242,7 @@ class TableSchemaLoader(BaseLoader):
             if self.managed:
                 result["empty_desc_columns"] = self.empty_desc_columns
                 self._log_empty_desc_columns(result["empty_desc_columns"])
-                # 构造最终记录后、Embedding 之前再核对一次全部 VARCHAR（含实际 publish_id）
+                # 构造最终记录后、Embedding 之前再核对一次全部 VARCHAR（含实际 publish_run_id）
                 for objects in groups:
                     for obj in objects:
                         check_record_lengths(self._build_record(obj, None))
@@ -337,7 +337,9 @@ class TableSchemaLoader(BaseLoader):
 
     def _build_record(self, obj: SchemaObject, embedding: Any) -> Dict[str, Any]:
         return obj.to_milvus_dict(
-            embedding=embedding, source_id=self.source_id, publish_id=self.publish_id
+            embedding=embedding,
+            source_id=self.source_id,
+            publish_run_id=self.publish_run_id,
         )
 
     def _ensure_collection(self, clean: bool = False) -> None:
@@ -360,9 +362,9 @@ class TableSchemaLoader(BaseLoader):
                 max_length=VARCHAR_LIMITS["source_id"],
             ),
             FieldSchema(
-                name="publish_id",
+                name="publish_run_id",
                 dtype=DataType.VARCHAR,
-                max_length=VARCHAR_LIMITS["publish_id"],
+                max_length=VARCHAR_LIMITS["publish_run_id"],
             ),
             FieldSchema(
                 name="object_id",
@@ -565,7 +567,7 @@ class TableSchemaLoader(BaseLoader):
     def _cleanup_old_batches(self) -> None:
         """全部 upsert 成功后，仅删除本源中不属于本次批次的记录。"""
         assert self._milvus_client is not None
-        expr = f'source_id == "{self.source_id}" and publish_id != "{self.publish_id}"'
+        expr = f'source_id == "{self.source_id}" and publish_run_id != "{self.publish_run_id}"'
         deleted = self._milvus_client.delete_by_expr(self.collection_name, expr)
         logger.info("已清理本源旧批次记录: %s 条", deleted)
 

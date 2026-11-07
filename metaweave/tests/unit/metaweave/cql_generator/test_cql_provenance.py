@@ -1,8 +1,8 @@
 """cql writer 实体键与归属注入用例（doc 4 §4.2/§4.6）
 
-- provenance=(source_id, publish_id) **必填**：缺省/非法即拒绝生成；
+- provenance=(source_id, publish_run_id) **必填**：缺省/非法即拒绝生成；
 - Table/Column 按 entity_id MERGE，entity_id = source_id:逻辑id；source_id/
-  publish_id 写入全部节点与边（Table/Column/HAS_COLUMN/JOIN_ON）；
+  publish_run_id 写入全部节点与边（Table/Column/HAS_COLUMN/JOIN_ON）；
 - 头部含 ``// source_id:`` 行供加载器核对；
 - 约束章节只生成 table_entity_id/column_entity_id（不再生成旧
   id/full_name 全局唯一约束）；
@@ -26,7 +26,7 @@ from metaweave.core.cql_generator.reader import RelationshipFilterStats
 from metaweave.core.cql_generator.writer import CypherWriter
 
 SOURCE_ID = "db_src_1"
-PUBLISH_ID = "1a2b3c4d-5e6f-4a5b-8c9d-0e1f2a3b4c5d"
+PUBLISH_RUN_ID = "1a2b3c4d-5e6f-4a5b-8c9d-0e1f2a3b4c5d"
 TABLE_ENTITY = f"{SOURCE_ID}:orders.public.users"
 COLUMN_ENTITY = f"{SOURCE_ID}:orders.public.users.user_id"
 
@@ -80,7 +80,7 @@ def _write(
     columns=None,
     has_rels=None,
     join_rels=None,
-    provenance=(SOURCE_ID, PUBLISH_ID),
+    provenance=(SOURCE_ID, PUBLISH_RUN_ID),
 ):
     writer = CypherWriter(tmp_path / "cql")
     files = writer.write_all(
@@ -107,7 +107,7 @@ class TestProvenanceRequired:
         writer = CypherWriter(tmp_path / "cql")
         with pytest.raises(ValueError, match="provenance"):
             writer.write_all(
-                [_table()], [], [], [], provenance=("not-a-short-id", PUBLISH_ID)
+                [_table()], [], [], [], provenance=("not-a-short-id", PUBLISH_RUN_ID)
             )
 
 
@@ -119,14 +119,14 @@ class TestEntityIdentity:
         # 原 full_name MERGE 身份不再出现
         assert "MERGE (n:Table {full_name:" not in content
         assert "n.source_id = t.source_id" in content
-        assert "n.publish_id = t.publish_id" in content
+        assert "n.publish_run_id = t.publish_run_id" in content
 
     def test_column_merges_on_entity_id_with_source(self, tmp_path):
         content = _write(tmp_path)
         assert "MERGE (n:Column {entity_id: c.entity_id})" in content
         assert f'"entity_id": "{COLUMN_ENTITY}"' in content
         assert "n.source_id = c.source_id" in content
-        assert "n.publish_id = c.publish_id" in content
+        assert "n.publish_run_id = c.publish_run_id" in content
 
     def test_has_column_matches_endpoints_by_entity(self, tmp_path):
         content = _write(tmp_path)
@@ -134,7 +134,7 @@ class TestEntityIdentity:
         assert "MATCH (c:Column {entity_id: hc.column_entity_id})" in content
         assert "MERGE (t)-[r:HAS_COLUMN]->(c)" in content
         assert "r.source_id = hc.source_id" in content
-        assert "r.publish_id = hc.publish_id" in content
+        assert "r.publish_run_id = hc.publish_run_id" in content
 
     def test_join_on_matches_endpoints_by_entity(self, tmp_path):
         join = JOINOnRelation(
@@ -151,6 +151,9 @@ class TestEntityIdentity:
             in content
         )
         assert "r.source_id = j.source_id" in content
+        # doc 12.1：JOIN_ON 的发布运行 SET 行与 Table/Column/HAS_COLUMN
+        # 同样切换为 publish_run_id，单独漏改/回退时此处失败
+        assert "r.publish_run_id = j.publish_run_id" in content
 
     def test_header_contains_source_id_line(self, tmp_path):
         content = _write(tmp_path)
@@ -189,7 +192,7 @@ class TestEntityIdentity:
                 [_column()],
                 [HASColumnRelation("public.missing", "public.users.user_id")],
                 [],
-                provenance=(SOURCE_ID, PUBLISH_ID),
+                provenance=(SOURCE_ID, PUBLISH_RUN_ID),
             )
 
 
@@ -204,14 +207,14 @@ class TestGeneratorPassthrough:
             },
         }
         generator = CQLGenerator(
-            temp_config_file, config=config, provenance=(SOURCE_ID, PUBLISH_ID)
+            temp_config_file, config=config, provenance=(SOURCE_ID, PUBLISH_RUN_ID)
         )
         writer = MagicMock()
         writer.write_all.return_value = []
         writer.write_metadata.return_value = Path("m.md")
         # 直接调用 writer 桩验证透传（绕过 reader 输入）
         CypherWriter.write_metadata  # 确认真实类不受影响
-        assert generator.provenance == (SOURCE_ID, PUBLISH_ID)
+        assert generator.provenance == (SOURCE_ID, PUBLISH_RUN_ID)
 
     def test_step_constraints_file_only_entity_keys(self, tmp_path):
         writer = CypherWriter(tmp_path)

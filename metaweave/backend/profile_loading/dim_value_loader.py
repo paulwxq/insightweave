@@ -79,6 +79,6 @@ def build_dim_value_loader(
         loaders,
         metadata_config=snapshot,
         source_id=source.source_id,
-        publish_id=publish_run_id,
+        publish_run_id=publish_run_id,
         dim_tables=dim_tables,
     )

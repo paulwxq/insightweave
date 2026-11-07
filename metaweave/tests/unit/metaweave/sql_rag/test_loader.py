@@ -1,7 +1,7 @@
 """SQLExampleLoader 受管口径单元测试（doc 25.2 §4/§7）。
 
 契约要点：`input_dir` 目录即输入（顶层非忽略 `*.json` 合并）、
-`source_id`（db_src_N 短 ID）/`publish_id`（发布运行 UUID）注入、
+`source_id`（db_src_N 短 ID）/`publish_run_id`（发布运行 UUID）注入、
 `example_id` 前缀为 source_id、
 按源整份替换（upsert + 全部成功后 delete_by_expr）、
 结果规则四计数互斥（提前失败路径允许和小于 total）。
@@ -22,7 +22,7 @@ from metaweave.core.sql_rag.loader import (
 )
 
 SOURCE_ID = "db_src_1"
-PUBLISH_ID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeffff"
+PUBLISH_RUN_ID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeffff"
 
 
 class FakeEmbeddingService:
@@ -129,7 +129,7 @@ def _make_loader(
     pairs=None,
     files: Dict[str, Any] | None = None,
     source_id: Any = SOURCE_ID,
-    publish_id: Any = PUBLISH_ID,
+    publish_run_id: Any = PUBLISH_RUN_ID,
     batch_size: Any = 10,
     with_database: bool = True,
     input_dir: Path | None = None,
@@ -160,7 +160,7 @@ def _make_loader(
         milvus_client_cls=FakeMilvusClient,
         embedding_service_cls=FakeEmbeddingService,
         source_id=source_id,
-        publish_id=publish_id,
+        publish_run_id=publish_run_id,
     )
     return loader
 
@@ -193,7 +193,7 @@ class TestSchema:
         assert names == [
             "example_id",
             "source_id",
-            "publish_id",
+            "publish_run_id",
             "question_sql",
             "embedding",
             "domain",
@@ -203,7 +203,7 @@ class TestSchema:
         assert by_name["example_id"]["is_primary"] is True
         assert by_name["example_id"]["auto_id"] is False
         assert by_name["source_id"]["max_length"] == 36
-        assert by_name["publish_id"]["max_length"] == 36
+        assert by_name["publish_run_id"]["max_length"] == 36
         assert by_name["question_sql"]["max_length"] == 16384
         assert by_name["domain"]["max_length"] == 256
 
@@ -254,13 +254,13 @@ class TestComputeExampleId:
 class TestIdNormalization:
     def test_publish_uuid_object_accepted_and_stringified(self, tmp_path):
         pid = uuid4()
-        loader = _make_loader(tmp_path, source_id=SOURCE_ID, publish_id=pid)
+        loader = _make_loader(tmp_path, source_id=SOURCE_ID, publish_run_id=pid)
         assert loader.validate()
         result = loader.load()
         assert result["success"]
         rows = loader._milvus_client.upsert_calls[0]
         assert all(r["source_id"] == SOURCE_ID for r in rows)
-        assert all(r["publish_id"] == str(pid) for r in rows)
+        assert all(r["publish_run_id"] == str(pid) for r in rows)
         assert all(r["example_id"].startswith(f"{SOURCE_ID}:") for r in rows)
 
     def test_invalid_id_string_rejected(self, tmp_path):
@@ -275,7 +275,7 @@ class TestIdNormalization:
         assert not loader.validate()
 
     def test_missing_ids_rejected(self, tmp_path):
-        loader = _make_loader(tmp_path, source_id=None, publish_id=PUBLISH_ID)
+        loader = _make_loader(tmp_path, source_id=None, publish_run_id=PUBLISH_RUN_ID)
         assert not loader.validate()
 
 
@@ -351,7 +351,7 @@ class TestInputDirCaliber:
             milvus_client_cls=FakeMilvusClient,
             embedding_service_cls=FakeEmbeddingService,
             source_id=SOURCE_ID,
-            publish_id=PUBLISH_ID,
+            publish_run_id=PUBLISH_RUN_ID,
         )
         assert not loader.validate()
 
@@ -373,7 +373,7 @@ class TestInputDirCaliber:
             milvus_client_cls=FakeMilvusClient,
             embedding_service_cls=FakeEmbeddingService,
             source_id=SOURCE_ID,
-            publish_id=PUBLISH_ID,
+            publish_run_id=PUBLISH_RUN_ID,
         )
         assert loader.validate()
         result = loader.load()
@@ -394,7 +394,7 @@ class TestReplaceSemantics:
         assert result["replacement_started"] is True
         milvus = loader._milvus_client
         assert milvus.delete_calls == [
-            f'source_id == "{SOURCE_ID}" and publish_id != "{PUBLISH_ID}"'
+            f'source_id == "{SOURCE_ID}" and publish_run_id != "{PUBLISH_RUN_ID}"'
         ]
 
     def test_identical_pairs_share_example_id(self, tmp_path):
@@ -804,7 +804,7 @@ class TestBatchSizeValidation:
             milvus_client_cls=FakeMilvusClient,
             embedding_service_cls=FakeEmbeddingService,
             source_id=SOURCE_ID,
-            publish_id=PUBLISH_ID,
+            publish_run_id=PUBLISH_RUN_ID,
         )
         assert loader.validate()
 
@@ -833,7 +833,7 @@ class TestBatchSizeValidation:
             milvus_client_cls=FakeMilvusClient,
             embedding_service_cls=FakeEmbeddingService,
             source_id=SOURCE_ID,
-            publish_id=PUBLISH_ID,
+            publish_run_id=PUBLISH_RUN_ID,
         )
         assert loader.input_dir == ""
         loader._embedding_service = FakeEmbeddingService({})

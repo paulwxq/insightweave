@@ -43,8 +43,9 @@ class CQLGenerator:
             config_path: 配置文件路径（config 已注入时仅作来源标识，不触发读盘）
             domain_resolver: DomainResolver 实例，用于从 YAML 获取 table_domains
             config: 完整主配置快照（doc 26 §6.2）；缺失时从路径读取一次
-            provenance: (source_id, publish_id) 溯源对（doc 23.2 §5.4）——
-                透传给 writer，仅 Table 节点写入两属性；缺省 None 省略（D9）
+            provenance: (source_id, publish_run_id) 溯源对（doc 23.2 §5.4）——
+                透传给 writer，Table/Column 节点及 HAS_COLUMN/JOIN_ON 关系统一写入
+                两属性；缺省 None 时 writer 拒绝生成（doc 4 §4.2 必填）
         """
         self.domain_resolver = domain_resolver
         self.provenance = provenance
