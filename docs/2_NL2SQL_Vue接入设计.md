@@ -115,7 +115,7 @@ v4 [Runner.run](../nl2sql/src/modules/db_deepagent/runner.py)接收 question、s
 | --- | --- | --- |
 | 登录 session | 平台身份与登录状态 | 交给未来身份模块，不能与问答 session_id 混用 |
 | session_id | 一段持续业务对话，跨线程轮换保持不变 | 服务端生成 `s_` + UUID4 hex；完整匹配 `[A-Za-z0-9_-]{1,64}`，下同 |
-| source_id | 平台登记的数据源 UUID；会话固定绑定 | 创建和提问均携带，后端与持久化绑定核对；模型不可填写或修改 |
+| source_id | 平台登记的数据源短 ID（`db_src_N`，doc 5.1 §1）；会话固定绑定 | 创建和提问均携带，后端与持久化绑定核对；模型不可填写或修改 |
 | thread_id | 当前 checkpoint 线程，可能轮换 | 返回后只作诊断；Web 首版不让用户手填或强制指定 |
 | request_id | 一轮用户请求 | 服务端生成 `req_` + 完整 UUID4 hex，禁止客户端指定；同时作为诊断文件名和会话内文本日志键，不具备重试幂等语义 |
 | creation_id | 一次 Web 会话创建操作 | 服务端生成 `create_` + 完整 UUID4 hex，完整匹配 `create_[0-9a-f]{32}`；仅用于创建保护及定位，不传给 Runner，不写入轮次日志，不作为幂等键 |
@@ -147,9 +147,9 @@ SessionInfo 固定为 `{session_id, source_id, title, created_at, last_active_at
 
 **历史读取的 API 与 UI 边界**：服务端先独立核对 Web 会话归属，确认只是展示字段损坏后才返回 session_metadata_invalid。直接访问已知会话 URL 时，Vue 收到该码仍按 §7.1 调用 turns，展示只读问答，不因 SessionInfo 构造失败一并阻断文本历史。若 created_at 无法恢复，列表继续跳过该条；本期该会话始终只读且须新建会话才能继续提问，已知 URL、API 及维护记录仍可用于访问/定位历史，不新增“损坏会话”DTO、列表或搜索入口。原始记录与文本不因列表跳过被删除。
 
-**P1 读取实现约束**：turns/results 使用独立的 Web 归属读取校验，不能复用 SessionInfo 构造器、展示字段校验或新查询的“可续聊”门槛。GET turns 除通用 ID/分页参数校验外，只核对 Web 登记的 guest/owner/origin、路径 session_id 与登记 session_id，以及登记中 source_id 是合法 UUID，再读取本会话文本；不要求 title、created_at、last_active_at、turn_count 完整。GET results 同样先校验上述 Web 归属及登记中的固定 source_id，再核对 ResultStore 的 meta.session_id、引用归属、完整性和读取编码，不要求 SessionInfo 完整。两个历史读取入口都不调用 source_registry/db_source_info，也不要求登记源目前存在、启用、连接快照或知识版本仍相同；源删除/停用后，归属及保留文件仍有效的 turns/已知结果引用照常可读。可以复用核心归属检查，不能让其间接实例化包含展示字段的完整登记模型；字段损坏不成为这两个读取接口的 session_metadata_invalid。核心归属无法确认、跨会话引用、文件损坏和依赖故障仍按各自原有契约拒绝，不能以只读模式绕过。
+**P1 读取实现约束**：turns/results 使用独立的 Web 归属读取校验，不能复用 SessionInfo 构造器、展示字段校验或新查询的“可续聊”门槛。GET turns 除通用 ID/分页参数校验外，只核对 Web 登记的 guest/owner/origin、路径 session_id 与登记 session_id，以及登记中 source_id 是合法短 ID（`db_src_N`，doc 5.1 §1），再读取本会话文本；不要求 title、created_at、last_active_at、turn_count 完整。GET results 同样先校验上述 Web 归属及登记中的固定 source_id，再核对 ResultStore 的 meta.session_id、引用归属、完整性和读取编码，不要求 SessionInfo 完整。两个历史读取入口都不调用 source_registry/db_source_info，也不要求登记源目前存在、启用、连接快照或知识版本仍相同；源删除/停用后，归属及保留文件仍有效的 turns/已知结果引用照常可读。可以复用核心归属检查，不能让其间接实例化包含展示字段的完整登记模型；字段损坏不成为这两个读取接口的 session_metadata_invalid。核心归属无法确认、跨会话引用、文件损坏和依赖故障仍按各自原有契约拒绝，不能以只读模式绕过。
 
-state 为 `active | invalidated`；invalid_reason 为 `knowledge_changed | dependency_unavailable | source_changed | session_binding_missing | null`，invalidated_at 为带时区时间或 null。新建时 active，两个失效字段为 null。失效是持久化且不可自动逆转的状态：即使外部 current 回退，也不恢复旧会话；列表和详情均返回这些字段。continuable 由服务端根据登记字段完整、**满足下述状态不变量**、state=active 且 §4.4 的 pending_run_id **显式存在并为 null** 得出，不另存第二个布尔真值；它不是锁空闲、源当前启用或 readiness 的保证，新提交仍须重新核验。active 但 pending 非空时 continuable=false、失效字段仍为 null；统一提示“上一操作尚未确认，请刷新查看”，涵盖创建和查询收尾，不声称已有查询正在执行，不新增 pending_kind。invalidated 时 continuable=false，显示原因并引导新建，历史读取不受影响。
+state 为 `active | invalidated`；invalid_reason 为 `knowledge_changed | dependency_unavailable | source_changed | session_binding_missing | null`，invalidated_at 为带时区时间或 null。新建时 active，两个失效字段为 null。失效是持久化且不可自动逆转的状态：即使外部发布记录回退，也不恢复旧会话；列表和详情均返回这些字段。continuable 由服务端根据登记字段完整、**满足下述状态不变量**、state=active 且 §4.4 的 pending_run_id **显式存在并为 null** 得出，不另存第二个布尔真值；它不是锁空闲、源当前启用或 readiness 的保证，新提交仍须重新核验。active 但 pending 非空时 continuable=false、失效字段仍为 null；统一提示“上一操作尚未确认，请刷新查看”，涵盖创建和查询收尾，不声称已有查询正在执行，不新增 pending_kind。invalidated 时 continuable=false，显示原因并引导新建，历史读取不受影响。
 
 **Web 登记状态不变量**：active 必须同时满足 invalid_reason=null、invalidated_at=null；invalidated 必须有上述枚举中的非空原因及合法的带时区 invalidated_at。pending_run_id 必须显式存在，为 null 或本稿规定格式的 creation_id/request_id；invalidated 允许保留非空 pending，不能为美化记录而清除收尾保护。字段缺失、类型/枚举/时间非法或状态组合矛盾时，统一按下述安全投影返回 invalidated/session_binding_missing、continuable=false、invalidated_at=null，并拒绝新查询。这个 null 仅用于表达无法信任原记录的读取投影，不是新写入失效登记可以省略时间的规则。
 
@@ -161,7 +161,7 @@ state 为 `active | invalidated`；invalid_reason 为 `knowledge_changed | depen
 
 创建会话不提供幂等键：Vue 禁止重复点击，**不自动重试 POST /sessions**；超时提示“创建结果未确认”，先刷新列表，用户再决定是否新建。首版接受用户手动重试可能产生另一个空会话，不增加客户端幂等记录或自动删除规则。
 
-请求模型使用 extra="forbid"，多余的 request_id、user_id、连接字段等返回 422，不静默忽略；source_id 解析为规范化 UUID。问题原文长度须为 1–1000 个 Unicode 码点，去除首尾空白后不得为空；实际提交文本保留用于本轮和历史展示，不在模型输入中拼接未受控连接配置。
+请求模型使用 extra="forbid"，多余的 request_id、user_id、连接字段等返回 422，不静默忽略；source_id 校验为合法短 ID（`db_src_N`）。问题原文长度须为 1–1000 个 Unicode 码点，去除首尾空白后不得为空；实际提交文本保留用于本轮和历史展示，不在模型输入中拼接未受控连接配置。
 
 会话和轮次分页的 data 统一为 `{items, limit, offset, has_more, next_offset}`；limit 为正整数、offset 为非负整数，超上限返回 422，不静默截断。服务端多读取一条确定 has_more；有后页时 next_offset 为 offset + 本页条数，否则为 null。会话按 last_active_at 降序、session_id 升序打破同刻并列，轮次按锁内保存时间升序、request_id 升序排列；Store 默认顺序不能代替该排序。首版使用 offset，会话列表和 turns 均不承诺跨请求快照；新增、迟到收尾及 maintenance 删除可能改变分页位置。会话列表变化后从第一页刷新并按 session_id 合并；轮次“加载更多”按正序追加，本页发起新查询或发现历史变化时重新加载，不能按 question/answer 文本去重（相同问答可合法重复），不做后台全量预取。
 
@@ -188,7 +188,7 @@ GET turns 的 offset、排序和切页以本次完整校验通过的保留日志
 | errors | 安全化的 RunFailureRecord[]：phase、kind、message、primary，结构化忙碌/故障类型按本节扩展，message 不含异常堆栈/凭据 |
 | archived | boolean，仅诊断，不表示问答已保存 |
 | stats | RunStats：elapsed_ms、model_calls、summary_model_calls、total_model_calls、tool_calls 为整数；input_tokens/output_tokens 为整数或 null；token_usage_complete 为 boolean，未知用量不填零 |
-| source_id | 规范化 UUID 字符串，取已核对的会话绑定 |
+| source_id | 数据源短 ID 字符串（`db_src_N`），取已核对的会话绑定 |
 | history_saved | boolean 或 null，按 §4.4 判定 |
 | error_code | 本节闭集中的字符串或 null，按下述终态/拒绝映射 |
 
@@ -196,7 +196,7 @@ GET turns 的 offset、排序和切页以本次完整校验通过的保留日志
 
 **一致性未确认终态的强制投影**：执行中复核发现变化时返回 HTTP 200、status=failed、error_code=knowledge_changed；无法完成终态复核时返回 HTTP 200、status=persistence_error、error_code=dependency_unavailable。两者均由后端将 answer 改为“本轮知识一致性无法确认，请新建会话”等安全摘要，并固定 findings=[]、evidence=[]、metric_definitions=[]、limitations=[]、open_questions=[]；warnings/errors 仅保留安全诊断，不夹带原答案、SQL、结果引用或模型内容。ID、stats、archived 与实际 history_saved 保留。Web 文本日志也只写同一安全摘要，不能先保存原答案再由 Vue 隐藏；无须另增 result_usable。普通 P3 归档失败但知识复核通过的 persistence_error 仍可交付已验证结果，不能仅见该 status 就清空所有有效证据。
 
-**来源契约沿用 doc 4 §5.1–§5.2**：创建会话与每次提问均必填规范化 UUID source_id。服务端先读取会话绑定，再比对请求 source_id；一致时使用该绑定读取登记、构造服务并传给 `Runner.run(..., source_id=...)`，不以请求值覆盖既有绑定。绑定不一致、已有会话缺少绑定时，按下表返回稳定错误，不匹配中文消息。查询接口不隐式创建会话；不存在时拒绝执行，不能仅凭请求 source_id 将其视为首轮。source_id 由服务端装配注入检索和图服务，不加入模型工具参数。恢复会话使用单会话详情的绑定，不能因当前列表页未包含它就采用页面选源。
+**来源契约沿用 doc 4 §5.1–§5.2 与 doc 5.1 §1 短 ID**：创建会话与每次提问均必填合法短 ID（`db_src_N`）source_id。服务端先读取会话绑定，再比对请求 source_id；一致时使用该绑定读取登记、构造服务并传给 `Runner.run(..., source_id=...)`，不以请求值覆盖既有绑定。绑定不一致、已有会话缺少绑定时，按下表返回稳定错误，不匹配中文消息。查询接口不隐式创建会话；不存在时拒绝执行，不能仅凭请求 source_id 将其视为首轮。source_id 由服务端装配注入检索和图服务，不加入模型工具参数。恢复会话使用单会话详情的绑定，不能因当前列表页未包含它就采用页面选源。
 
 **Q2（已确认选择方案 1）：保留已获得旧 result_ref 的读取能力。** D3 约束历史 API/页面只返回和展示问答、不返回 result_ref、不提供 SQL/表格回放入口，不限制结果读取接口只能服务最近一轮。现有 ResultStore 按 session_id 校验归属，没有“当前轮”限制；已取得的旧引用在结果仍存在、完整性检查和归属校验通过时仍可读，刷新页面不会自动使引用失效。
 
@@ -390,7 +390,7 @@ last_collected_at 实际取该源作业 updated_at 最大值，包含运行中�
 
 当前 API 和表约束只支持 `db_type = postgresql`。保留类型展示和检查，不将“可以选择多个数据源”表述成已经支持 MySQL 等其他数据库。
 
-新建流程为：加载列表 → 选源并读取 NL2SQL readiness → 配置兼容且必需项就绪后创建会话 → 提问。下拉显示 display_name/db_type，可辅以 db_name；value 固定为 UUID source_id。停用、类型不支持或 db_name/selected_schemas 不符合知识键空间的源标记原因并禁用创建；列表信息可作初步提示，服务端 readiness/创建仍按可信登记重查。无源、全部不可用、读取失败分开显示，不能等到模型运行才暴露键空间不兼容；不要求修改 MetaWeave 的通用登记规则。
+新建流程为：加载列表 → 选源并读取 NL2SQL readiness → 配置兼容且必需项就绪后创建会话 → 提问。下拉显示 display_name/db_type，可辅以 db_name；value 固定为短 ID source_id（`db_src_N`）。停用、类型不支持或 db_name/selected_schemas 不符合知识键空间的源标记原因并禁用创建；列表信息可作初步提示，服务端 readiness/创建仍按可信登记重查。无源、全部不可用、读取失败分开显示，不能等到模型运行才暴露键空间不兼容；不要求修改 MetaWeave 的通用登记规则。
 
 ### 5.2 前端列表与后端连接是两条路径
 
@@ -405,7 +405,7 @@ Vue ── {source_id} ── NL2SQL Web ── 数据源解析器 ── db_dee
 
 已按用户授权，将 `metaweave/.env` 中的 `PLATFORM_DB_HOST`、`PLATFORM_DB_PORT`、`PLATFORM_DB_NAME`、`PLATFORM_DB_USER`、`PLATFORM_DB_PASSWORD`、`SOURCE_CREDENTIAL_KEY` 复制到 `nl2sql/.env`；原 MetaWeave 文件及 NL2SQL 已有配置保持不变。源文件没有定义 `PLATFORM_DB_SSLMODE`，本次未自行补值。已在内存解析核验复制值一致，不在文档、对话或日志中记录实际值。
 
-doc 4 已实现独立的 [source_registry.py](../nl2sql/src/modules/db_deepagent/source_registry.py)：`resolve_source_registration(source_id)` 使用 psycopg 从平台库读取登记，检查 UUID、存在性、启用状态和 PostgreSQL 类型，并用 `SOURCE_CREDENTIAL_KEY` 解密密码；`apply_registration_to_config` 将登记值注入独立运行配置。query/chat CLI 已复用这条链路，Web 应复用相同公共能力。源登记库读取 `PLATFORM_DB_*`；现有 db_deepagent 的 `platform_db` 继续指 LangGraph 持久化库，两类连接保持职责独立。
+doc 4 已实现独立的 [source_registry.py](../nl2sql/src/modules/db_deepagent/source_registry.py)：`resolve_source_registration(source_id)` 使用 psycopg 从平台库读取登记，检查短 ID 格式（`db_src_N`）、存在性、启用状态和 PostgreSQL 类型，并用 `SOURCE_CREDENTIAL_KEY` 解密密码；`apply_registration_to_config` 将登记值注入独立运行配置。query/chat CLI 已复用这条链路，Web 应复用相同公共能力。源登记库读取 `PLATFORM_DB_*`；现有 db_deepagent 的 `platform_db` 继续指 LangGraph 持久化库，两类连接保持职责独立。
 
 登记解析还须补充非空范围检查：当前 `tuple(selected_schemas or ())` 会接受空范围，下游 allowed_schemas 为空时按“不限制”处理。平台表已有 selected_schemas 非空约束，但 NL2SQL 不能把该约束当作唯一防线；解析时遇到 null 或空列表应将该源判为不可用，返回稳定的源配置错误，不装配业务服务、不退回全库范围。非空范围继续遵守已有键空间规则，不另造配置字段。
 
@@ -454,9 +454,9 @@ Web 不修改全局 `.env`、全局 ConfigLoader 缓存或 YAML 来切源。每�
 
 当前 [Milvus 适配器](../nl2sql/src/modules/db_deepagent/services/milvus_retrieval.py)构造时必须绑定合法 source_id，六个入口 search_tables、search_columns、search_dim_values、search_similar_sqls、fetch_table_cards、fetch_table_categories 均追加同一来源过滤，精确回查也按源隔离；缺失或非法来源拒绝，不回退到全库查询。Web 通过 `build_services` 注入绑定，不把 source_id 暴露为模型工具参数。按源就绪与 Embedding 一致性仍按 §5.5 分别检查。
 
-[JOIN 图服务](../nl2sql/src/modules/db_deepagent/services/join_graph.py)已绑定来源，表存在性和两种寻路入口均按 `entity_id = source_id:逻辑表id` 定位，返回仍保留逻辑表 id。[MetaWeave writer](../metaweave/metaweave/core/cql_generator/writer.py)已对 Table、Column 使用实体键 MERGE，保留 id/full_name，并给节点及 HAS_COLUMN/JOIN_ON 关系写入 source_id、publish_id。[loader](../metaweave/metaweave/core/loaders/cql_loader.py)在单个数据事务内完成来源检查、按源删除、写入及数量核验，事务内失败时回滚保留旧图；发布服务区分明确回滚、图已提交和提交状态未知，不能把未知状态当作旧图仍有效。旧约束替换、旧节点回填和重新发布 rel 的维护流程由 doc 4 §4.8 承接，Web 不新增另一套迁移或发布路径。
+[JOIN 图服务](../nl2sql/src/modules/db_deepagent/services/join_graph.py)已绑定来源，表存在性和两种寻路入口均按 `entity_id = source_id:逻辑表id` 定位，返回仍保留逻辑表 id。[MetaWeave writer](../metaweave/metaweave/core/cql_generator/writer.py)已对 Table、Column 使用实体键 MERGE，保留 id/full_name，并给节点及 HAS_COLUMN/JOIN_ON 关系写入 source_id、publish_run_id（doc 12.1 统一命名）。[loader](../metaweave/metaweave/core/loaders/cql_loader.py)在单个数据事务内完成来源检查、按源删除、写入及数量核验，事务内失败时回滚保留旧图；发布服务区分明确回滚、图已提交和提交状态未知，不能把未知状态当作旧图仍有效。旧约束替换、旧节点回填和重新发布 rel 的维护流程由 doc 4 §4.8 承接，Web 不新增另一套迁移或发布路径。
 
-[目录服务](../nl2sql/src/modules/db_deepagent/services/table_catalog.py)、图服务及其运行配置由同一个源绑定构造；结果引用继续按 session_id 校验，证据沿用保留现有连接与校验指纹约束。前端选中源 A 时，检索、实际连接及模型可见目录必须全部对应 A。此处是来源隔离，不代表已经实现 publish_id 版本快照读取或 doc 3 的结果存储改造。
+[目录服务](../nl2sql/src/modules/db_deepagent/services/table_catalog.py)、图服务及其运行配置由同一个源绑定构造；结果引用继续按 session_id 校验，证据沿用保留现有连接与校验指纹约束。前端选中源 A 时，检索、实际连接及模型可见目录必须全部对应 A。此处是来源隔离，不代表已经实现 publish_run_id 版本快照读取或 doc 3 的结果存储改造。
 
 **doc 4 状态勘误（仅在本文登记）**：其首页“尚未实施”、§5.2“session_record 当前没有 source_id”、§4.8.1“待开发脚本”及末尾“未创建迁移脚本/doctor 参数”描述的是实现前状态，不能用于判断当前代码。当前 session_record/Runner 已有 source_id，迁移脚本和 doctor 参数已存在；本文引用 §4.8 仅复用停机、备份、预检、迁移、重发布和核验顺序，不要求再次开发这些能力。**脚本存在不等于 --apply 已执行，代码交付不等于正式图库维护或双源验收通过**，后者以执行报告为准。本轮不改 doc 4 原文。
 
@@ -483,7 +483,7 @@ readiness 固定为 `{source_id, compatible, ready, checked_at, checks}`，check
 
 checks.error_code 的闭集为 §4.2 非 200 error_code，加 `business_target_mismatch | business_readonly_invalid | business_timeout_invalid | readonly_default_off | knowledge_missing | knowledge_inconsistent | optional_knowledge_empty` 及 null；缺必需知识、已确认身份/发布不一致、正常可选空数据分别用后三项。503 出错项用具体登记/依赖不可用码，不能生成任意异常字符串。required=false 仅表示该类数据可以正常缺省，不表示检测到存在但不一致的数据也可忽略。
 
-因此 **HTTP 200 时 compatible 只会为 true**。前端成功读取 data，非 200 读取 data.readiness（检查尚未开始的参数 422 可无此项），不要求靠不同猜测解析。readiness 的 source_id 对合法路径 UUID 始终为规范化值，不返回密码或连接串。创建/查询因未就绪被拒绝时采用 409/source_not_ready，并附 data.readiness；不会将 GET readiness 的正常 ready=false 误包装为后端故障。
+因此 **HTTP 200 时 compatible 只会为 true**。前端成功读取 data，非 200 读取 data.readiness（检查尚未开始的参数 422 可无此项），不要求靠不同猜测解析。readiness 的 source_id 对合法路径短 ID 始终为规范化值，不返回密码或连接串。创建/查询因未就绪被拒绝时采用 409/source_not_ready，并附 data.readiness；不会将 GET readiness 的正常 ready=false 误包装为后端故障。
 
 **首版采用“table_schema 与 rel 成套可用”的产品范围**，而非声称简单 SQL 在技术上必需图服务。当前 JoinGraphService 构造本身不验证图非空；仅发布 table_schema 的源可能支持简单查询，但本稿首版不提供“部分知识能力模式”，统一要求完整准备后接入，以避免增加无图模式、工具开关及恢复分支。后续若要允许无图源，再单独明确 plan_joins 的降级契约。本条是本轮设计取舍，随本文审核，不冒充既有用户决定。
 
@@ -492,58 +492,58 @@ checks.error_code 的闭集为 §4.2 非 200 error_code，加 `business_target_m
 | 登记/业务源 | 必需；可信登记合法启用，业务库目标一致且实际只读事务检查通过 |
 | table_schema | 必需；按 source_id 过滤，object_type=table 非零；字段及向量维度合法，不能仅有 Column 就算就绪 |
 | Neo4j rel 图 | 按上述首版产品范围必需；本源 Table 非零，节点 entity_id/来源和 Column/HAS_COLUMN 归属有效。JOIN_ON=0 合法，不要求每源都有外键路径 |
-| dim_value、sql_example | 数据可为空，给 warn，不阻止使用；非空时必须通过下述实际 publish_id 核对，残留/混批为 fail 并阻止使用。当前三集合的结构/向量字段及配置依赖仍需存在且一致，集合缺失/不可用不能伪称“可选数据为空” |
-| 发布及结构一致性 | table_schema/rel 均有本源 success + is_current_publish=true 记录，**job_id 相同**，各自实际知识 publish_id 与对应记录一致；执行下述集合核对。两个步骤 publish_id 无需相等 |
+| dim_value、sql_example | 数据可为空，给 warn，不阻止使用；非空时必须通过下述实际 publish_run_id 核对，残留/混批为 fail 并阻止使用。当前三集合的结构/向量字段及配置依赖仍需存在且一致，集合缺失/不可用不能伪称“可选数据为空” |
+| 发布及结构一致性 | table_schema/rel 均有本源源级最近成功发布记录（`vw_workspace_latest_successful_publish` 视图按工作区/步骤各一行；NL2SQL 经 `DISTINCT ON (step_name)` 按源取每步骤最近一行）；各自实际知识 publish_run_id 与对应记录的 publish_run_id 一致；执行下述集合核对。两个步骤来自不同工作区/发布运行均合法（doc 6.2 §10.2），不要求同作业或同工作区 |
 
-发布状态由 NL2SQL 对平台 `public.publish_info` 参数化只读查询读取 source_id/step_name/status/is_current_publish/publish_id/**job_id**，不调用 MetaWeave HTTP。完整检查先按 source_id 枚举本源实际知识，检查全部 publish_id，再核对批次；不能先只筛 current publish_id 而隐藏其他批次残留。枚举 Milvus table/column 的 object_id、parent_id 及 Neo4j Table.id/Column.id 与 HAS_COLUMN 端点，**先按以下规则规范化再比较**：表集合必须相等，Milvus 每个列键及其父表必须在图中存在且对应，不混入其他源/批次。不能只比较数量，也不能只读 Store/Milvus 的默认第一页。
+发布状态由 NL2SQL 对平台视图 `public.vw_workspace_latest_successful_publish` 关联 `workspace_info` 做参数化只读查询，按源及步骤读取 `step_name/publish_run_id/published_at/workspace_id`（doc 6.2 §10.2 源级最近成功：`published_at DESC, publish_run_id DESC`，失败不替代之前成功），不调用 MetaWeave HTTP。完整检查先按 source_id 枚举本源实际知识，检查全部 publish_run_id，再核对批次；不能只筛当前版本而隐藏其他批次残留。枚举 Milvus table/column 的 object_id、parent_id 及 Neo4j Table.id/Column.id 与 HAS_COLUMN 端点，**先按以下规则规范化再比较**：表集合必须相等，Milvus 每个列键及其父表必须在图中存在且对应，不混入其他源/批次。不能只比较数量，也不能只读 Store/Milvus 的默认第一页。
 
 **跨存储对象身份的唯一比较键**：使用本次登记快照，经**独立纯函数严格校验入口**得到三段逻辑键 `db.schema.table`，外层作用域是 source_id；列键为 `(规范表键, 实际列名)`。返回的键格式与 TableKey.key 一致，TableKey.display / Neo4j full_name 仅作显示及属性一致性核验，不直接作为跨存储主键。现有 `TableCatalog.normalize_table_id` 面向模型/工具输入，会 strip 并对 schema 做小写匹配兜底，**不能直接充当持久化知识身份校验器**；本期只复用 keyspace 的字符判定与拼接规则，不改变现有模型输入容错行为、不新增可切换的宽松/严格模式。
 
 - 当前受管 [table_schema 输入](../metaweave/metaweave/core/table_schema/managed_input.py)已要求严格三段文件名并核对 JSON 身份，表 object_id/parent_id 为该 stem，列 object_id 为 `stem.column`、parent_id 为 stem；不是任意裸表名。Neo4j 模型允许 database 缺省而形成两段 id，因此仍须明确读入及拒绝规则。
 - 严格入口不 strip、不修剪各段、不 lower/casefold、不去除引号。两段表键仅用同一登记 db_name 补前缀；三段键首段必须与之精确一致。db 前缀不折叠大小写，沿用 §5.3 的不透明字符串规则，内部普通空格仍允许，不按普通 SQL 标识符解析。持久化知识的 schema/表/列保留真实大小写，schema 必须**精确命中**登记范围；不把模型输入的未引用名称折叠兜底用于合并两个实际知识对象，不将 Sales 与 sales 合并。首尾空白、schema/表/列段内空白、未知 schema、非法段数或字符均拒绝，不能忽略后继续计数。
 - Milvus 列从 object_id 最后一个点拆出实际列名，归一前缀表键并与归一 parent_id 相等，再构造列键。Neo4j Column.id 同样拆分，核对 schema/table/name、full_name 与 HAS_COLUMN 所指的 Table；表 id 也须与节点 schema/name/database 一致。相同规范键对应多个对象、错误父子归属或无法解析均为 knowledge_inconsistent。
-- 规范集合相等还须核对**可实际命中的实体键**：Neo4j 的 entity_id 必须精确为 `source_id:三段规范逻辑键`（列另加列名），节点/边 source_id、publish_id 也须符合本批。旧两段 id 即使归一后集合相等，只要实际 entity_id 仍是两段形式就 ready=false，要求受管重新发布 rel；不能用比较时补前缀掩盖 JoinGraphService 无法命中的事实。
+- 规范集合相等还须核对**可实际命中的实体键**：Neo4j 的 entity_id 必须精确为 `source_id:三段规范逻辑键`（列另加列名），节点/边 source_id、publish_run_id 也须符合本批。旧两段 id 即使归一后集合相等，只要实际 entity_id 仍是两段形式就 ready=false，要求受管重新发布 rel；不能用比较时补前缀掩盖 JoinGraphService 无法命中的事实。
 
 例如登记 db_name=my-orders、schema=public，`public.orders` 与 `my-orders.public.orders` 的比较键均为 `my-orders.public.orders`；列 `my-orders.public.orders.id` 的键为 `(my-orders.public.orders, id)`，Table.entity_id 应为 `<source_id>:my-orders.public.orders`。对象键归一本身不调用模型、不创建整套服务，也不将知识前缀带入 SQL；可复用归一纯逻辑，P1 不为身份比较而额外建立一套执行连接。readiness 仍可能触发 §5.5.2 已约定的 Embedding 探针。
 
-**列集合不能机械要求完全相等**：现有 table_schema 发布支持 include_columns=false，且 skip_empty_desc 会跳过空描述列，Neo4j 则保存完整列。因此采用“同一 job_id + 表集合相等 + 已发布 Milvus 列是图列的合法子集”的首版兼容性条件；图中多出的列本身不判失败，报告数量差异和已知跳过规则。此检查证明声明的对象身份兼容，不承诺逐列类型/描述内容或同一作业内人工改文件的语义完全一致；作业内产物应按既有受管发布校验使用，不在本期新增历史产物版本仓库。表集合、父子归属或发布版本不符均 ready=false，不因“各自非空”放行。源范围还须与 §5.3 的登记范围一致；全局 embedding_release.yaml 不扩展 source 维度，也不能替代本源知识检查。
+**列集合不能机械要求完全相等**：现有 table_schema 发布支持 include_columns=false，且 skip_empty_desc 会跳过空描述列，Neo4j 则保存完整列。因此采用“源级最近成功发布各自核对 + 表集合相等 + 已发布 Milvus 列是图列的合法子集”的首版兼容性条件；图中多出的列本身不判失败，报告数量差异和已知跳过规则。此检查证明声明的对象身份兼容，不承诺逐列类型/描述内容或同一发布内人工改文件的语义完全一致；发布内产物应按既有受管发布校验使用，不在本期新增历史产物版本仓库。表集合、父子归属或发布版本不符均 ready=false，不因“各自非空”放行。源范围还须与 §5.3 的登记范围一致；全局 embedding_release.yaml 不扩展 source 维度，也不能替代本源知识检查。
 
-**可选知识也不得把残留当作有效数据**：对 dim_value、sql_example 分别按 source_id 完整枚举实际 publish_id 集合，与对应步骤 dim_value/sql 的唯一 success + current 记录核对。无 current 且无行，或存在 current 但合法结果为空，均 warn/optional_knowledge_empty；有行时要求 current 存在、所有行 publish_id 非空且仅等于该 current.publish_id。无 current 但有旧行、混入另一批次或缺少批次字段，均 fail/knowledge_inconsistent、ready=false，修复或受管重发后再接入；不以“可选”放过会被当前按源检索读到的陈旧数据。可选步骤不额外要求与 table_schema 同 job，沿用独立发布范围；实际版本必须与各自 current 一致。检查读取失败为 503，不按空集合处理。无需本期增加可选工具开关或改成多版本检索。
+**可选知识也不得把残留当作有效数据**：对 dim_value、sql_example 分别按 source_id 完整枚举实际 publish_run_id 集合，与对应步骤 dim_value/sql 的源级最近成功发布记录核对。无记录且无行，或存在记录但合法结果为空，均 warn/optional_knowledge_empty；有行时要求记录存在、所有行 publish_run_id 非空且仅等于该记录的 publish_run_id。无记录但有旧行、混入另一批次或缺少批次字段，均 fail/knowledge_inconsistent、ready=false，修复或受管重发后再接入；不以“可选”放过会被当前按源检索读到的陈旧数据。可选步骤沿用独立发布范围；实际版本必须与各自源级最近成功记录一致。检查读取失败为 503，不按空集合处理。无需本期增加可选工具开关或改成多版本检索。
 
 ### 5.5.1 会话知识版本与发布期间边界
 
-采用最小策略：**创建时保存 knowledge_snapshot，版本变化要求新会话，不把旧 checkpoint 迁入新版本**。snapshot 包含本源 table_schema/rel 的 `(job_id,publish_id)`、可选 dim_value/sql 发布的 current `(job_id,publish_id)`（未发布为 null；平台步骤名分别为 dim_value、sql），以及实际使用的 Embedding release 内容/模型配置、Milvus 和 Neo4j 目标配置摘要。实际知识批次须经 §5.5 完整核对（或同键有效缓存）与 current 一致后，才可据此创建快照；不再存一份可与 current 矛盾的“实际版本”真值，计数也不当版本键。由后端规范化构造并保存到 Web 登记，不接收客户端指纹，不公开凭据或配置摘要原料；可选知识从无到有、重新发布或撤销 current 也算变化，避免旧轮次证据与新检索混用。table_schema/rel 来自同一 job 不代表 publish_id 相等；重复发布即使内容相同也保守要求新建会话。
+采用最小策略：**创建时保存 knowledge_snapshot，版本变化要求新会话，不把旧 checkpoint 迁入新版本**。snapshot 包含本源 table_schema/rel 的 `(workspace_id,publish_run_id)`、可选 dim_value/sql 发布的 `(workspace_id,publish_run_id)`（未发布为 null；平台步骤名分别为 dim_value、sql），以及实际使用的 Embedding release 内容/模型配置、Milvus 和 Neo4j 目标配置摘要。实际知识批次须经 §5.5 完整核对（或同键有效缓存）与源级最近成功记录一致后，才可据此创建快照；不再存一份可与记录矛盾的“实际版本”真值，计数也不当版本键。由后端规范化构造并保存到 Web 登记，不接收客户端指纹，不公开凭据或配置摘要原料；可选知识从无到有或重新发布也算变化，避免旧轮次证据与新检索混用。table_schema/rel 允许来自不同工作区/发布运行（doc 6.2 §10.2）；重复发布即使内容相同也保守要求新建会话。
 
-每轮先读取 Web 登记，已 invalidated 或取得锁后仍有上轮 pending_run_id 时优先返回 409/session_invalidated，不恢复 checkpoint；其余请求在恢复 checkpoint/沿用证据前，将最新可信登记和 current 版本与会话快照比较。不同或既有 Web 会话缺少可信 snapshot 时，锁内持久化 invalidated/knowledge_changed 并返回 409/knowledge_changed，不自动补为当前版本、不仅靠线程轮换继续；写入不能确认也不得执行。源连接/范围指纹改变优先返回 source_changed，并失效为对应原因；源停用/删除按相应错误拒绝，不自动改写其原有历史。历史读取与已取得 result_ref 的读取不进行 current 或可续聊状态检查，原会话不删除。
+每轮先读取 Web 登记，已 invalidated 或取得锁后仍有上轮 pending_run_id 时优先返回 409/session_invalidated，不恢复 checkpoint；其余请求在恢复 checkpoint/沿用证据前，将最新可信登记和源级最近成功发布记录与会话快照比较。不同或既有 Web 会话缺少可信 snapshot 时，锁内持久化 invalidated/knowledge_changed 并返回 409/knowledge_changed，不自动补为当前版本、不仅靠线程轮换继续；写入不能确认也不得执行。源连接/范围指纹改变优先返回 source_changed，并失效为对应原因；源停用/删除按相应错误拒绝，不自动改写其原有历史。历史读取与已取得 result_ref 的读取不进行发布版本或可续聊状态检查，原会话不删除。
 
 **D8 已确认（2026-10-18）：发布知识期间先不使用 NL2SQL，发布完成后再用。** 发布前先停止接收新问题，等待正在进行的查询及收尾完成；发布和核验完成后恢复查询。这段暂时不使用查询功能的时间即本文所说的“维护窗口”，无需另设固定时段，普通重发布也按此约定执行。首版采用以下人工操作流程，尚无技术互锁阻止 MetaWeave 发布页被误点，不把使用约定宣称为运行时自动保证。本期不新增共享维护标志/锁或版本化读取；以后需要发布与查询并行时再单独设计。readiness=true 只表示知识检查通过，不宣称支持在线发布；界面/部署说明须明示“发布期间暂停查询”。
 
 按已确认的 D8，普通发布统一执行以下操作流程（本地单用户首版，停止范围包括所有会读取待发布知识的消费者）：
 
-1. 暂停前端新提交，并停止 db_deepagent CLI/chat、测试脚本、定时任务或其他读取同一知识后端的进程接收新问题，等待其在途查询正常完成；发布期间不得另起这些消费者。只关闭 8008 不能保证它们已停止。**此时不要点 MetaWeave 发布**。记录目标 source_id、待发布步骤、现有 current 标识及需排空的进程/任务；无法确认其他消费者已停止时中止发布。
+1. 暂停前端新提交，并停止 db_deepagent CLI/chat、测试脚本、定时任务或其他读取同一知识后端的进程接收新问题，等待其在途查询正常完成；发布期间不得另起这些消费者。只关闭 8008 不能保证它们已停止。**此时不要点 MetaWeave 发布**。记录目标 source_id、待发布步骤、现有源级最近成功发布标识及需排空的进程/任务；无法确认其他消费者已停止时中止发布。
 2. 向 NL2SQL/Uvicorn 发送正常关闭信号，由 **Uvicorn 先停止接单并等待在途连接/ASGI 任务，再执行 lifespan shutdown**；不是 lifespan 先于服务器拒绝新请求。lifespan shutdown 还须等待应用登记的专用 executor 运行、断连后仍在执行的 Runner、版本复核、Web 文本保存及清理全部结束，最后关闭执行器和共享读取资源；ASGI 请求结束/被取消不等于工作线程已结束。该顺序已对照本地安装及 [Uvicorn 0.54.0 Server.shutdown 源码](https://github.com/Kludex/uvicorn/blob/0.54.0/uvicorn/server.py#L281-L311)。确认所有相关消费者无在途运行/残留执行进程且 8008 不再接单；不能仅靠浏览器转圈消失或 health 存活判断排空。Uvicorn graceful timeout、第二次关闭信号及服务管理器超时不得用来强制取消/杀死在途执行后继续发布；排空未确认则中止发布并排查，不用固定 sleep 或 kill -9 继续。本期不为此新增应用级维护开关。
-3. NL2SQL 保持停止，通过受管 MetaWeave 链路发布本源 table_schema/rel 及计划中的可选知识；按 §5.5 核对成功/current、同作业及实际对象版本。不得绕过链路直接修改知识库。首次图库迁移另按 doc 4 的备份/预检/迁移顺序，不将本 runbook 当作免迁移重发。
-4. 发布失败/核验未通过时暂停恢复正常查询，修复或按既有发布/恢复流程还原到可验证状态，不把“current 看起来没变”视为没有发生外部改写。可启动 NL2SQL 仅用于受控诊断，但不恢复用户提交。
+3. NL2SQL 保持停止，通过受管 MetaWeave 链路发布本源 table_schema/rel 及计划中的可选知识；按 §5.5 核对源级最近成功发布记录与实际对象版本。不得绕过链路直接修改知识库。首次图库迁移另按 doc 4 的备份/预检/迁移顺序，不将本 runbook 当作免迁移重发。
+4. 发布失败/核验未通过时暂停恢复正常查询，修复或按既有发布/恢复流程还原到可验证状态，不把“发布记录看起来没变”视为没有发生外部改写。可启动 NL2SQL 仅用于受控诊断，但不恢复用户提交。
 5. 重启 NL2SQL，先检查 v2 health，再检查该源 readiness；只有 ready=true 后恢复前端及脚本提交。旧会话版本已变化则按 D7 新建；验收记录发布前后标识、排空/重启及 readiness 结果。MetaWeave 可以继续运行，首次新问答仍按正常入口校验，不为验收自动执行 SQL。
 
 维护窗口内 NL2SQL 已停服，readiness 请求可能是连接失败，不承诺返回专门的 maintenance HTTP 错误；Vue 显示服务暂不可用、保留输入且不自动重试。若未来引入在线维护标志/锁，再另定其读写及错误契约。本流程靠同一操作者执行，并不等于当前两个服务已形成技术互斥。
 
 开始前的版本检查仍须在取得会话锁后、首次 checkpoint 恢复前重做，避免仅在 HTTP 入口检查后排队留下窗口；公共 Runner 钩子/装配负责接线。终态收尾、写 Web 文本日志前再轻量核对登记/版本：意外变化时形成 HTTP 200 的 failed/knowledge_changed，无法复核时为 persistence_error/dependency_unavailable，均严格使用 §4.2 清空证据的安全投影及 §4.4 的锁内失效/收尾保护。持久化 state=invalidated，invalid_reason 分别为 knowledge_changed/dependency_unavailable，首次 invalidated_at 不被后续请求改写；禁止恢复既有 checkpoint，即使版本回退也不解禁。保留定位信息与旧文本/文件，不向本轮调用方发出不可信 result_ref。
 
-前后检查只是异常防线，**不能证明查询过程中从未发生切换**，尤其失败发布在外部知识库改写后恢复旧 current 时，光比较 publish_info 无法识别。严格正确性的前提是上述发布/查询互斥维护流程；不能把 TTL、前后指纹相等或 readiness=true 宣称成跨库原子快照。验收中须记录维护约束；若部署不能执行这一约束，不得以本稿方案宣称支持在线发布与查询并发。
+前后检查只是异常防线，**不能证明查询过程中从未发生切换**，尤其失败发布在外部知识库改写后恢复旧版本记录时，光比较发布记录视图无法识别。严格正确性的前提是上述发布/查询互斥维护流程；不能把 TTL、前后指纹相等或 readiness=true 宣称成跨库原子快照。验收中须记录维护约束；若部署不能执行这一约束，不得以本稿方案宣称支持在线发布与查询并发。
 
 ### 5.5.2 完整检查、逐轮轻量复核与缓存
 
 避免每题重复扫描知识，采用进程内短缓存，不缓存服务连接：
 
-1. 每次 readiness、创建和新查询都重新读取可信登记及 current 发布标识，计算源字段指纹、knowledge_snapshot 和实际 release/知识后端配置摘要；这类轻量读取不由 TTL 遮蔽，失败按依赖错误拒绝。源删除/停用/字段或发布变化立即生效。
-2. 选源 readiness 和创建使用同一完整检查入口；可命中同键未过期的成功结果。完整检查成功缓存 TTL **30 秒**，键包含 source_id、字段指纹、全部 current 版本及实际知识后端/release 配置摘要，同键并发合并检查。缓存到期、键变化或未命中时重新完成业务只读核验、三集合结构/计数、图身份/发布及表列集合核对；失败不缓存成功、不沿用过期通过结果。
+1. 每次 readiness、创建和新查询都重新读取可信登记及源级最近成功发布标识，计算源字段指纹、knowledge_snapshot 和实际 release/知识后端配置摘要；这类轻量读取不由 TTL 遮蔽，失败按依赖错误拒绝。源删除/停用/字段或发布变化立即生效。
+2. 选源 readiness 和创建使用同一完整检查入口；可命中同键未过期的成功结果。完整检查成功缓存 TTL **30 秒**，键包含 source_id、字段指纹、全部源级最近成功发布版本及实际知识后端/release 配置摘要，同键并发合并检查。缓存到期、键变化或未命中时重新完成业务只读核验、三集合结构/计数、图身份/发布及表列集合核对；失败不缓存成功、不沿用过期通过结果。
 3. 每轮仅轻量复核、比较会话快照并使用未过期完整检查；需重做时先做完再装配 Agent。build_services 的一致性检查接入同一受验证入口，不能 API 命中缓存后又在服务工厂无条件重复全部扫描。每轮执行连接仍须核对真实业务库目标、只读和来源绑定；实际 SDK/查询异常正常报告，TTL 不保证依赖未来持续在线。缓存到期仅重查上文明确列出的结构/身份，不保证发现所有人工内容修改；脱离受管发布的改写属于不支持的运维路径，不靠缩短 TTL 假装消除。
-4. **创建快照一致性**：读取登记/发布快照 S → 从 S 构造配置和指纹、完成/命中同键完整检查 → 取得创建会话锁、写入前重读登记及 current，指纹或版本变化即 409/source_changed 或 knowledge_changed，不写会话登记。保存的字段指纹和 knowledge_snapshot 必须来自通过检查的 S，不能把第二次读取的值替换进去。随后**严格按 §4.4 固定写序：先确认通用 sessions 绑定，再写 pending_run_id=creation_id 的 Web 登记**，两条记录确认且写后复核通过才清除 pending 并返回；禁止反向先写 Web。各写入失败、清除结果不明及列表可见性均按 §4.4 的表处理，不声称发生异常必然留下/清掉标记。首轮依旧重新复核，不宣称跨库原子创建。显示名或 updated_at 单独变化不使 S 无效。
+4. **创建快照一致性**：读取登记/发布快照 S → 从 S 构造配置和指纹、完成/命中同键完整检查 → 取得创建会话锁、写入前重读登记及发布记录，指纹或版本变化即 409/source_changed 或 knowledge_changed，不写会话登记。保存的字段指纹和 knowledge_snapshot 必须来自通过检查的 S，不能把第二次读取的值替换进去。随后**严格按 §4.4 固定写序：先确认通用 sessions 绑定，再写 pending_run_id=creation_id 的 Web 登记**，两条记录确认且写后复核通过才清除 pending 并返回；禁止反向先写 Web。各写入失败、清除结果不明及列表可见性均按 §4.4 的表处理，不声称发生异常必然留下/清掉标记。首轮依旧重新复核，不宣称跨库原子创建。显示名或 updated_at 单独变化不使 S 无效。
 
 **Embedding 模型探针使用单独的成功缓存，TTL 300 秒**：当前 build_services 每次 check_embedding_consistency 都会 embed_query；Web 将这一模型请求拆为可复用检查，缓存键包含 profile 模型/维度/提供方与端点、凭据配置摘要、Milvus 目标/集合/字段及 release 内容摘要。键变化立即重查，同键并发只执行一次，失败不沿用旧通过结果。readiness 和查询共用入口；首次/到期仍可能付一次探针成本，不保证 readiness 零成本。模型探针缓存不同于上面按源 30 秒完整 readiness 缓存，不能相互代替。两者均不共享可变预算或连接，不引入 Redis/主动失效消息；每轮 DbAgentServices 仍独立构造和释放。
 
-现有 doctor --source-id 仅提供按源计数和 UUID 校验，不检查完整登记/业务连接，也不执行上述跨存储集合兼容性判定；可复用查询思路，不能把 doctor 全零或全局统计当 readiness。需要按 §5.3 接入每源只读检查；这些必要后端配套不能省略或声称已由 doc 4 全部交付。
+现有 doctor --source-id 仅提供按源计数和短 ID 格式校验，不检查完整登记/业务连接，也不执行上述跨存储集合兼容性判定；可复用查询思路，不能把 doctor 全零或全局统计当 readiness。需要按 §5.3 接入每源只读检查；这些必要后端配套不能省略或声称已由 doc 4 全部交付。
 
 ## 6. Vue 代码与双后端配置
 
@@ -699,15 +699,15 @@ request_id 为服务端权威标识，重复标识拒绝仅用于防覆盖，不
 - 数据源：停用/删除/不支持类型；登记 db_name 含点号或 schema 含空格/连字符时 readiness 提前拒绝并显示原因；selected_schemas 为 null/空时不创建服务。两个同名库不混查询，sslmode 正确；只按字段指纹使旧会话失效，改显示名/描述或单改 updated_at 不失效，schema 顺序变化不被忽略。最近活动字段不标作成功时间。
 - 公共装配：环境 DB_NAME 与 YAML 的 orders 默认值不同、登记源另有 db_name 时，先覆盖再完成最终三键校验，能装配正确目标；缺失或非法登记仍拒绝，不修改进程环境、不回退默认源。
 - 来源传递与旧会话：创建即保存 source_id；首次提问、续聊、刷新恢复和线程轮换保持绑定；请求省略/伪造/错配来源时不执行 Agent，已有会话缺少绑定时拒绝续聊；sessions 记录缺失但待恢复 checkpoint 有状态时同样拒绝，不以新源接管。不存在的 Web 会话不隐式创建；模型工具参数没有 source_id，不能覆盖服务绑定。
-- 连接指纹边界：两个 UUID 登记源即使物理目标、角色和 search_path 相同而 datasource_id 相等，也不因指纹相等允许跨源或跨会话复用 checkpoint、证据和结果。
+- 连接指纹边界：两个短 ID 登记源即使物理目标、角色和 search_path 相同而 datasource_id 相等，也不因指纹相等允许跨源或跨会话复用 checkpoint、证据和结果。
 - 每轮资源：同源和不同源并发均使用独立执行服务及 Milvus alias；关闭 A 实例不影响 B；部分构造失败释放已建资源，执行及归档结束后释放全部本轮资源，HTTP 断开但后台未结束时不会提前关闭；历史/结果读取不装配 Agent 与整套检索服务。
 - 键空间与 SQL：复用 doc 4 样例验证含连字符、数字开头和内部空格的 db 前缀、两段/三段逻辑键一致性、实际名称大小写及非法键拒绝；知识 db 前缀/source_id/entity_id 不进入 SQL 表限定段。完整校验管线覆盖非 public schema、裸名解析、未引用列名/别名/CTE 名的大小写折叠、双引号名称保留、CTE 作用域及系统目录同名优先级；Web 不直接绕过 validator 调用底层执行或仅以守卫替代范围检查。
 - 双源知识隔离：同名 db/schema/table/column 在 A/B 源并存，六个 Milvus 入口及精确回查只命中本源；仅 B 存在的表在 A 不可见，A 不返回 B 的寻路结果。Neo4j 按源替换、数量核验失败回滚、不同源并发发布与其他源保留按 doc 4 §4.6–§4.7 验收，记录基础链路和 Web 接线各自结果。
-- 知识就绪：A 有知识、B 为空时 B 未就绪；table_schema 仅有列记录不算就绪，首版未发布 rel 的源不能创建会话，JOIN_ON=0 合法，维度/示例数据为空给 warn 但集合缺失或依赖异常不伪装为空。同源两个 current 来自不同 job 时拒绝；同作业但表集合不符、Milvus 列或父表在图中缺失同样拒绝；空描述列跳过/include_columns=false 不误判为列集合不一致。完整枚举全部分页，核对各自 publish_id；200/422/503 等 data 与 compatible 的位置/nullable 明确，不执行问答模型。
+- 知识就绪：A 有知识、B 为空时 B 未就绪；table_schema 仅有列记录不算就绪，首版未发布 rel 的源不能创建会话，JOIN_ON=0 合法，维度/示例数据为空给 warn 但集合缺失或依赖异常不伪装为空。同源 table_schema 与 rel 来自不同工作区/发布运行合法（doc 6.2 §10.2），不要求两步骤版本相等；但表集合不符、Milvus 列或父表在图中缺失、实际下游版本与各自源级最近成功记录不一致同样拒绝；空描述列跳过/include_columns=false 不误判为列集合不一致。完整枚举全部分页，核对各自 publish_run_id；200/422/503 等 data 与 compatible 的位置/nullable 明确，不执行问答模型。
 - 跨存储键：严格纯函数入口两段补同源 db 前缀、三段校验前缀，列键拆分与 parent_id/HAS_COLUMN 对应一致；覆盖 my-orders、db 前缀合法内部空格、Sales/sales 并存。仅登记 public 时 PUBLIC.orders 拒绝；public . orders、表键首尾空白、列键/parent_id 首尾空白均拒绝，不 strip/lower 修正；模型输入的原有宽松归一行为不变。非法 schema、错误父表/重复规范键拒绝；集合归一后相等但图 entity_id 仍为旧两段形式也不就绪，不以 full_name 绕过真实查询键。
-- 可选实际版本：无 current/无行、合法 current/零行可 warn；无 current/旧行、不同或多个 publish_id、缺批次字段均拒绝，不能先按 current 过滤再漏掉残留；跨全部分页核验。业务源连接/检查异常为 503，确定目标/只读/事务超时设置不符为 200 ready=false，创建/提问转 409/source_not_ready；不将上述情况误显示为单纯缺知识。
-- 版本与维护边界：创建即存知识 snapshot，版本相同时才能恢复 checkpoint；table_schema/rel/可选知识发布变更、撤销 current 或 release 摘要变化都拒绝旧会话，缺 snapshot 也不自动接管；历史/旧引用仍读得出。模拟入口检查后、取得锁前变化，以及执行中意外变化，分别验证 409 拒绝或 HTTP 200 failed 安全摘要/禁止续聊，不把旧证据混入新会话。模拟创建完整检查与保存之间登记/current 改变，确认没有“旧目标检查、新指纹成功登记”；写后复核失败的残留不返回成功。正式发布按排空维护执行，前后指纹检查不作为在线发布原子性证明。
-- readiness 成本：同源同版本连续提问在 30 秒 TTL 内只重读登记/current/release 摘要，不重复知识全量计数/表列枚举；到期、指纹/版本/后端配置变化重新完整检查，同键并发合并，失败不复用旧成功。缓存命中后 build_services 不重复相同完整检查，但实际业务连接仍验证目标/只读；轻量复核异常 fail closed。
+- 可选实际版本：无源级最近成功记录/无行、有记录但零行可 warn；无记录/旧行、不同或多个 publish_run_id、缺批次字段均拒绝，不能先按当前版本过滤再漏掉残留；跨全部分页核验。业务源连接/检查异常为 503，确定目标/只读/事务超时设置不符为 200 ready=false，创建/提问转 409/source_not_ready；不将上述情况误显示为单纯缺知识。
+- 版本与维护边界：创建即存知识 snapshot，版本相同时才能恢复 checkpoint；table_schema/rel/可选知识的源级最近成功发布记录或对应 (workspace_id,publish_run_id) 快照变化、必需发布记录缺失或 release 摘要变化，都拒绝旧会话，缺 snapshot 也不自动接管；历史/旧引用仍读得出。模拟入口检查后、取得锁前变化，以及执行中意外变化，分别验证 409 拒绝或 HTTP 200 failed 安全摘要/禁止续聊，不把旧证据混入新会话。模拟创建完整检查与保存之间登记/发布记录改变，确认没有“旧目标检查、新指纹成功登记”；写后复核失败的残留不返回成功。正式发布按排空维护执行，前后指纹检查不作为在线发布原子性证明。
+- readiness 成本：同源同版本连续提问在 30 秒 TTL 内只重读登记/发布记录/release 摘要，不重复知识全量计数/表列枚举；到期、指纹/版本/后端配置变化重新完整检查，同键并发合并，失败不复用旧成功。缓存命中后 build_services 不重复相同完整检查，但实际业务连接仍验证目标/只读；轻量复核异常 fail closed。
 - Embedding 探针：同配置连续提问或并发 readiness 命中一次成功探针；TTL 到期、release/模型/目标变化重查，失败不复用旧成功。同源/异源仍分别装配执行服务，不缓存服务实例，不在每题无条件发探针请求。
 - 负载与本机边界：用慢服务替身占满执行名额，后续 query 立即 429，health/列表不被长查询线程耗尽；名额在真实收尾后归还，关闭/装配失败不泄漏。验证频率限制、非白名单 Origin 被业务前拒绝、JSON 类型要求；不将 CORS 当登录鉴权。
 - 超时：覆盖模型调用在 300 秒前放行、360 秒后完成并正常返回的情况，以及超过客户端等待时长仍不自动重发查询；模拟时钟和慢服务即可，不为此强制等待真实数分钟。
@@ -721,7 +721,7 @@ request_id 为服务端权威标识，重复标识拒绝仅用于防覆盖，不
 
 **验收环境是前置条件，在 P0 核对，不能留到 P4 才准备。** 平台库和 Milvus 可用独立测试 database；当前 Neo4j Community 不能在同实例创建隔离业务 database，真实双源写入、按源替换、并发和回滚测试须准备独立 Neo4j 实例（另一进程/主机，或具备条件时的容器），使用独立数据目录及端口。正式实例在这类开发验收中仅做只读核验，不用写入测试源代替隔离；fake 单测可先验证逻辑，但必须标注真实写入场景未验收。此条不取消已授权维护窗口内正式迁移/重新发布 rel 的独立流程。
 
-在隔离环境登记两个不同 UUID 的源，准备同名 db/schema/table/column、可区分查询结果及仅 B 存在的表/关系、可发布作业产物和有效当前发布记录。回滚测试保留旧子图并安排可控失败注入；同一源重复查询不能代替双源验收。独立实例不可用时列出阻塞场景，不为凑验收通过改写正式图库。
+在隔离环境登记两个不同短 ID 的源，准备同名 db/schema/table/column、可区分查询结果及仅 B 存在的表/关系、可发布作业产物和有效源级最近成功发布记录。回滚测试保留旧子图并安排可控失败注入；同一源重复查询不能代替双源验收。独立实例不可用时列出阻塞场景，不为凑验收通过改写正式图库。
 
 使用这两个经确认的登记源，各验证查询、续聊和问答文本恢复，再验证空数据、失败、慢请求、来源错配拒绝、切换来源/会话和刷新。检查每次提问都携带并校验 source_id，多轮使用 checkpoint 而非前端重传 SQL；当前新查询可展示 SQL/表格，刷新恢复后仅展示问题和答案，不返回或按需加载历史 SQL/表格。此类验收会调用模型、读取业务数据并可能写入 checkpoint/问答历史，应按选定环境执行；文档编写或构建检查不替代实际验收。
 
@@ -740,9 +740,9 @@ request_id 为服务端权威标识，重复标识拒绝仅用于防覆盖，不
 
 已确认的产品范围保持：D0 仅新链、D1 平台选源、D2 guest、D3 历史仅问答、D6 后端读取登记并解密，以及 Q2 保留有效旧结果引用的读取能力。D8 于 2026-10-18 确认：发布知识期间先不使用 NL2SQL，发布完成后再用；首版按 §5.5.1 操作流程执行。双后端端口、480 秒等待估算和 doc 3 的结果存储边界保持原约定。
 
-前轮已补齐 archived/history_saved、孤立 checkpoint、ID/分页/Store 命名空间、cell 编码、登记指纹、D6 部分交付状态、本机执行边界及 doc 4 状态勘误。本轮进一步明确：首版同步返回、知识版本变化要求新会话、发布与查询错开执行；rel 必需是首版成套知识范围而非构造函数强制。readiness 按同作业/对象集合核对，区分 30 秒完整检查缓存与 300 秒模型探针缓存；创建使用同一登记/知识快照并复核竞争。固定 WebQueryResult 和结果列形状，不在查询响应塞预览；执行期编码失败与结果 GET 错误分开映射；所有应用异常和 health 统一封装并使用独立 trace_id。Web 文本 maintenance 扩展、可修复元数据缓存、创建不自动重试及 turns 分页边界已落实到 P1 和验收项。
+前轮已补齐 archived/history_saved、孤立 checkpoint、ID/分页/Store 命名空间、cell 编码、登记指纹、D6 部分交付状态、本机执行边界及 doc 4 状态勘误。本轮进一步明确：首版同步返回、知识版本变化要求新会话、发布与查询错开执行；rel 必需是首版成套知识范围而非构造函数强制。readiness 按源级最近成功发布/对象集合核对，区分 30 秒完整检查缓存与 300 秒模型探针缓存；创建使用同一登记/知识快照并复核竞争。固定 WebQueryResult 和结果列形状，不在查询响应塞预览；执行期编码失败与结果 GET 错误分开映射；所有应用异常和 health 统一封装并使用独立 trace_id。Web 文本 maintenance 扩展、可修复元数据缓存、创建不自动重试及 turns 分页边界已落实到 P1 和验收项。
 
-本轮复审补齐 SessionInfo/登记中的持久失效状态与最小 pending 收尾保护、不可信终态的后端强制清空投影、跨存储规范键和实际可命中实体键检查、可选知识实际 publish_id 核对、业务源检查 HTTP 分类与闭集错误类型，并明确 Store 故障下安全摘要和 history_saved 的独立语义。对应 P1/UI/测试已同步，不以修改文档代替代码修复。
+本轮复审补齐 SessionInfo/登记中的持久失效状态与最小 pending 收尾保护、不可信终态的后端强制清空投影、跨存储规范键和实际可命中实体键检查、可选知识实际 publish_run_id 核对、业务源检查 HTTP 分类与闭集错误类型，并明确 Store 故障下安全摘要和 history_saved 的独立语义。对应 P1/UI/测试已同步，不以修改文档代替代码修复。
 
 本次继续明确创建写序和 create_ 操作标识、写入结果不明的 HTTP/残留可见性及不自动删除政策；readiness 改用严格纯函数校验持久化身份，保留模型输入归一的容错行为；旧 Web 登记固定安全投影且 GET 不写入。维护流程修正为 Uvicorn 停接单后进入 lifespan 的实际顺序，并纳入 CLI/脚本等所有相关消费者，未增加新的维护锁或任务系统。
 
