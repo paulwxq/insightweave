@@ -1,7 +1,7 @@
 """登记源解析与注入测试（doc 4 §4.7 端到端来源一致）
 
 - resolve_source_registration：平台库读取、Fernet 解密、不存在/禁用/
-  类型不符/非法 UUID 拒绝、平台库错误不泄密；
+  类型不符/非法短 ID 拒绝（UUID 亦非法，doc 5.1 §1）、平台库错误不泄密；
 - apply_registration_to_config：业务库连接五键 + 三键运行配置取登记值；
 - build_services 构造失败按逆序回收已创建资源（doc 4 §4.7 每轮独立构造
   的资源泄漏防护）。
@@ -138,9 +138,14 @@ class TestResolveRegistration:
         with pytest.raises(SourceResolutionError, match="db_type"):
             resolve_source_registration(TEST_SOURCE_ID)
 
-    def test_invalid_uuid_rejected(self, fernet_env, patched_connect):
-        with pytest.raises(SourceResolutionError, match="UUID"):
-            resolve_source_registration("not-a-uuid")
+    def test_invalid_short_id_rejected(self, fernet_env, patched_connect):
+        with pytest.raises(SourceResolutionError, match="短 ID"):
+            resolve_source_registration("not-a-short-id")
+
+    def test_uuid_source_id_rejected(self, fernet_env, patched_connect):
+        """doc 12.2 M-1：UUID 属非法来源（doc 4 的 UUID 契约已废止）。"""
+        with pytest.raises(SourceResolutionError, match="短 ID"):
+            resolve_source_registration("11111111-1111-4111-8111-111111111111")
 
     def test_platform_db_error_no_secret_leak(self, fernet_env, patched_connect):
         import psycopg
@@ -200,6 +205,16 @@ class TestApplyRegistration:
 
 
 class TestBuildServicesCleanup:
+    def test_uuid_source_id_rejected(self, db_agent_config):
+        """doc 12.2 M-1：build_services 对 UUID 拒绝构造——校验发生在创建
+        任何业务库/Milvus/Neo4j 资源之前，无需 mock 即可直接测试。"""
+        import src.modules.db_deepagent.services as services_mod
+
+        with pytest.raises(ValueError, match="短 ID"):
+            services_mod.build_services(
+                db_agent_config, source_id="11111111-1111-4111-8111-111111111111"
+            )
+
     def test_partial_construction_closes_created_resources(
         self, db_agent_config, monkeypatch
     ):

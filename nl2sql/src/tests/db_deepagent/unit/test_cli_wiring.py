@@ -443,3 +443,16 @@ class TestCleanupConnectionAutocommit:
         report = service.cleanup(apply=False)
         assert report.ok
         assert captured.get("autocommit") is True
+
+
+class TestPlaceholderSourceId:
+    def test_placeholder_passes_real_source_validation(self):
+        """doc 12.2 M-1 回归防护：doctor/cleanup 占位来源必须能通过
+        build_services 的真实短 ID 校验——占位改回 UUID 时此处失败，
+        且本断言不 mock build_services（区别于 TestCleanupWiring）。"""
+        import src.modules.db_deepagent.cli as cli_mod
+        from src.modules.db_deepagent.services import _normalized_source_id
+
+        assert _normalized_source_id(cli_mod._PLACEHOLDER_SOURCE_ID) == (
+            cli_mod._PLACEHOLDER_SOURCE_ID
+        )

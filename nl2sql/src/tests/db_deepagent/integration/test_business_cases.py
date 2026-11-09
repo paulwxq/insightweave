@@ -15,7 +15,7 @@ import yaml
 
 # 业务用例运行于真实单源环境；占位来源仅满足构造绑定（doc 4 §3/§4.7：
 # 正式多源验收以登记 source_id 为准，见交付说明）
-_TEST_SOURCE_ID = "00000000-0000-4000-8000-000000000000"
+_TEST_SOURCE_ID = "db_src_1"  # doc 5.1 §1 短 ID（doc 12.2 M-1）
 
 pytestmark = [
     pytest.mark.integration,

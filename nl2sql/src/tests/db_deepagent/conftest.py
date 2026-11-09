@@ -28,10 +28,10 @@ from src.modules.db_deepagent.services.sql_validation import DbSqlValidator
 from src.modules.db_deepagent.services.table_catalog import TableCatalog
 from src.modules.db_deepagent.services.time_resolver import TimeResolver
 
-# 测试统一使用的来源绑定（doc 4：服务/会话绑定 source_id 的假数据源 A；
-# 双源用例另用 TEST_SOURCE_ID_B 区分同名对象）
-TEST_SOURCE_ID = "11111111-1111-4111-8111-111111111111"
-TEST_SOURCE_ID_B = "22222222-2222-4222-8222-222222222222"
+# 测试统一使用的来源绑定（doc 5.1 §1 短 ID：服务/会话绑定 source_id 的
+# 假数据源 A；双源用例另用 TEST_SOURCE_ID_B 区分同名对象）
+TEST_SOURCE_ID = "db_src_1"
+TEST_SOURCE_ID_B = "db_src_2"
 
 
 @pytest.fixture(scope="session")

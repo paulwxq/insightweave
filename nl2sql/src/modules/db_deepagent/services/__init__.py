@@ -37,8 +37,9 @@ logger = get_module_logger("nl2sql.db_deepagent.services")
 class DbAgentServices:
     """服务容器（§6 字段全集；步骤 3+ 的字段在交付前为 None）
 
-    source_id 为本实例绑定的平台数据源（规范化 UUID 字符串，doc 4 §3.2/§4.7）：
-    构造后不可变更，Milvus 检索与 Neo4j 图查询均按其过滤/定位。
+    source_id 为本实例绑定的平台数据源（短 ID 字符串，doc 5.1 §1 /
+    doc 4 §3.2/§4.7）：构造后不可变更，Milvus 检索与 Neo4j 图查询均按其
+    过滤/定位。
     """
 
     config: DbAgentConfig
@@ -69,20 +70,21 @@ class DbAgentServices:
 
 
 def _normalized_source_id(source_id) -> str:
-    """校验并规范化服务绑定的 source_id（doc 4 §3.2：缺失/非法拒绝构造）。"""
-    import uuid as _uuid
-
-    if isinstance(source_id, _uuid.UUID):
-        return str(source_id)
+    """校验并规范化服务绑定的 source_id（doc 4 §3.2 + doc 5.1 §1 短 ID：
+    缺失/非法拒绝构造，与 source_registry 同一严格校验，doc 12.2 M-1）。"""
     if not isinstance(source_id, str) or not source_id.strip():
         raise ValueError(
-            "build_services 需要 source_id（平台登记 UUID）：来源缺失时拒绝构造，"
-            "不得回退为无源过滤的检索"
+            "build_services 需要 source_id（平台登记短 ID，形如 db_src_1）："
+            "来源缺失时拒绝构造，不得回退为无源过滤的检索"
         )
     try:
-        return str(_uuid.UUID(source_id.strip()))
+        from src.modules.db_deepagent.source_registry import (
+            normalize_short_source_id,
+        )
+
+        return normalize_short_source_id(source_id)
     except ValueError:
-        raise ValueError("source_id 不是合法 UUID，拒绝构造服务") from None
+        raise ValueError("source_id 不是合法短 ID，拒绝构造服务") from None
 
 
 def _embedding_profile_and_key(cfg: DbAgentConfig) -> tuple[dict[str, Any], str]:

@@ -198,8 +198,17 @@ class TestRunnerSourceBinding:
     def test_invalid_request_source_rejected(self):
         from src.modules.db_deepagent.runner import _RejectedSession
 
-        with pytest.raises(_RejectedSession, match="UUID"):
-            _resolve_source_binding(None, "not-a-uuid", TEST_SOURCE_ID)
+        with pytest.raises(_RejectedSession, match="短 ID"):
+            _resolve_source_binding(None, "not-a-short-id", TEST_SOURCE_ID)
+
+    def test_uuid_request_source_rejected(self):
+        """doc 12.2 M-1：UUID 属非法来源（合法身份为 db_src_N 短 ID）。"""
+        from src.modules.db_deepagent.runner import _RejectedSession
+
+        with pytest.raises(_RejectedSession, match="短 ID"):
+            _resolve_source_binding(
+                None, "11111111-1111-4111-8111-111111111111", TEST_SOURCE_ID
+            )
 
     def test_missing_service_binding_rejected(self):
         from src.modules.db_deepagent.runner import _RejectedSession

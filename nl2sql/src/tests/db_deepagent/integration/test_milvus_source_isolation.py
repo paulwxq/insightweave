@@ -14,8 +14,6 @@ db/schema/table/维度/SQL 记录，验证：
 
 from __future__ import annotations
 
-import uuid as _uuid
-
 import pytest
 
 from src.modules.db_deepagent.config import DbAgentConfig
@@ -24,9 +22,11 @@ from src.modules.db_deepagent.services.milvus_retrieval import DbMilvusRetrieval
 pytestmark = [pytest.mark.unit, pytest.mark.integration, pytest.mark.requires_db]
 
 TEST_DATABASE = "insightweave_srcid_test"
-SOURCE_A = "11111111-1111-4111-8111-111111111111"
-SOURCE_B = "22222222-2222-4222-8222-222222222222"
-MISSING_SOURCE = "33333333-3333-4333-8333-333333333333"
+# doc 5.1 §1 短 ID 夹具（doc 12.2 M-1：合法来源为 db_src_N；UUID 输入非法）
+SOURCE_A = "db_src_1"
+SOURCE_B = "db_src_2"
+MISSING_SOURCE = "db_src_3"
+UUID_SOURCE = "11111111-1111-4111-8111-111111111111"
 
 _VEC_A = [1.0, 0.0]
 _VEC_B = [0.0, 1.0]
@@ -386,12 +386,8 @@ class TestDoubleSourceIsolation:
         assert hits
         second.close()
 
-    def test_uuid_normalized_at_construction(self, seeded_collections):
-        """非规范 UUID 字符串归一后仍可绑定同一来源。"""
+    def test_uuid_source_id_rejected_at_construction(self, seeded_collections):
+        """doc 12.2 M-1：UUID 属非法来源——构造即拒绝，不归一为短 ID。"""
         cfg = seeded_collections
-        raw = str(_uuid.UUID(SOURCE_A)).upper()
-        retrieval = _retrieval(cfg, raw)
-        try:
-            assert retrieval.source_id == SOURCE_A
-        finally:
-            retrieval.close()
+        with pytest.raises(ValueError, match="短 ID"):
+            _retrieval(cfg, UUID_SOURCE)

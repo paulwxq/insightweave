@@ -53,8 +53,9 @@ def identifier_problem(name: object, *, kind: str) -> str | None:
 def build_entity_id(source_id: str, logical_id: str) -> str:
     """图实体键：``<source_id>:<逻辑 id>``（doc 4 §4.2）。
 
-    source_id 为规范化 UUID 字符串；Table 逻辑 id 为 ``db.schema.table``，
-    Column 再追加列名。与 NL2SQL ``join_graph`` 的构造方式一致。
+    source_id 为数据源短 ID（``db_src_N``，doc 5.1 §1）；Table 逻辑 id 为
+    ``db.schema.table``，Column 再追加列名。与 NL2SQL ``join_graph`` 的
+    构造方式一致。
     """
     return f"{source_id}:{logical_id}"
 

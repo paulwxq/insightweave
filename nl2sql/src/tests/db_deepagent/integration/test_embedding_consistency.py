@@ -12,8 +12,8 @@ from src.modules.db_deepagent.errors import EmbeddingConsistencyError
 
 pytestmark = [pytest.mark.unit, pytest.mark.integration]
 
-# 一致性检查不依赖具体来源，用占位 UUID 满足构造绑定（doc 4 §3）
-_TEST_SOURCE_ID = "00000000-0000-4000-8000-000000000000"
+# 一致性检查不依赖具体来源，用占位短 ID 满足构造绑定（doc 4 §3 + doc 5.1 §1）
+_TEST_SOURCE_ID = "db_src_1"
 
 
 @pytest.fixture()

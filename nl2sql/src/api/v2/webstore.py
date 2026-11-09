@@ -329,7 +329,8 @@ def state_projection(record: dict) -> dict:
 
 def core_ownership_ok(record: Any, session_id: str) -> bool:
     """核心 Web 归属核对（doc 2 §4.2 P1 读取约束）：owner/origin、登记
-    session_id 与路径一致、source_id 是合法 UUID。不要求展示/状态字段完整。"""
+    session_id 与路径一致、source_id 是合法短 ID（db_src_N，doc 5.1 §1）。
+    不要求展示/状态字段完整。"""
     if not isinstance(record, dict):
         return False
     return (

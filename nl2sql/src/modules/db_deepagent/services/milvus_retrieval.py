@@ -5,9 +5,10 @@
   所有 Collection(...) 调用显式传 using=<别名>，搜索传 timeout=cfg.milvus.timeout
 - 连接别名基于配置别名加每实例唯一后缀（doc 4 §3.3/§4.7）：并发请求各持
   独立连接，close 只断开本实例；避免与旧链路的 default 别名互相影响
-- 构造时绑定不可变 source_id（doc 4 §3）：六个检索/回查入口全部叠加
-  ``source_id ==`` 过滤，精确回查同样按源过滤；缺失或非法来源直接拒绝，
-  禁止回退为无源过滤查询
+- 构造时绑定不可变 source_id（doc 4 §3 + doc 5.1 短 ID）：六个检索/回查
+  入口全部叠加 ``source_id ==`` 过滤，精确回查同样按源过滤；缺失或非法
+  来源直接拒绝（``normalize_short_source_id``，形如 db_src_1），禁止回退为
+  无源过滤查询
 - search_dim_values 结果增加 query_value；dim_table 保持 Milvus 原值（三段表键）
 - 新增 vector_field_dim(collection_name, field_name) -> int 供 §6.3 一致性检查
 - Milvus 异常向上抛 RetrievalBackendError，不吞掉、不降级为空列表
@@ -34,17 +35,21 @@ logger = get_module_logger("nl2sql.db_deepagent.milvus_retrieval")
 
 
 def _normalized_source_id(source_id: str | None) -> str:
-    """校验并规范化 source_id（UUID）；缺失/非法直接拒绝（doc 4 §3.2）。"""
+    """校验并规范化 source_id（短 ID，doc 5.1 §1）；缺失/非法直接拒绝
+    （doc 4 §3.2，doc 12.2 M-1：与 source_registry 同一严格校验）。"""
     if not isinstance(source_id, str) or not source_id.strip():
         raise ValueError(
-            "Milvus 检索必须绑定会话 source_id（规范化 UUID）；缺失即拒绝查询"
+            "Milvus 检索必须绑定会话 source_id（短 ID 形如 db_src_1）；"
+            "缺失即拒绝查询"
         )
     try:
-        import uuid as _uuid
+        from src.modules.db_deepagent.source_registry import (
+            normalize_short_source_id,
+        )
 
-        return str(_uuid.UUID(source_id.strip()))
-    except (ValueError, AttributeError):
-        raise ValueError("source_id 不是合法 UUID，拒绝执行检索") from None
+        return normalize_short_source_id(source_id)
+    except ValueError:
+        raise ValueError("source_id 不是合法短 ID，拒绝执行检索") from None
 
 
 class DbMilvusRetrieval:

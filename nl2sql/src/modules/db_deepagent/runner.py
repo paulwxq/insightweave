@@ -1120,7 +1120,8 @@ def _resolve_source_binding(
 ) -> str:
     """三方核对会话来源绑定（doc 4 §3.2/§5.2），返回生效绑定。
 
-    - 服务绑定（build_services 构造）必须存在且为合法 UUID；
+    - 服务绑定（build_services 构造）必须存在且为合法短 ID（db_src_N，
+      doc 5.1 §1；doc 12.2 M-1）；
     - 请求显式携带 source_id 时仅作一致性检查，不能覆盖会话绑定；
     - 会话记录已有绑定且与服务绑定不一致 → 明确拒绝（防 A 源会话发
       B 源问题导致串源）；

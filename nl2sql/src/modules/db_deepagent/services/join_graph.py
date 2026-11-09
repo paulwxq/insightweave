@@ -8,12 +8,12 @@ _find_path_shortest、_extract_path_info、check_table_exists，改为：
   由调用方经 normalize_table_id 归一）；其他源的同名表不参与匹配
 - 每条 Cypher 以 neo4j.Query(text, timeout=...) 执行，超时按 error 处理
 - 返回 JoinPathOutcome（三态区分：找到 / 无路径 / 失败）及所用策略；
-  边中的表标识保持原逻辑 id（不把带 UUID 的 entity_id 当 SQL 表名）
+  边中的表标识保持原逻辑 id（不把带源前缀的 entity_id 当 SQL 表名；
+  前缀为 doc 5.1 短 ID，形如 db_src_N）
 """
 
 from __future__ import annotations
 
-import uuid as _uuid
 from dataclasses import dataclass, field
 from typing import Any, Literal, Optional
 
@@ -26,16 +26,21 @@ logger = get_module_logger("nl2sql.db_deepagent.join_graph")
 
 
 def _normalized_source_id(source_id: str | None) -> str:
-    """校验并规范化 source_id（UUID）；缺失/非法拒绝图查询（doc 4 §4.7）。"""
+    """校验并规范化 source_id（短 ID，doc 5.1 §1）；缺失/非法拒绝图查询
+    （doc 4 §4.7，doc 12.2 N-1：与 source_registry 同一严格校验）。"""
     if not isinstance(source_id, str) or not source_id.strip():
         raise ValueError(
-            "图查询必须绑定会话 source_id（规范化 UUID）；缺失即拒绝，"
+            "图查询必须绑定会话 source_id（短 ID 形如 db_src_1）；缺失即拒绝，"
             "不回退为仅按 id 匹配"
         )
     try:
-        return str(_uuid.UUID(source_id.strip()))
-    except (ValueError, AttributeError):
-        raise ValueError("source_id 不是合法 UUID，拒绝执行图查询") from None
+        from src.modules.db_deepagent.source_registry import (
+            normalize_short_source_id,
+        )
+
+        return normalize_short_source_id(source_id)
+    except ValueError:
+        raise ValueError("source_id 不是合法短 ID，拒绝执行图查询") from None
 
 
 @dataclass

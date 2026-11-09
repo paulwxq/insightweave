@@ -32,9 +32,11 @@ _VERSION_PACKAGES = (
 
 _DOCTOR_STAGES = ("env", "retrieval", "all")
 
-# doctor 装配验证/维护路径使用的固定占位来源（doc 4 §4.7）：这些路径不执行
-# 按源检索/寻路，仅装配；真实会话必须传登记 source_id
-_PLACEHOLDER_SOURCE_ID = "00000000-0000-4000-8000-000000000000"
+# doctor 装配验证/维护路径使用的固定占位来源（doc 4 §4.7 + doc 5.1 §1）：
+# 这些路径不执行按源检索/寻路，仅装配；占位值必须是合法短 ID（doc 12.2
+# M-1：构造链已按 normalize_short_source_id 严格校验，UUID 会使 doctor/
+# cleanup 入口直接失败）；真实会话必须传登记 source_id
+_PLACEHOLDER_SOURCE_ID = "db_src_1"
 
 
 def _resolve_registration_and_apply(cfg, source_id: str, *, json_mode: bool = False):
@@ -62,12 +64,13 @@ def _resolve_registration_and_apply(cfg, source_id: str, *, json_mode: bool = Fa
 
 
 def _validate_source_id_arg(raw: str | None) -> str:
-    """校验 --source-id 为合法 UUID（doc 4 §3.2：不自动选源、不回退）。"""
+    """校验 --source-id 为合法短 ID（doc 5.1 §1；doc 4 §3.2：不自动选源、
+    不回退）。"""
 
     if not raw:
         print(
-            "必须显式传入 --source-id（平台登记 UUID）；不自动选择唯一源，"
-            "也不回退为无源查询",
+            "必须显式传入 --source-id（平台登记短 ID，形如 db_src_1）；"
+            "不自动选择唯一源，也不回退为无源查询",
             file=sys.stderr,
         )
         raise SystemExit(2)
@@ -263,7 +266,7 @@ def _check_source_scoped(source_id: str) -> tuple[bool, str]:
     doc 4 §4.7 可选辅助交付：不生成 Embedding、不调用模型、不执行业务 SQL；
     依赖不可用明确失败；数量为零只说明未发布或空集合，不以“非零”替代
     完整就绪验收。来源登记核验（db_source_info 存在性）由 doc 2 装配层
-    承接，此处仅做 UUID 格式校验（差异见交付说明）。
+    承接，此处仅做短 ID 格式校验（差异见交付说明）。
     """
 
     from src.modules.db_deepagent.source_registry import (
@@ -529,8 +532,9 @@ def _render_result(result) -> None:
 class _Session:
     """一次 CLI 会话的装配：services + persistence + agent + runner。
 
-    source_id 为平台登记 UUID（doc 4 §4.7）：CLI 会话在构造服务前显式接收
-    并验证，服务绑定来源不可变；同一 CLI 会话内复用（chat 允许），退出释放。
+    source_id 为平台登记短 ID（doc 5.1 §1 + doc 4 §4.7）：CLI 会话在构造
+    服务前显式接收并验证，服务绑定来源不可变；同一 CLI 会话内复用
+    （chat 允许），退出释放。
     """
 
     def __init__(
@@ -1011,7 +1015,7 @@ def main(argv: list[str] | None = None) -> int:
     p_query.add_argument(
         "--source-id",
         required=True,
-        help="平台登记 source_id（UUID，必填；不自动选源、不回退全图）",
+        help="平台登记 source_id（短 ID 形如 db_src_1，必填；不自动选源、不回退全图）",
     )
     p_query.add_argument("--show-trace", action="store_true", help="显示工具调用轨迹")
 
@@ -1020,7 +1024,7 @@ def main(argv: list[str] | None = None) -> int:
     p_chat.add_argument(
         "--source-id",
         required=True,
-        help="平台登记 source_id（UUID，必填；不自动选源、不回退全图）",
+        help="平台登记 source_id（短 ID 形如 db_src_1，必填；不自动选源、不回退全图）",
     )
 
     p_acc = sub.add_parser("acceptance", help="验收题集运行（§18.4）")

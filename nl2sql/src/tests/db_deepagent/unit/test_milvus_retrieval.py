@@ -17,8 +17,10 @@ from src.modules.db_deepagent.services.milvus_retrieval import DbMilvusRetrieval
 
 pytestmark = pytest.mark.unit
 
-SOURCE_A = "11111111-1111-4111-8111-111111111111"
-SOURCE_B = "22222222-2222-4222-8222-222222222222"
+# doc 5.1 §1 短 ID 夹具（doc 12.2 M-1：合法来源为 db_src_N；UUID 输入非法）
+SOURCE_A = "db_src_1"
+SOURCE_B = "db_src_2"
+UUID_SOURCE = "11111111-1111-4111-8111-111111111111"
 
 
 class _FakeHit:
@@ -317,8 +319,19 @@ class TestSourceFilter:
             mr, "utility", _FakeUtility(_config_collections(db_agent_config))
         )
         monkeypatch.setattr(mr, "Collection", lambda name, using: _FakeCollection())
-        with pytest.raises(ValueError, match="UUID"):
+        with pytest.raises(ValueError, match="短 ID"):
             DbMilvusRetrieval(db_agent_config, embedding=None, source_id="abc")
+
+    def test_uuid_source_id_rejected(self, monkeypatch, db_agent_config):
+        """doc 12.2 M-1：UUID 属非法来源（合法身份为 db_src_N 短 ID）。"""
+        monkeypatch.setattr(mr, "connections", _FakeConnections())
+        monkeypatch.setattr(mr, "milvus_db", _FakeMilvusDb())
+        monkeypatch.setattr(
+            mr, "utility", _FakeUtility(_config_collections(db_agent_config))
+        )
+        monkeypatch.setattr(mr, "Collection", lambda name, using: _FakeCollection())
+        with pytest.raises(ValueError, match="短 ID"):
+            DbMilvusRetrieval(db_agent_config, embedding=None, source_id=UUID_SOURCE)
 
     def test_constructor_failure_disconnects_own_alias(
         self, monkeypatch, db_agent_config

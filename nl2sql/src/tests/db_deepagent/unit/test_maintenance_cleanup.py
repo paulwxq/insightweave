@@ -639,7 +639,7 @@ def _web_registration(store, sid):
     webstore = WebStore(store)
     record = webstore.new_registration(
         session_id=sid,
-        source_id="11111111-1111-1111-1111-111111111111",
+        source_id="db_src_1",  # doc 5.1 §1 短 ID：归属校验要求合法 db_src_N
         source_fingerprint="fp",
         knowledge_snapshot={},
         creation_id="create_" + "a" * 27,

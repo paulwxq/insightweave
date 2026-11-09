@@ -21,8 +21,10 @@ from src.modules.db_deepagent.services.join_graph import JoinGraphService
 
 pytestmark = pytest.mark.unit
 
-SOURCE_A = "11111111-1111-4111-8111-111111111111"
-SOURCE_B = "22222222-2222-4222-8222-222222222222"
+# doc 5.1 §1 短 ID 夹具（doc 12.2 N-1：合法来源为 db_src_N；UUID 输入非法）
+SOURCE_A = "db_src_1"
+SOURCE_B = "db_src_2"
+UUID_SOURCE = "11111111-1111-4111-8111-111111111111"
 
 
 class _FakeNode:
@@ -301,5 +303,11 @@ class TestSourceScoping:
 
     def test_invalid_source_id_rejected(self):
         mgr = FakeNeo4jManager({"tables": set()})
-        with pytest.raises(ValueError, match="UUID"):
-            JoinGraphService(mgr, source_id="not-a-uuid")
+        with pytest.raises(ValueError, match="短 ID"):
+            JoinGraphService(mgr, source_id="not-a-short-id")
+
+    def test_uuid_source_id_rejected(self):
+        """doc 12.2 N-1：UUID 属非法来源（合法身份为 db_src_N 短 ID）。"""
+        mgr = FakeNeo4jManager({"tables": set()})
+        with pytest.raises(ValueError, match="短 ID"):
+            JoinGraphService(mgr, source_id=UUID_SOURCE)
