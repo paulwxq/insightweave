@@ -249,10 +249,10 @@ class DefaultReadinessBackend:
         try:
             for record in milvus.iter_source_records(
                 "table_schema",
-                ["object_id", "parent_id", "object_type", "publish_id"],
+                ["object_id", "parent_id", "object_type", "publish_run_id"],
             ):
-                publish_id = _as_str(record.get("publish_id"))
-                facts.table_publish_ids.add(publish_id)
+                publish_run_id = _as_str(record.get("publish_run_id"))
+                facts.table_publish_run_ids.add(publish_run_id)
                 object_id = record.get("object_id")
                 if record.get("object_type") == "table":
                     key = strict_table_key(object_id, db_name)
@@ -273,15 +273,19 @@ class DefaultReadinessBackend:
                         facts.column_parent_mismatch += 1
                     facts.column_keys.add(parsed)
             for record in milvus.iter_source_records(
-                "dim_value", ["col_id", "publish_id"]
+                "dim_value", ["col_id", "publish_run_id"]
             ):
                 facts.dim_value_count += 1
-                facts.dim_value_publish_ids.add(_as_str(record.get("publish_id")))
+                facts.dim_value_publish_run_ids.add(
+                    _as_str(record.get("publish_run_id"))
+                )
             for record in milvus.iter_source_records(
-                "sql_example", ["example_id", "publish_id"]
+                "sql_example", ["example_id", "publish_run_id"]
             ):
                 facts.sql_example_count += 1
-                facts.sql_example_publish_ids.add(_as_str(record.get("publish_id")))
+                facts.sql_example_publish_run_ids.add(
+                    _as_str(record.get("publish_run_id"))
+                )
         except ReadinessError:
             raise
         except Exception as exc:  # noqa: BLE001
@@ -308,12 +312,12 @@ class DefaultReadinessBackend:
                     result = session.run(
                         f"MATCH (n:{label}) WHERE n.source_id = $sid "
                         "RETURN n.entity_id AS entity_id, n.id AS id, "
-                        "n.publish_id AS publish_id",
+                        "n.publish_run_id AS publish_run_id",
                         sid=source_id,
                     )
                     for record in result:
-                        publish_id = _as_str(record.get("publish_id"))
-                        facts.publish_ids.add(publish_id)
+                        publish_run_id = _as_str(record.get("publish_run_id"))
+                        facts.publish_run_ids.add(publish_run_id)
                         entity_id = record.get("entity_id")
                         logical = _source_logical(entity_id, source_id)
                         if logical is not None:
@@ -370,11 +374,11 @@ class DefaultReadinessBackend:
                 edge_result = session.run(
                     "MATCH ()-[r]->() WHERE r.source_id = $sid "
                     "AND type(r) IN ['HAS_COLUMN', 'JOIN_ON'] "
-                    "RETURN DISTINCT r.publish_id AS pid",
+                    "RETURN DISTINCT r.publish_run_id AS pid",
                     sid=source_id,
                 )
                 for record in edge_result:
-                    facts.publish_ids.add(_as_str(record.get("pid")))
+                    facts.publish_run_ids.add(_as_str(record.get("pid")))
         except Exception as exc:  # noqa: BLE001
             raise ReadinessError(f"Neo4j 按源读取失败: {type(exc).__name__}") from exc
         finally:

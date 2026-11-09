@@ -159,7 +159,7 @@ class TestCreateSession:
         def wrapped(sid):
             state["n"] += 1
             if state["n"] > 2:
-                web_env.backend.publish_id_rel = "pub-rel-2"
+                web_env.backend.publish_run_id_rel = "pub-rel-2"
             return orig(sid)
 
         web_env.backend.load_publish_records = wrapped
@@ -348,7 +348,7 @@ class TestExecuteQuery:
 
     def test_snapshot_change_invalidates_session(self, web_env, web_session):
         sid = web_session["session_id"]
-        web_env.backend.publish_id_rel = "pub-rel-9"
+        web_env.backend.publish_run_id_rel = "pub-rel-9"
         with pytest.raises(codes.WebApiError) as ei:
             execute_web_query(
                 web_env.runtime, session_id=sid, question="问", source_id=SOURCE_ID
@@ -732,7 +732,7 @@ class TestFinalizeHook:
         sid = web_session["session_id"]
         writer = _Writer()
         hook, holder, _ = self._hook(web_env, results=object(), snapshot_writer=writer)
-        web_env.backend.publish_id_ts = "pub-ts-2"  # 知识变化 → unsafe 分支
+        web_env.backend.publish_run_id_ts = "pub-ts-2"  # 知识变化 → unsafe 分支
         hook(
             question="问",
             request_id="req_" + "7" * 28,
@@ -755,7 +755,7 @@ class TestFinalizeHook:
         request_id = "req_" + "1" * 28
         hook, holder, webstore = self._hook(web_env)
         self._setup_pending(webstore, sid, request_id)
-        web_env.backend.publish_id_ts = "pub-ts-2"  # 快照变化
+        web_env.backend.publish_run_id_ts = "pub-ts-2"  # 快照变化
         result = make_result(session_id=sid, request_id=request_id)
         replacement = hook(
             question="问",

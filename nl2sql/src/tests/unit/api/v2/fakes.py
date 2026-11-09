@@ -182,18 +182,18 @@ class FakeBackend:
         self.lookup_status = "ok"
         self.lookup_detail = ""
         self.workspace_id = "ws-1"
-        self.publish_id_ts: str = "pub-ts-1"
-        self.publish_id_rel: Optional[str] = "pub-rel-1"
+        self.publish_run_id_ts: str = "pub-ts-1"
+        self.publish_run_id_rel: Optional[str] = "pub-rel-1"
         self.optional_steps: dict[str, Optional[str]] = {}
         self.milvus = MilvusFacts(
             table_keys={"ordersdb.public.orders"},
             column_keys={("ordersdb.public.orders", "id")},
-            table_publish_ids={self.publish_id_ts},
+            table_publish_run_ids={self.publish_run_id_ts},
         )
         self.neo4j = Neo4jFacts(
             table_keys={"ordersdb.public.orders"},
             column_keys={("ordersdb.public.orders", "id")},
-            publish_ids={self.publish_id_rel},
+            publish_run_ids={self.publish_run_id_rel},
             has_column_pairs={("ordersdb.public.orders", "id")},
             has_column_count=1,
         )
@@ -206,26 +206,26 @@ class FakeBackend:
             {
                 "step_name": "table_schema",
                 "status": "success",
-                "publish_run_id": self.publish_id_ts,
+                "publish_run_id": self.publish_run_id_ts,
                 "workspace_id": self.workspace_id,
                 "published_at": "2026-10-01T00:00:00+00:00",
             },
             {
                 "step_name": "rel",
                 "status": "success",
-                "publish_run_id": self.publish_id_rel,
+                "publish_run_id": self.publish_run_id_rel,
                 "workspace_id": self.workspace_id,
                 "published_at": "2026-10-01T00:00:00+00:00",
             },
         ]
-        for step, publish_id in self.optional_steps.items():
-            if publish_id is None:
+        for step, publish_run_id in self.optional_steps.items():
+            if publish_run_id is None:
                 continue
             rows.append(
                 {
                     "step_name": step,
                     "status": "success",
-                    "publish_run_id": publish_id,
+                    "publish_run_id": publish_run_id,
                     "workspace_id": self.workspace_id,
                     "published_at": "2026-10-01T00:00:00+00:00",
                 }

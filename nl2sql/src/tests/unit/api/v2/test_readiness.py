@@ -181,7 +181,7 @@ class TestFullCheck:
 
     def test_missing_rel_current(self):
         backend = FakeBackend()
-        backend.publish_id_rel = None
+        backend.publish_run_id_rel = None
         rows = [r for r in backend._rows() if r["step_name"] != "rel"]
         backend._rows = lambda: rows
         outcome = self._service(backend).full_check("db_src_1")
@@ -199,11 +199,38 @@ class TestFullCheck:
         # 重复行使该步骤解析为无有效记录：不得判就绪
         assert outcome.ready is False
 
+    def test_cross_workspace_steps_allowed(self):
+        """doc 12.2 PG-1：table_schema 与 rel 来自不同工作区/发布运行合法
+        （不要求相等）；实际下游版本须分别匹配各自 publish_run_id。"""
+        backend = FakeBackend()
+        rel_row = {
+            "step_name": "rel",
+            "status": "success",
+            "publish_run_id": "pub-rel-ws9",
+            "workspace_id": "ws-9",
+            "published_at": "2026-10-02T00:00:00+00:00",
+        }
+        rows = [r if r["step_name"] != "rel" else rel_row for r in backend._rows()]
+        backend._rows = lambda: rows
+        # 图实际版本跟随 rel 步骤的新发布运行（一致性检查按各自步骤核对）
+        backend.neo4j.publish_run_ids = {"pub-rel-ws9"}
+        outcome = self._service(backend).full_check("db_src_1")
+        assert outcome.ready is True
+        assert outcome.knowledge_snapshot["rel"] == ["ws-9", "pub-rel-ws9"]
+        assert outcome.knowledge_snapshot["table_schema"] == ["ws-1", "pub-ts-1"]
+        publish_check = [c for c in outcome.checks if c["name"] == "publish_records"]
+        assert publish_check and publish_check[0]["state"] == "pass"
+        # doc 12.2 PG-1 回归锁定：旧 job_id 比较恢复时（counts={"job_id": 1}
+        # / 文案含"同作业"）此处失败——仅改 workspace_id 的用例本身在旧
+        # 代码下也会通过（job_id 双 None 恒等），必须靠这两行锁定删除
+        assert publish_check[0]["counts"] is None
+        assert "同作业" not in publish_check[0]["message"]
+
     def test_milvus_empty_tables(self):
         backend = FakeBackend()
         backend.milvus.table_keys = set()
         backend.milvus.column_keys = set()
-        backend.milvus.table_publish_ids = set()
+        backend.milvus.table_publish_run_ids = set()
         outcome = self._service(backend).full_check("db_src_1")
         assert outcome.terminal_error_code == "knowledge_missing"
 
@@ -225,9 +252,9 @@ class TestFullCheck:
         outcome = self._service(backend).full_check("db_src_1")
         assert outcome.terminal_error_code == "knowledge_inconsistent"
 
-    def test_publish_id_residual_rejected(self):
+    def test_publish_run_id_residual_rejected(self):
         backend = FakeBackend()
-        backend.milvus.table_publish_ids = {"pub-ts-1", "pub-old"}
+        backend.milvus.table_publish_run_ids = {"pub-ts-1", "pub-old"}
         outcome = self._service(backend).full_check("db_src_1")
         assert outcome.terminal_error_code == "knowledge_inconsistent"
 
@@ -291,17 +318,17 @@ class TestFullCheck:
     def test_optional_residual_blocks_ready(self):
         backend = FakeBackend()
         backend.milvus.dim_value_count = 2
-        backend.milvus.dim_value_publish_ids = {"pub-dim-old"}
+        backend.milvus.dim_value_publish_run_ids = {"pub-dim-old"}
         outcome = self._service(backend).full_check("db_src_1")
         dims = [c for c in outcome.checks if c["name"] == "dim_value"]
         assert dims and dims[0]["state"] == "fail"
         assert dims[0]["required"] is False
         assert not outcome.ready  # 残留/混批阻止使用（doc 2 §5.5）
 
-    def test_optional_data_without_publish_ids_fails(self):
+    def test_optional_data_without_publish_run_ids_fails(self):
         backend = FakeBackend()
         backend.milvus.dim_value_count = 2
-        backend.milvus.dim_value_publish_ids = set()  # 有数据但缺 publish_id
+        backend.milvus.dim_value_publish_run_ids = set()  # 有数据但缺 publish_run_id
         outcome = self._service(backend).full_check("db_src_1")
         dims = [c for c in outcome.checks if c["name"] == "dim_value"]
         assert dims and dims[0]["state"] == "fail"

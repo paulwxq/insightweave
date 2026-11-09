@@ -118,10 +118,10 @@ class MilvusFacts:
 
     table_keys: set[str] = field(default_factory=set)
     column_keys: set[tuple[str, str]] = field(default_factory=set)
-    table_publish_ids: set[str] = field(default_factory=set)
-    dim_value_publish_ids: set[str] = field(default_factory=set)
+    table_publish_run_ids: set[str] = field(default_factory=set)
+    dim_value_publish_run_ids: set[str] = field(default_factory=set)
     dim_value_count: int = 0
-    sql_example_publish_ids: set[str] = field(default_factory=set)
+    sql_example_publish_run_ids: set[str] = field(default_factory=set)
     sql_example_count: int = 0
     unparseable: int = 0
     # 列记录的 parent_id 与列键表前缀不一致的条数（doc 2 §5.5 父子归属核对）
@@ -132,7 +132,7 @@ class MilvusFacts:
 class Neo4jFacts:
     table_keys: set[str] = field(default_factory=set)
     column_keys: set[tuple[str, str]] = field(default_factory=set)
-    publish_ids: set[str] = field(default_factory=set)
+    publish_run_ids: set[str] = field(default_factory=set)
     # HAS_COLUMN 端点有效的 (表键, 列) 对集合；端点解析失败或父子不符计入
     # has_column_invalid（doc 2 §5.5：图验收要求 Column/HAS_COLUMN 归属有效）
     has_column_pairs: set[tuple[str, str]] = field(default_factory=set)
@@ -144,7 +144,8 @@ class Neo4jFacts:
 
 @dataclass
 class PublishRecords:
-    """平台 publish_info 的本源记录（参数化只读查询）。"""
+    """平台发布视图（vw_workspace_latest_successful_publish）的本源记录
+    （参数化只读查询；doc 6.2 §10.2 源级最近成功）。"""
 
     rows: list[dict[str, Any]] = field(default_factory=list)
 
@@ -457,24 +458,15 @@ class ReadinessService:
             )
             return self._outcome(source_id, compatible, False, checks)
         assert ts_current is not None and rel_current is not None
-        if str(ts_current.get("job_id")) != str(rel_current.get("job_id")):
-            checks.append(
-                _check(
-                    "publish_records",
-                    True,
-                    "fail",
-                    "table_schema 与 rel 的当前发布不属于同一作业",
-                    "knowledge_inconsistent",
-                )
-            )
-            return self._outcome(source_id, compatible, False, checks)
+        # doc 12.2 PG-1：旧 job_id 比较已删除——doc 6.2 §10.2 允许同源不同
+        # 步骤来自不同工作区/发布运行，不要求相等；实际下游发布版本在
+        # knowledge_consistency 分别与各自 publish_run_id 核对
         checks.append(
             _check(
                 "publish_records",
                 True,
                 "pass",
-                "table_schema/rel 同作业且各有当前发布",
-                counts={"job_id": 1},
+                "table_schema/rel 各有源级最近成功发布（可为不同工作区/运行）",
             )
         )
 
@@ -660,7 +652,7 @@ class ReadinessService:
         # 实际发布运行标识与源级最近成功记录一致（残留/混批拒绝）
         expected_ts = str(ts_current.get("publish_run_id"))
         expected_rel = str(rel_current.get("publish_run_id"))
-        if milvus.table_publish_ids != {expected_ts}:
+        if milvus.table_publish_run_ids != {expected_ts}:
             checks.append(
                 _check(
                     "knowledge_consistency",
@@ -668,11 +660,11 @@ class ReadinessService:
                     "fail",
                     "Milvus table_schema 实际版本与当前发布记录不一致",
                     "knowledge_inconsistent",
-                    counts={"publish_ids": len(milvus.table_publish_ids)},
+                    counts={"publish_run_ids": len(milvus.table_publish_run_ids)},
                 )
             )
             return self._outcome(source_id, compatible, False, checks)
-        if neo4j.publish_ids != {expected_rel}:
+        if neo4j.publish_run_ids != {expected_rel}:
             checks.append(
                 _check(
                     "knowledge_consistency",
@@ -680,7 +672,7 @@ class ReadinessService:
                     "fail",
                     "Neo4j 实际版本与当前发布记录不一致",
                     "knowledge_inconsistent",
-                    counts={"publish_ids": len(neo4j.publish_ids)},
+                    counts={"publish_run_ids": len(neo4j.publish_run_ids)},
                 )
             )
             return self._outcome(source_id, compatible, False, checks)
@@ -701,18 +693,18 @@ class ReadinessService:
         )
 
         # 6) 可选知识（dim_value/sql_example）：按实际行数判空（空为 warn，
-        # 正常缺省放行）；非空必须通过实际 publish_id 核对，残留/混批或
-        # 缺少 publish_id 为 fail 并阻止使用（doc 2 §5.5）
+        # 正常缺省放行）；非空必须通过实际 publish_run_id 核对，残留/混批
+        # 或缺少 publish_run_id 为 fail 并阻止使用（doc 2 §5.5）
         for name, facts_ids, count, step in (
             (
                 "dim_value",
-                milvus.dim_value_publish_ids,
+                milvus.dim_value_publish_run_ids,
                 milvus.dim_value_count,
                 "dim_value",
             ),
             (
                 "sql_example",
-                milvus.sql_example_publish_ids,
+                milvus.sql_example_publish_run_ids,
                 milvus.sql_example_count,
                 "sql",
             ),
@@ -762,7 +754,7 @@ class ReadinessService:
                         "fail",
                         f"{name} 实际版本与当前发布记录不一致（残留或混批）",
                         "knowledge_inconsistent",
-                        counts={name: count, "publish_ids": len(facts_ids)},
+                        counts={name: count, "publish_run_ids": len(facts_ids)},
                     )
                 )
                 continue
@@ -802,7 +794,7 @@ class ReadinessService:
             "neo4j_tables": len(neo4j.table_keys),
         }
         # 到达此处时必需检查的失败均已提前返回；剩余任何 fail（业务库实际
-        # 检查、可选知识残留/混批/缺 publish_id）按 doc 2 §5.5 一律阻止
+        # 检查、可选知识残留/混批/缺 publish_run_id）按 doc 2 §5.5 一律阻止
         # 就绪，仅 warn（可选知识正常缺省）放行
         ready = not any(c["state"] == "fail" for c in checks)
         outcome = self._outcome(source_id, compatible, ready, checks)
