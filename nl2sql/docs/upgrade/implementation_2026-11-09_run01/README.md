@@ -120,3 +120,12 @@
 ## I. 主协调者第 2 轮独立审核
 
 结论：依赖与必要代码升级通过审核，无新增业务实现问题，无需第 3 轮。I1-01 的 PG 受控样本兼容性证据已补强；I1-02 的结论范围已收窄，主协调者进一步将 doc 1 的聚合持久化验收项保留为未全部完成；I1-03 专项脚本与输出已归档。实际未覆盖项继续保留在 §F，不宣称全路径验收或可发布。详细核查见 [parent-review-round2.md](parent-review-round2.md)，服务运行记录以 §G 和 `parent-review-round2-service.json` 为准。
+
+## J. 旧前端已清理后的重放边界（2026-11-10 追加）
+
+本目录录制时的仓库仍含 Streamlit 旧前端（`nl2sql/frontend/`）与 `web` 可选依赖；两者已于 2026-11-10 按 [nl2sql/docs/3_NL2SQL旧前端清理设计.md](../../3_NL2SQL旧前端清理设计.md) 清理。由此产生的重放边界：
+
+- `streamlit_apptest.py` 依赖当时存在的 `nl2sql/frontend/app.py` 与含 Streamlit 的旧依赖环境；在新环境不可直接运行，需恢复当时源码与依赖环境才能重放。
+- `pandas_probe.py` 探测的 pandas 构造行为与 Streamlit 页面无直接关系，但同样以当时环境为前提。
+- 本目录的 pyproject/lock 副本、包清单、日志与验收结论保留 2026-11-09 时点语义，不因后续清理改写；当时的 Streamlit 冒烟记录（§D10）是历史证据，不作为当前 Vue 验收依据。
+- 不为重放旧脚本而重新安装 Streamlit。

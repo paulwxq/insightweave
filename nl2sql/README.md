@@ -151,16 +151,11 @@ MetaWeave 分析源表的结构与关联关系，并生成以下 RAG 数据：
 git clone https://github.com/your-org/nl2sql-v3.git
 cd nl2sql-v3
 
-# 创建虚拟环境并安装依赖
-uv venv .venv
-source .venv/bin/activate   # Linux / macOS
-# .venv\Scripts\activate    # Windows
-
-uv pip install -e .
-
-# 安装开发依赖（可选）
-uv pip install -e ".[dev]"
+# 按锁定文件同步模块环境（按需选择 extras：dev=pytest/black/ruff，monitoring=langsmith）
+uv sync --python 3.12 --locked --extra dev --extra monitoring
 ```
+
+原迁移期保留的 `web` 可选依赖（Streamlit 旧页面）已于 2026-11-10 随旧前端清理移除，见 [docs/3_NL2SQL旧前端清理设计.md](docs/3_NL2SQL旧前端清理设计.md)。
 
 ---
 
@@ -237,21 +232,29 @@ langgraph_persistence:
 
 ## 启动服务
 
-### 启动 API 服务
+### 当前 Web 入口（统一 Vue 前端 + /api/v2）
+
+产品前端为仓库根目录的统一 Vue 应用（查询页 `/query`），NL2SQL 后端仅挂载 `/api/v2`。启动命令、端口约定（NL2SQL `127.0.0.1:8008`）与环境变量见根目录 [docs/1_服务启动指南.md](../docs/1_服务启动指南.md)：
 
 ```bash
-uvicorn src.api.main:app --host 0.0.0.0 --port 8000 --reload
+uv run --no-sync uvicorn src.api.main:app --host 127.0.0.1 --port 8008
 ```
 
-### 快速验证
+接口为 `/api/v2/*`（health、按源 readiness、会话/问答/结果分页/CSV 导出），完整清单见启动指南接口表。
+
+### 旧链路历史参考（/api/v1 与旧父图）
+
+以下内容为迁移期之前的旧 `/api/v1` 用法，当前应用已不挂载这些路由（`src/api/main.py` 仅挂载 v2），仅作旧父图脚本对照的历史参考：
 
 ```bash
+# 历史命令示例（路由已不挂载，不可用于当前验证）
+uvicorn src.api.main:app --host 0.0.0.0 --port 8000 --reload
 curl -X POST http://localhost:8000/api/v1/query \
   -H "Content-Type: application/json" \
   -d '{"query": "查询2024年各月的销售额", "user_id": "demo"}'
 ```
 
-### Python 直接调用
+### Python 直接调用（旧父图脚本入口）
 
 ```python
 from src.modules.nl2sql_father.graph import run_nl2sql_query
@@ -268,7 +271,9 @@ print(result["execution_results"])  # 原始行列数据
 
 ---
 
-## API 文档
+## API 文档（历史：旧 `/api/v1`）
+
+以下为迁移期之前的旧 `/api/v1` 接口记录，当前应用已不挂载（见上文旧链路历史参考）；当前 Web 接口为 `/api/v2/*`，清单见 [docs/1_服务启动指南.md](../docs/1_服务启动指南.md)。
 
 ### POST `/api/v1/query`
 
@@ -403,7 +408,7 @@ uv run pytest src/tests/integration/ -v
 - [x] 多层 SQL 验证 + 自动重试
 - [x] **Phase 2 — Complex Path**：多步依赖 SQL 查询，支持并行执行
 - [ ] 流式 API 响应
-- [x] Web 界面（Streamlit）
+- [x] Web 界面（统一 Vue 前端 `/query`；旧 Streamlit 页面已于 2026-11-10 清理，见 [docs/3](docs/3_NL2SQL旧前端清理设计.md)）
 - [ ] LangSmith 可观测性集成
 
 ---

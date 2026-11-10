@@ -58,7 +58,7 @@ doc 4 已交付源登记解析与解密、按源运行配置、Milvus 六入口�
 
 ### 2.3 Streamlit 功能及保留范围
 
-依据：[Streamlit 页面](../nl2sql/frontend/app.py)、[Python API 客户端](../nl2sql/frontend/api_client.py)。
+依据（2026-11-10 旧前端清理前）：`nl2sql/frontend/app.py`（Streamlit 页面，已删除）、`nl2sql/frontend/api_client.py`（Python API 客户端，已删除）。下表保留迁移期功能对照的历史语义，清理设计与实施记录见 [nl2sql/docs/3](../nl2sql/docs/3_NL2SQL旧前端清理设计.md)。另注：历史展示此后已随实现演进——turns 现返回问答文本及可回放的 SQL/结果引用 display，不再限于仅 question/answer，以当前代码为准。CSV 结果导出亦已实现（`exportResultCsv` 与 `/results/{result_ref}/export` 路由），下文"首版默认不新增……结果下载……"仅具历史范围含义。
 
 | 当前功能 | 已有行为 | Vue 首版建议 |
 | --- | --- | --- |
@@ -651,7 +651,7 @@ request_id 为服务端权威标识，重复标识拒绝仅用于防覆盖，不
 | P2 最小查询流程 | 模块路由、双 origin、源选择、新建/提问、答案、当前轮 SQL 与表格 | 选择两个源分别查询，结果与来源一致 |
 | P3 多轮与历史 | checkpoint 续聊、会话列表、仅问题/答案恢复、线程轮换、history_saved 保存状态提示 | 刷新/切换不串源不串会话；历史响应与页面均无 SQL、结果引用或表格 |
 | P4 回归和收尾 | MetaWeave 页面只读回归、新查询正常及失败验收、旧父图脚本独立对比，更新文档 | Vue 只调用新链，旧父图脚本可独立执行 |
-| P5 清理 Streamlit | 功能确认覆盖后，删除内部 Streamlit 入口、专用依赖和失效说明 | 清理单独提交，后端与 Vue 不受影响 |
+| P5 清理 Streamlit | 功能确认覆盖后，删除内部 Streamlit 入口、专用依赖和失效说明 | 清理单独提交，后端与 Vue 不受影响。**2026-11-10 已实施**（入口、web 依赖与失效说明均已移除，见 [nl2sql/docs/3](../nl2sql/docs/3_NL2SQL旧前端清理设计.md)实施记录） |
 
 多源已经确认，doc 4 的代码交付作为当前基线；进入 P2 真实查询验收前，还须确认目标知识库完成适用的迁移、重新发布 rel 及双源行为验收。迁移维护和 Web 开发可分别安排，代码单测通过不能代替目标图库的身份、约束和实际发布验证。本次不做登录，源绑定和结果归属校验仍须保留。
 

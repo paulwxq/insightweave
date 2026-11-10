@@ -1,7 +1,7 @@
 # NL2SQL 旧前端清理设计
 
 - 编写日期：2026-11-10。
-- 状态：设计稿，基于当前工作区代码分析；本轮只新增本文，未执行删除、依赖同步或业务验收。
+- 状态：**已实施（2026-11-10）**——旧文件删除、`web` extra 与锁清理、文档同步、既有回归与前端检查完成；真实联调验收结果与遗留项见第 11 节实施记录。设计分析基于实施前工作区代码。
 - 对应规划：[0_项目后续规划与实施顺序](0_项目后续规划与实施顺序.md)第 1 阶段。
 - 路径约定：除链接外，本文文件路径均相对于仓库根目录 `/opt/projects/insightweave/`。
 
@@ -40,7 +40,7 @@ nl2sql/frontend/app.py
       └── 旧 history 路由 → chat_history_reader（历史持久化读取）
 ```
 
-依据：[旧页面](../frontend/app.py)、[旧客户端](../frontend/api_client.py)、[旧配置](../frontend/.streamlit/config.toml)。这些链接用于清理前定位，源文件删除后不再作为有效源码入口。
+依据（清理前定位，源文件已于 2026-11-10 删除）：`nl2sql/frontend/app.py`（旧页面）、`nl2sql/frontend/api_client.py`（旧客户端）、`nl2sql/frontend/.streamlit/config.toml`（旧配置）。原文中以链接形式指向这三处的内容已改为历史路径文字。
 
 扫描未发现 `nl2sql/src/`、`nl2sql/scripts/` 或普通测试代码导入旧前端客户端。归档的 `streamlit_apptest.py` 明确引用旧页面，属于历史证据，处理见第 6 节。
 
@@ -361,3 +361,45 @@ Kimi 审核循环在第 2 轮结束，无需第 3 轮。通过 Orca 的现有 Ki
 结论：**PASS**。D1-01 至 D1-04 均已正确、充分处置；全文复查未发现新增或遗留实质问题、范围扩大或过度设计，主动终止的原验收要求仍保留。
 
 DeepSeek 审核循环在第 2 轮结束，无需第 3 轮。第一轮通过 `orchestration worker-start` 委托现有 `deepseek-claude` tab；第二轮监督接口续接失败，重新绑定也返回 `agent_unconfigured`，确认未发送后改用 `terminal send` 向同一会话提交复审，并读取完整报告。未更换 agent，本次仅修订本文与审核记录，未实施旧前端清理。
+
+## 11. 实施记录（2026-11-10）
+
+实施由 Orca 协调者委派当前 Claude pane 执行，依据本文与既有授权，未新增确认循环。基线为协调者备份 `/tmp/insightweave-doc3-implementation-d0h5zbvv/`（HEAD `975977db`，当时工作区干净）；实施前重新核对，工作区与基线一致、无并发改动。
+
+### 11.1 实际改动（11 个文件，与第 2 节范围一致）
+
+- 删除 `nl2sql/frontend/app.py`、`api_client.py`、`.streamlit/config.toml` 及 `__pycache__/api_client.cpython-312.pyc`，目录清点后移除（无未知文件）。git 呈现 `D`×3；编译缓存本就不被跟踪。
+- `nl2sql/pyproject.toml` 移除 `web` extra；普通 `uv lock` 更新 `nl2sql/uv.lock`。
+- 文档同步：`docs/1_服务启动指南.md`（删 8501 端口行/Streamlit 启动节/排障条目，改依赖说明，接口表补 export 与 evidence 回放）、`nl2sql/README.md`（安装改 uv 锁定同步、启动改 v2+根指南、旧 `/api/v1` 内容标注历史、路线图改 Vue）、`docs/2_NL2SQL_Vue接入设计.md`（失效源码链接改历史路径文字、P5 标注已实施、历史展示与 CSV 导出演进注记）、`nl2sql/docs/0_项目后续规划与实施顺序.md`（第 1 阶段子项状态：清理已实施、终止未实现、阶段未完成）、run01 README 追加 §J 重放边界、本文状态行与依据行更新。
+
+### 11.2 锁差异（对照基线锁逐项）
+
+移除 15 个包且仅此 15 个：`streamlit`、`altair`、`pydeck`、`watchdog`、`pyarrow`、`pillow`、`jinja2`、`markupsafe`、`jsonschema`、`jsonschema-specifications`、`referencing`、`rpds-py`、`narwhals`、`itsdangerous`、`python-multipart`（全部因失去旧 UI 依赖路径；锁条目 134→119）。**零新增、零版本变化**；`pandas`、`requests` 按 §3.2 预期经 `pymilvus` 等保留。根项目锁元数据已无 web extra，锁内 Streamlit 引用 0 处。
+
+### 11.3 验证结果
+
+- 后端回归（`uv run --no-sync pytest src/tests/unit/api/v2/ src/tests/db_deepagent/unit/ -q`）：基线 **787 passed / 4 skipped / exit 0**，实施后同为 **787 / 4 / 0**，零新增失败；证据 `/tmp/doc3-cleanup-implementation/logs/`。
+- 当前环境：`uv lock --check`、`uv sync --locked --extra dev --extra monitoring`、`uv pip check`（116 包兼容）、`find_spec("streamlit") is None` 全部通过。
+- 新临时环境按新锁安装：`pip check` 兼容、streamlit 缺席、同范围回归 **787 / 4 / 0**，与旧环境一致。
+- 前端：`npm run typecheck` ✓、`npm run build` ✓（1.58s）、三个 Node 测试 **10/10 pass**。
+- §8.1 复扫：运行代码零匹配；使用说明仅余 4 处带日期的清理状态记录（属允许的历史说明）。
+- 真实接口验收（自起临时服务 8008/8001/5173，验收后已全部清理）：health 200；`db_src_1` readiness 全项 pass；API 建会话→真实提问（5 次模型调用，"500 条订单"）→同会话追问（"2024 年 0 条"，上下文正确；注意该轮是 COUNT 返回单行值 0 的正常结果，不是空结果集）→ turns 2 轮含 evidence→ 单行结果 offset=1 越界返回空（仅作分页边界检查）→ export HTTP 200 CSV 内容正确。
+- 浏览器验收（ego-browser）：选源→就绪提示→新建会话（URL 进入 `/query/s_*`）→提问（答案"98 个不同客户"+表格+耗时）→查看 SQL（`SELECT COUNT(DISTINCT user_id)`）→刷新后问答/标题/SQL 入口完整恢复→切换到另一会话两轮内容各自恢复→MetaWeave 数据源管理页正常（db_src_1 在列）→performance 核验 **0 次 8501//api/v1 请求**、/api/v2 请求 4+ 次→导出按钮点击无错误（API 级 CSV 已验）。
+- C1 复审补测（2026-11-10，全部零生产代码改动，测试替身仅注入浏览器运行时）：**多页翻页（真实 500 行列表）**——API 分页 page1/page2/page5（limit=100）行值边界与 `has_more`/`next_offset` 正确（401–500 页 `has_more=false`）；浏览器首屏"已显示 10 / 共 500 条"，"查看全部"展开至 200 条封顶（展示上限 200 为既有产品行为）。**真零行结果**——"列出2024年下单的全部订单" 返回 `status: no_data`、`row_count: 0`、`rows: []`，浏览器正常展示解释性答案、无表格无异常。**查询超时分支（模拟）**——真实提交问题后以页面运行时将客户端查询定时器 480s 缩至 2.5s：客户端按预期放弃并提示"结果尚未确认，后端可能仍在执行；请勿重复提交，稍后在历史中查看"（messages.ts 对 `timeout` 本地码的映射），后端实际继续执行完成、轮次入历史（刷新后完整可见），无自动重发（会话仅 1 轮）、无"已终止"字样。
+
+### 11.4 未执行项与已知边界
+
+- **查询超时为模拟覆盖，非真实 480 秒等待**：客户端超时区分两档——普通读取默认 30 秒（`DEFAULT_TIMEOUT_MS`），问答提交显式 480 秒（`QUERY_TIMEOUT_MS`，doc 2 §7.3）。本轮以运行时定时器替身（480s→2.5s）+ 真实后端提交验证了客户端超时分支、未确认提示、后台继续执行与历史落盘；未执行真实 480 秒等待，也未实测 30 秒普通读取超时。
+- **真实查询失败状态未实测**：服务端返回 `failed`/`partial` 等失败终态时的 UI 展示路径未触发（需真实故障注入，本次不人为制造）；现有覆盖为 §8.2 fake 测试与上述模拟超时。
+- 主动终止缺口维持 §5.2 结论：未实现、未新增代码，第 1 阶段整体未完成。
+- 旧 API 测试（`tests/unit/api/test_api_routes.py`）未运行、未删除：本次改动不触及该范围，其既有失败属升级记录已登记的历史问题。
+- 根 Vue 与 MetaWeave 生产代码保持**零改动**（git 状态仅本文档列出的 11 个文件）；C1 补测全部通过临时外部手段（临时服务、浏览器运行时替身）完成，未新增测试框架或生产功能。
+
+## 12. 实施后的代码审核（2026-11-10）
+
+本节与第 10 节设计审核分开计数。按用户要求，左侧 Claude pane 实施，协调者亲自审核；最多三轮，第三轮仍有问题时交由用户判断。任务与反馈均通过 Orca `orchestration` 传递。
+
+- **第 1 轮：要求修订。** 协调者核实清理范围、依赖差异与验证日志后，提出三项问题：CSV 演进注记遗漏、将查询 480 秒超时误写为普通请求 30 秒、验收误将 COUNT=0 当空结果且单行 offset 检查不足以证明多页翻页。Claude 逐项核实后全部采纳，无拒绝项；修正文档并用临时外部手段补测，未修改现有 UI 功能。
+- **第 2 轮：PASS。** 协调者核对修订、补测证据、全仓基线哈希及当前依赖/导入检查，确认三项均已处理，无新增阻塞问题。实际变化仍限于约定的 11 个文件；根 Vue、MetaWeave 及 NL2SQL 后端业务代码未变。旧前端已删除，锁仅移除 15 包、无新增或版本变化；无 Streamlit 环境下 API 导入与接口定义检查正常。
+
+代码审核循环在第 2 轮结束，无需第 3 轮。清理代码与依赖变更通过审核；第 11.4 节未测项和主动终止缺口仍保留，不据此宣称原规划第 1 阶段整体验收完成。变更留在工作区，未执行 Git 提交。
