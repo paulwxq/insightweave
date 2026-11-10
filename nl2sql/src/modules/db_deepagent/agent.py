@@ -496,7 +496,6 @@ def build_db_agent(
     """按 §10.1 顺序装配；verify_assembly 失败即抛错（步骤 5：15 件口径）。"""
     from deepagents import create_deep_agent
     from deepagents.middleware.summarization import SummarizationMiddleware
-    from deepagents.middleware.patch_tool_calls import PatchToolCallsMiddleware
 
     from src.modules.db_deepagent.middleware import (
         FinalAnswerGateMiddleware,
@@ -577,7 +576,7 @@ def build_db_agent(
         model=model,
         system_prompt=prompts["agent"]["system_prompt"],
         tools=tools,
-        middleware=[file_mw, summary_mw, PatchToolCallsMiddleware(), *extra_mw],
+        middleware=[file_mw, summary_mw, *extra_mw],
         subagents=[],
         skills=["/skills/"],
         memory=(["/memory/memory_context.md"] if cfg.features.memory else None),
