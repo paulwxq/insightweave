@@ -41,6 +41,9 @@ logs/
 *.log
 *.pid
 
+# ===== 本地二进制样本 =====
+*.pkl
+
 # ===== 运行产物目录 =====
 # 用 **/output/**（匹配 output 内部内容）而非 output/（排除目录本身），
 # 以免父目录被忽略导致 metaweave/.gitignore 中对人工维护文件的
