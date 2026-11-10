@@ -5,6 +5,8 @@
 本篇状态：详细设计，尚未实施。现有代码与 SDK 行为已按下文“核对基准”静态核对；模型、数据库、Milvus 与 Neo4j 的实际调用尚未验证。
 
 > 本篇把概要设计的决策落实为可直接编码的模块、接口、数据结构、调用时序和测试清单。概要设计已确定的方向不再讨论；凡与概要设计不一致之处，以本篇“§20 对概要设计的细化与补充”列出的条目为准，其余一律服从概要设计。
+>
+> **SDK 版本注记（2026-11-09 依赖升级）：** 本篇设计时按 `deepagents==0.7.25`、LangChain `1.4.5`、LangGraph `1.2.15` 基线逐项核对（K1–K 系列事实、§15.3 版本断言等）。项目已于 2026-11-09 升级到 `deepagents==0.7.34`、LangChain `1.4.9`、LangGraph `1.2.20`（见 [docs/1_DeepAgents_0.7.34升级评估与实施建议.md](../1_DeepAgents_0.7.34升级评估与实施建议.md) §6 与其引用的实施记录）；下文出现的 `0.7.25`/`1.4.5`/`1.2.15` 字样保留为旧基线实测范围，当前版本行为以模块 `.venv` 内安装源码为准。已按新版本复核的适配点在 §10.2 表中标注。
 
 ## 0. 核对基准
 
@@ -1423,10 +1425,10 @@ SDK 私有依赖集中在 `agent.py` 的 `_sdk_adapter` 小节。装配与 Runne
 | 私有适配点 | 唯一入口 | 约定 |
 | --- | --- | --- |
 | `deepagents._models` 的模型标识函数、`_harness_profile_for_model` | `register_and_verify_harness_profile(model, cfg)` | 按实际模型标识注册并验证精确匹配键 |
-| `FilesystemMiddleware` 的 `_permissions` 构造参数 | `build_filesystem_middleware(backend, permissions, cfg)` | 构造 §10.1 的白名单实例，显式传 `_permissions=permissions` 与配置的转存阈值，避免替换默认 middleware 后权限丢失 |
+| `FilesystemMiddleware` 的 `_permissions` 构造参数 | `build_filesystem_middleware(backend, permissions, cfg)` | 构造 §10.1 的白名单实例，显式传 `permissions=permissions` 与配置的转存阈值，避免替换默认 middleware 后权限丢失。0.7.25 基线用 `_permissions=`；**0.7.31 起弃用，0.7.34 已改为公开 `permissions=`，且必须与 `create_deep_agent(permissions=...)` 同一组规则**（2026-11-09 升级时复核，graph.py 对覆盖实例做 Agent 权限继承与冲突检查） |
 | `_summarization_event` 及其 `summary_message`／`cutoff_index`／`file_path` 结构；`_summarization_session_id` | `read_summary_for_handoff(state_values) -> str \| None` | 只读解析 `get_state().values`，返回可交接的摘要文本；不向 Runner 暴露 SDK 状态结构，不复制这些私有字段到新线程 |
 
-上述约定按 `deepagents==0.7.25` 源码核对。SDK 升级时须先核对这些适配点，并通过 §18 的对应测试，再更新锁版。
+上述约定按 `deepagents==0.7.25` 源码核对；2026-11-09 升级到 `0.7.34` 时已复核本表适配点（公开 `permissions=` 已替换 `_permissions=`，其余入口签名未变，§18 对应测试随升级回归）。SDK 升级时须先核对这些适配点，并通过 §18 的对应测试，再更新锁版。
 
 HarnessProfile 适配函数：
 

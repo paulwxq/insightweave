@@ -1,0 +1,60 @@
+{
+  "owner": "primary unified exec session 71891",
+  "log": "var/upgrade_logs/backend-8002-main-session.log",
+  "checks": [
+    {
+      "method": "GET",
+      "origin": null,
+      "status": 200,
+      "allow_origin": null
+    },
+    {
+      "method": "GET",
+      "origin": "http://127.0.0.1:5173",
+      "status": 200,
+      "allow_origin": "http://127.0.0.1:5173"
+    },
+    {
+      "method": "OPTIONS",
+      "origin": "http://127.0.0.1:5173",
+      "status": 200,
+      "allow_origin": "http://127.0.0.1:5173"
+    },
+    {
+      "method": "GET",
+      "origin": "http://localhost:5173",
+      "status": 200,
+      "allow_origin": "http://localhost:5173"
+    },
+    {
+      "method": "OPTIONS",
+      "origin": "http://localhost:5173",
+      "status": 200,
+      "allow_origin": "http://localhost:5173"
+    },
+    {
+      "method": "GET",
+      "origin": "http://localhost:5999",
+      "status": 403,
+      "allow_origin": null
+    },
+    {
+      "method": "OPTIONS",
+      "origin": "http://localhost:5999",
+      "status": 403,
+      "allow_origin": null
+    }
+  ],
+  "processes": [
+    {
+      "pid": 2601998,
+      "cwd": "/opt/projects/insightweave/nl2sql",
+      "command": "uv run --no-sync uvicorn src.api.main:app --host 127.0.0.1 --port 8002 "
+    },
+    {
+      "pid": 2602001,
+      "cwd": "/opt/projects/insightweave/nl2sql",
+      "command": "/opt/projects/insightweave/nl2sql/.venv/bin/python /opt/projects/insightweave/nl2sql/.venv/bin/uvicorn src.api.main:app --host 127.0.0.1 --port 8002 "
+    }
+  ]
+}

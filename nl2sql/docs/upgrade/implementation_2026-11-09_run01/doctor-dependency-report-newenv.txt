@@ -1,0 +1,7 @@
+OK  依赖 deepagents = 0.7.34
+OK  依赖 langchain = 1.4.9
+OK  依赖 langgraph = 1.2.20
+OK  依赖 sqlglot = 30.30.0
+OK  依赖 psycopg = 3.3.8
+OK  依赖 pymilvus = 2.6.18
+OK  依赖 langgraph-checkpoint-postgres = 3.2.0

@@ -13,16 +13,17 @@ nl2sql_v3 is a multi-agent SQL generation system built with LangGraph. It conver
 
 ## SDK Source References
 
-Prefer these local, version-specific sources when inspecting Deep Agents, LangChain, or LangGraph implementation details. The Deep Agents design targets `deepagents==0.7.25`:
+The module targets `deepagents==0.7.34` (upgraded 2026-11-09 from the `0.7.25` baseline; see `docs/1_DeepAgents_0.7.34升级评估与实施建议.md` §6). The version-exact source is the installed package in this module's environment:
 
-| SDK | Source location | SDK package directory |
-| --- | --- | --- |
-| Deep Agents | `/opt/projects/lang-stu/deepagents-0.7.25` | `deepagents-deepagents-0.7.25/libs/deepagents/` |
-| LangChain | `/opt/projects/lang-stu/langchain-1.4.5` | `libs/langchain_v1/` |
-| LangGraph | `/opt/projects/lang-stu/langgraph-1.2.15` | `libs/langgraph/` |
+| SDK | Version-exact source (matches installed lock) |
+| --- | --- |
+| Deep Agents | `.venv/lib/python3.12/site-packages/deepagents/` |
+| LangChain | `.venv/lib/python3.12/site-packages/langchain/` |
+| LangGraph | `.venv/lib/python3.12/site-packages/langgraph/` |
 
+- Historical baseline checkouts remain at `/opt/projects/lang-stu/` (`deepagents-0.7.25`, `langchain-1.4.5`, `langgraph-1.2.15`). They match the old baseline recorded in `docs/v4/3_db_deepagent概要设计.md` / `docs/v4/5_db_deepagent详细设计.md`, NOT the current target; do not cite them for current-version behavior.
 - These are reference sources; project implementation changes belong in this repository.
-- Deep Agents implementation details in `docs/v4/3_db_deepagent概要设计.md` have been checked against the official `0.7.25` wheel. Verify the selected package version before applying source findings; installing dependencies and validating runtime behavior remain implementation tasks. The LangChain and LangGraph checkout versions match the design.
+- Deep Agents implementation details in `docs/v4/3_db_deepagent概要设计.md` were checked against the official `0.7.25` wheel at design time. Verify the selected package version before applying source findings; installing dependencies and validating runtime behavior remain implementation tasks.
 
 ## Build/Lint/Test Commands
 
@@ -46,8 +47,6 @@ uv run pytest -m unit -v        # unit tests only
 uv run pytest -m integration -v # integration tests only
 uv run pytest -m slow -v        # slow tests only
 
-# Run with coverage
-uv run pytest --cov=src --cov-report=html --cov-report=term
 ```
 
 ### Code Formatting and Linting

@@ -1,0 +1,72 @@
+[project]
+name = "nl2sql-v3"
+version = "0.1.0"
+description = "NL2SQL v3 - Multi-agent SQL generation system with LangGraph"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    # LangGraph核心
+    "fastapi==0.162.2",
+    "langchain==1.4.9",
+    "langgraph==1.2.20",
+    "uvicorn==0.54.0",
+    # 数据库驱动
+    "psycopg[binary]==3.3.8",
+    "pgvector==0.5.1",
+    "neo4j==6.4.1",
+    # SQL处理和验证
+    "sqlparse==0.6.1",
+    "sqlglot==30.30.0",
+    "pydantic==2.14.3",
+    # LLM和嵌入
+    "dashscope==2.0.4",
+    "langchain-openai==1.7.4",
+    "openai==3.46.0",
+    # 工具
+    "python-dotenv==1.2.4",
+    "PyYAML==6.0.3",
+    "langchain-community==0.4.2",
+    "psycopg-pool==3.3.3",
+    "pytest==9.2.0",
+    "pymilvus==2.6.18",
+    "langgraph-checkpoint-postgres==3.2.0",
+    "rich==15.0.0",
+    # Deep Agents（db_deepagent 主框架，docs/v4/5 §2.1）
+    "deepagents==0.7.34",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest==9.2.0",
+    "pytest-asyncio==1.4.1.post1",
+    "pytest-cov==7.1.0",
+    "black==26.10.1",
+    "ruff==0.17.4",
+]
+monitoring = [
+    # deepagents==0.7.34 要求 langsmith>=0.14.17（docs/v4/5 §2.1）
+    "langsmith==0.14.17",
+    "redis==8.1.0",
+]
+web = [
+    "streamlit==1.67.0",
+    "requests==2.34.2",
+]
+
+[tool.uv]
+constraint-dependencies = [
+    # 本次隔离评估的候选间接依赖
+    "langchain-core==1.7.6",
+    "langchain-classic==1.0.8",
+    "langchain-text-splitters==1.1.3",
+    "langgraph-checkpoint==4.3.1",
+    "langgraph-prebuilt==1.1.1",
+    "langgraph-sdk==0.4.14",
+    "psycopg-binary==3.3.8",
+    # 纳入扩大范围升级评估的依赖
+    "neo4j==6.4.1",
+    "pgvector==0.5.1",
+    "pymilvus==2.6.18",
+    "sqlparse==0.6.1",
+    "redis==8.1.0",
+]
