@@ -189,6 +189,36 @@ def build_model(cfg: DbAgentConfig) -> BaseChatModel:
     return model
 
 
+def build_summarizer_model(cfg: DbAgentConfig) -> BaseChatModel:
+    """按摘要专用 profile 创建模型并标记调用用途（doc 5.1 §4.2）。
+
+    与 build_model 同一套工厂与超时规则：OpenAI 兼容路径在构造前经 timeout
+    覆盖参数传入（显式 summarization.overrides.timeout 优先）；原生
+    DashScope 构造后经 apply_request_timeout 写入。摘要 overrides 独立于
+    cfg.model.overrides，不继承主模型参数。摘要模型不注册主 Agent Harness
+    （只写摘要，不承担工具调用装配）。
+    """
+    from src.services.config_loader import get_config
+    from src.services.llm_factory import get_llm
+
+    s = cfg.summarization
+    profile = get_config().get("llm_profiles", {}).get(s.llm_profile) or {}
+    provider = profile.get("provider", "")
+    overrides = dict(s.overrides)
+    if provider != "dashscope":
+        overrides.setdefault("timeout", s.request_timeout_seconds)
+
+    summary_model = get_llm(s.llm_profile, **overrides).llm
+    if provider == "dashscope":
+        apply_request_timeout(summary_model, s.request_timeout_seconds)
+
+    summary_model.metadata = {
+        **(summary_model.metadata or {}),
+        "dbda_call_kind": "summarization",
+    }
+    return summary_model
+
+
 # ============================================================================
 # 步骤 4：装配（§10.1、§10.3、§10.6）
 # ============================================================================
@@ -486,11 +516,8 @@ def build_db_agent(
     file_mw = build_filesystem_middleware(backend, permissions, cfg)
 
     prompts = load_prompts()
-    summary_model = model.model_copy()
-    summary_model.metadata = {
-        **(model.metadata or {}),
-        "dbda_call_kind": "summarization",
-    }
+    # doc 5.1 §4.3：摘要模型独立构造（专用 profile/overrides/超时），不再复制主模型
+    summary_model = build_summarizer_model(cfg)
     summary_mw = SummarizationMiddleware(
         model=model,
         summarizer=summary_model,

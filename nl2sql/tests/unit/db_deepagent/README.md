@@ -103,3 +103,25 @@ env -u all_proxy -u ALL_PROXY .venv/bin/python -m pytest \
 指此前离线实施阶段；本节记录其后的实际调用。
 
 详细命令、结果与证据路径见 [doc 5 的真实模型冒烟记录](../../../docs/5_独立摘要器接入修改方案.md)。
+
+## 独立摘要模型实施记录（2026-11-10，doc 5.1）
+
+生产摘要来源已从“主模型副本”切换为独立构造器 `build_summarizer_model(cfg)`
+（`summarization.llm_profile=qwen3_8_flash` / qwen3.8-flash，独立 overrides 与
+120 秒超时）。本目录 10 个离线对照实验与上一节“同模型副本”实施记录均为
+历史状态，未修改。
+
+- TDD：配置层（test_config.py 4 例目标 RED 于缺字段）→ 构造器
+  （test_summarizer_model.py 5 例 RED 于缺函数）→ 接线（装配测试 RED 于生产
+  仍用 model_copy）三批 RED→GREEN；离线 fixture 注入假摘要模型
+  （fake-flash-summarizer），默认测试不触碰真实 Flash。
+- §6 聚焦 4 文件 **130 passed**；离线回归（含 api/v2 与本目录对照实验）
+  **808 passed、4 skipped、0 failed**；真实窗口测试默认 1 skipped。
+- 显式 `--run-llm`：**1 passed**；逐调用断言主=openai:qwen3.8-max、
+  摘要=openai:qwen3.8-flash，3 次尝试含 1 次摘要，用量完整、无用途异常。
+- Black：8 文件整体检查 exit 1——7 文件通过，`test_llm_factory.py` 与 HEAD
+  基线同样存在格式债务（未顺带修复），本次新增用例未引入格式问题；Ruff
+  14 项均为 HEAD 既有基线、零新增；`git diff --check` 通过。低阈值冒烟不
+  代表 1M 容量、生产阈值表现或成本收益已验收。
+
+详见 [doc 5.1 实施记录](../../../docs/5.1_摘要器独立LLM配置与Qwen3.8-Flash接入方案.md)。

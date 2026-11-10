@@ -192,6 +192,11 @@ class BudgetConfig(_StrictModel):
 
 
 class SummarizationConfig(_StrictModel):
+    # 摘要专用 LLM profile（doc 5.1 §4.1）：必填，引用全局 llm_profiles；
+    # 存在性由 _check_summarization 校验，参数合法性仍由 get_llm() 负责
+    llm_profile: str = Field(min_length=1)
+    overrides: dict[str, Any] = Field(default_factory=dict)
+    request_timeout_seconds: float = Field(gt=0)
     summary_trigger_tokens: int = Field(gt=0)
     recent_context_tokens: int = Field(gt=0)
     trim_tokens_to_summarize: int | None = Field(default=None, gt=0)
@@ -326,6 +331,14 @@ def _check_summarization(cfg: DbAgentConfig) -> None:
         raise DbAgentConfigError(
             "summarization: 需满足 0 < recent_context_tokens < summary_trigger_tokens，实际 "
             f"recent={s.recent_context_tokens}, trigger={s.summary_trigger_tokens}"
+        )
+    # 摘要 profile 引用检查（doc 5.1 §4.1）：不在此创建 LLM；
+    # provider/模型 ID/密钥合法性由 get_llm() 在构造时校验
+    profiles = get_config().get("llm_profiles", {})
+    if s.llm_profile not in profiles:
+        raise DbAgentConfigError(
+            "summarization.llm_profile: 引用的 LLM profile 不存在；"
+            "请在 src/configs/config.yaml 的 llm_profiles 中注册"
         )
     # trim_tokens_to_summarize: None 或正整数已由字段约束保证；显式传 None 时不回落 SDK 默认 4000（§4.3）。
 

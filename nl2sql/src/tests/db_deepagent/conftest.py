@@ -514,8 +514,28 @@ class FakeStore:
 
 
 @pytest.fixture()
-def assembly_services(db_agent_config: DbAgentConfig, tmp_path) -> DbAgentServices:
-    """装配测试服务栈：假后端 + 临时工作区 + 步骤 3 服务（内存持久化）。"""
+def assembly_services(
+    db_agent_config: DbAgentConfig, tmp_path, monkeypatch
+) -> DbAgentServices:
+    """装配测试服务栈：假后端 + 临时工作区 + 步骤 3 服务（内存持久化）。
+
+    doc 5.1 §5.1：离线装配一律注入假摘要模型（每次新建、名称不同于假主
+    模型），避免现有离线测试构造/调用真实 Flash。仅作用于本 fixture 的
+    使用者，不设全局 autouse，不影响 --run-llm 真实模型集成测试。
+    """
+    import src.modules.db_deepagent.agent as agent_mod
+
+    def _fake_build_summarizer_model(_cfg):
+        return ScriptedChatModel(
+            model_name="fake-flash-summarizer",
+            responses=["历史业务口径摘要（假摘要模型）：时间范围与统计口径已概括。"],
+            metadata={"dbda_call_kind": "summarization"},
+        )
+
+    monkeypatch.setattr(
+        agent_mod, "build_summarizer_model", _fake_build_summarizer_model
+    )
+
     from src.modules.db_deepagent.services.sql_validation import DbSqlValidator
 
     cfg = db_agent_config.model_copy(deep=True)

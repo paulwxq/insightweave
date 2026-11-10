@@ -844,10 +844,59 @@ class TestGetLlmAutoDetected:
         with pytest.raises(ValueError, match="base_url"):
             get_llm("custom")
 
+    @patch("src.services.llm_factory._import_class")
+    @patch("src.services.llm_factory.get_config")
+    def test_dashscope_openai_qwen3_8_flash_summary_profile(
+        self, mock_get_config, mock_import
+    ):
+        """doc 5.1 §3.1：Flash 摘要 profile 经兼容 provider 的参数映射。
+
+        与 build_summarizer_model 的调用方式一致：profile 默认参数 +
+        timeout 覆盖。核对 model/base_url/temperature/max_tokens/
+        enable_thinking→extra_body/request_timeout 映射；假 ChatOpenAI，
+        不访问网络。
+        """
+        mock_get_config.return_value = _make_config(
+            providers={
+                "dashscope_openai": {
+                    "api_key": "sk-ds-xxx",
+                    "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+                },
+            },
+            profiles={
+                "qwen3_8_flash": {
+                    "provider": "dashscope_openai",
+                    "model": "qwen3.8-flash",
+                    "temperature": 0,
+                    "max_tokens": 8192,
+                    "enable_thinking": False,
+                },
+            },
+        )
+        mock_cls = MagicMock()
+        mock_cls.return_value = MagicMock()
+        mock_import.return_value = mock_cls
+
+        result = get_llm("qwen3_8_flash", timeout=120)
+
+        assert result.provider == "dashscope_openai"
+        assert result.model == "qwen3.8-flash"
+        mock_import.assert_called_once_with("langchain_openai", "ChatOpenAI")
+        mock_cls.assert_called_once_with(
+            model="qwen3.8-flash",
+            api_key="sk-ds-xxx",
+            base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+            temperature=0,
+            max_tokens=8192,
+            request_timeout=120,
+            extra_body={"enable_thinking": False},
+        )
+
 
 # ---------------------------------------------------------------------------
 # get_llm — profile 级参数默认值
 # ---------------------------------------------------------------------------
+
 
 class TestGetLlmProfileDefaults:
     """profile 中除 provider/model 外的字段作为参数默认值"""

@@ -303,6 +303,8 @@ agent.invoke(
 
 ### 5.3 【重点：局部替代】SDK 大工具输出转存与手工截断
 
+> **实施状态（2026-11-11，[doc 7](7_工具大输出SDK转存接入方案.md)）：** 已以 `inspect_tables` 为试点接入。该工具不再经 `finalize_output` 压缩/硬截断，直接返回完整缩进 JSON；超过转存阈值（20000 token ≈ 80000 字符，SDK 按 4 字符/token 近似）时由 `FilesystemMiddleware` 写入 `/artifacts/large_tool_results/`，模型收到预览+路径并可用既有 `read_file` 按行回读。离线验证覆盖边界、逐字相等、权限回读、Command 账本、写入失败与完整生产图（详见 doc 7 实施记录）。默认头尾各 5 行预览对缩进 JSON 主要是结构/括号信息；真实模型是否主动回读、费用与生产性能未验证；其他工具的 12000 字符硬截断与 JSON 中部截断缺陷保持原状、未全局修复。本节以下为实施前分析，保留原文。
+
 当前 [_envelope.py](../src/modules/db_deepagent/tools/_envelope.py) 的 `finalize_output()` 先缩短 SQL、卡片、列表，仍过长时执行 `text[:max_chars]`。这可能截断 JSON，并且模型无法从被丢弃的正文恢复全部内容。
 
 SDK 文件中间件已经配置了 `tool_token_limit_before_evict=20000`，但业务工具的 `max_tool_output_chars=12000` 通常会先缩减结果，当前设计有意避免 SDK 大结果转存。SDK 具有把过大文本工具结果转存到 backend，并向模型返回文件位置和读取提示的能力。

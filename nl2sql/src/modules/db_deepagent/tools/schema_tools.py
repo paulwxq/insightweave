@@ -350,15 +350,18 @@ def make_inspect_tables_tool(services: DbAgentServices):
                         "message": type(exc).__name__,
                     }
                 )
-        content, finalize_warnings = finalize_output(
+        # doc 7 §2 步骤 2：直接序列化完整工具结果，不经 finalize_output
+        # 压缩/硬截断；超长内容由 SDK FilesystemMiddleware 按转存阈值写入
+        # 会话文件。indent=2 是按行回读的必要条件，不得改回单行紧凑 JSON。
+        return json.dumps(
             {
                 "status": "ok",
                 "data": {"tables": results},
                 "warnings": sorted(set(all_warnings)),
             },
-            services.config.results.max_tool_output_chars,
+            ensure_ascii=False,
+            indent=2,
         )
-        return _merge_warnings(content, finalize_warnings, dedupe=True)
 
     _attach_validation_handler(inspect_tables)
     return inspect_tables

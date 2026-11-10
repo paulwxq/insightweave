@@ -37,7 +37,7 @@
 | 公开 `permissions=` 可以替代 `_permissions` | **已经完成**。`agent.py` 的文件中间件和 `create_deep_agent()` 均传同一组公开权限参数，不再作为新任务 |
 | 0.7.25 → 0.7.34 的升级候选与旧版本表 | 升级已经落地，应使用上表作为当前基线；旧表保留研究时点含义 |
 | pandas 仍直接声明在 web extra 等旧说明 | 旧 UI 清理后 web extra 已删除，pandas 作为其他组件的传递依赖保留，不据旧描述恢复依赖 |
-| 独立摘要器 | 已接入（2026-11-10，[doc 5](5_独立摘要器接入修改方案.md)）：生产显式传 `model=主模型, summarizer=主模型副本`，副本保留摘要用途标记；离线回归与完整图分类测试通过 |
+| 独立摘要器 | 已接入（2026-11-10，[doc 5](5_独立摘要器接入修改方案.md)）并独立配置摘要模型（同日，[doc 5.1](5.1_摘要器独立LLM配置与Qwen3.8-Flash接入方案.md)）：`model=主模型(qwen3.8-max), summarizer=build_summarizer_model 产物(qwen3.8-flash)`，离线回归、完整图分类与低阈值真实调用验证通过 |
 | 工具按需加载、结构化输出 | 仍未在当前主 Agent 按这些方案启用，需继续评估 |
 
 依据：[当前依赖声明](../pyproject.toml)、[Agent 装配](../src/modules/db_deepagent/agent.py)、[旧 UI 清理实施记录](3_NL2SQL旧前端清理设计.md)。
@@ -70,6 +70,8 @@
 
 ### 4.1 工具输出：优先保证结构完整，再评估 SDK 转存
 
+**试点已实施（2026-11-11，[doc 7](7_工具大输出SDK转存接入方案.md)）：** `inspect_tables` 改为直接返回完整缩进 JSON，不再走 `finalize_output`；超过 SDK 转存阈值（≈80000 字符）时自动写入 `/artifacts/large_tool_results/` 并可按行回读。下述建议 2、3（转存位置/权限回读/`Command` 账本保留/模型实际可见内容）已由 doc 7 的离线测试逐一验证（含完整生产图：动态假模型从替换消息提取路径并回读到末列标记）。建议 1（其余工具返回包的结构完整性）**仍未实施**：`finalize_output` 的 JSON 中部截断缺陷对 read_result/analyze_result/search_schema/plan_joins/guard/SQL 等工具保持原状；真实大输出样本与真实模型主动回读行为未验证。以下为实施前分析，保留原文。
+
 当前 [tools/_envelope.py](../src/modules/db_deepagent/tools/_envelope.py) 的 `finalize_output()` 会先压缩部分字段，仍超长时执行 `text[:max_chars]`。这能限制长度，却不能保证 JSON 仍可解析。
 
 本轮使用与结果工具相似的 `rows` 负载和当前配置上限 12,000 字符执行局部探针：返回长度为 12,000，`json.loads()` 失败。现有 `test_envelope.py` 的硬截断测试只检查长度与警告，没有检查该分支的 JSON 完整性。
@@ -86,11 +88,11 @@
 
 ### 4.2 摘要：使用主模型上下文参数，独立选择摘要生成器
 
-**已实施（2026-11-10，[doc 5](5_独立摘要器接入修改方案.md)）**：`build_db_agent()` 复制主模型并加上 `dbda_call_kind=summarization` 元数据，以 `model=主模型, summarizer=主模型副本` 显式构造 `SummarizationMiddleware`——主模型提供上下文依据与 token 计数，副本执行摘要调用。0.7.34 的 `summarizer=` 语义即"`model` 继续提供模型配置和计数上下文，不被调用来写摘要"。阈值、`trim_tokens_to_summarize=None`、backend、prompt、观测与线程交接全部保留；离线回归与完整图分类测试通过（详见 doc 5 实施记录）。尚未配置不同的摘要模型，也没有新增配置入口。
+**已实施并独立配置摘要模型（2026-11-10，[doc 5](5_独立摘要器接入修改方案.md) → [doc 5.1](5.1_摘要器独立LLM配置与Qwen3.8-Flash接入方案.md)）**：doc 5 先以 `model=主模型, summarizer=主模型副本` 显式构造 `SummarizationMiddleware`；doc 5.1 随后将摘要来源改为独立构造器 `build_summarizer_model(cfg)`——按 `summarization.llm_profile=qwen3_8_flash`（qwen3.8-flash，dashscope_openai 兼容路径，temperature=0、max_tokens=8192、enable_thinking=false、独立超时 120 秒、独立 overrides 不继承主模型参数）经 `get_llm()` 创建，并带 `dbda_call_kind=summarization` 用途标记。主模型（qwen3.8-max）继续提供上下文依据与 token 计数。阈值 96000/24000、`trim_tokens_to_summarize=None`、backend、prompt、观测与线程交接全部保留；离线回归（808 passed/4 skipped/0 failed）、完整图分类与低阈值真实调用（主=openai:qwen3.8-max、摘要=openai:qwen3.8-flash 逐调用断言）通过，详见 doc 5.1 实施记录。
 
-原建议“将‘上下文依据’和‘实际摘要生成器’分开、初始仍使用同一模型”已按此实施；后续比较其他摘要模型的成本、延迟和信息保留时再另行评估。
+原建议“将‘上下文依据’和‘实际摘要生成器’分开”已完全落地：两者现为不同 profile 的独立模型。摘要质量/成本/延迟与生产阈值容量的对照仍未验收，不据此宣称收益。
 
-必须保留摘要用途元数据、回调观测、现有阈值与 `trim_tokens_to_summarize=None`，并验证线程交接。不能直接删掉 `model_copy()`：它当前隔离了摘要用途元数据；迁移后仍需要等价的用途标记机制。
+必须保留摘要用途元数据、回调观测、现有阈值与 `trim_tokens_to_summarize=None`，并验证线程交接。`model_copy()` 路径已按 doc 5.1 移除，用途标记职责由 `build_summarizer_model()` 承担。
 
 这主要改善配置与职责划分，代码行数不一定减少；没有实际测量前不能宣称更快、更便宜或更准确。
 

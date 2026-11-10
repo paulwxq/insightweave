@@ -317,6 +317,112 @@ class TestInspectTables:
         assert any("无该表卡片" in w for w in entry["warnings"])
 
 
+def _local_services(db_agent_config, business_db, milvus):
+    """带自定义业务库/检索假件的服务容器（doc 7 步骤 1：假件局部放测试内）。"""
+    from src.modules.db_deepagent.services import DbAgentServices
+    from src.modules.db_deepagent.services.table_catalog import TableCatalog
+    from src.tests.db_deepagent.conftest import (
+        TEST_SOURCE_ID,
+        FakeEmbedding,
+        FakeJoinGraph,
+    )
+
+    return DbAgentServices(
+        config=db_agent_config,
+        business_db=business_db,
+        embedding=FakeEmbedding(),
+        milvus=milvus,
+        catalog=TableCatalog(db_agent_config, milvus, business_db),
+        join_graph=FakeJoinGraph(),
+        embedding_release={},
+        source_id=TEST_SOURCE_ID,
+    )
+
+
+def _fake_columns(count: int, name_len: int = 50, marker: str | None = None):
+    """生产实际字段形态的实时列：长列名撑出真实序列化体积（doc 7 步骤 4 规模口径）。"""
+    from src.tests.db_deepagent.conftest import FakeColumn
+
+    columns = []
+    for i in range(count):
+        prefix = f"col_{i:03d}_"
+        name = prefix + "x" * (name_len - len(prefix))
+        columns.append(FakeColumn(name, "varchar", i % 2 == 0))
+    if marker is not None:
+        columns[-1] = FakeColumn(marker, "varchar", False)
+    return columns
+
+
+def _card(table: str) -> dict:
+    return {
+        "object_id": f"orders.{table}",
+        "text_raw": f"# {table} [table]\n- 说明列",
+        "grain_hint": None,
+        "time_col_hint": None,
+        "table_category": "",
+    }
+
+
+class TestInspectTablesLargeOutput:
+    """doc 7 步骤 1：试点工具不再压缩/截断（RED 于旧 finalize_output 行为）。"""
+
+    def test_large_description_keeps_all_columns(
+        self, db_agent_config, db_agent_context
+    ):
+        """单表大量实时列（>12000 字符）：JSON 可解析、全部列与末列标记保留。"""
+        from langgraph.prebuilt import ToolNode
+
+        from src.tests.db_deepagent.conftest import FakeBusinessDb, FakeMilvus
+
+        marker = "ZQ_LAST_COLUMN_MARKER_ZQ"
+        db = FakeBusinessDb(_fake_columns(120, marker=marker))
+        milvus = FakeMilvus()
+        milvus.cards["orders.public.orders"] = _card("public.orders")
+        node = ToolNode(
+            build_business_tools(_local_services(db_agent_config, db, milvus))
+        )
+
+        _, msg = invoke_tool_node(
+            node,
+            [("inspect_tables", {"table_ids": ["public.orders"]}, "c1")],
+            db_agent_context,
+        )
+        payload = json.loads(msg.content)
+        entry = payload["data"]["tables"][0]
+        assert entry["status"] == "ok"
+        names = [c["name"] for c in entry["live_columns"]]
+        assert len(names) == 120
+        assert marker in names
+
+    def test_six_table_descriptions_not_reduced_to_five(
+        self, db_agent_config, db_agent_context
+    ):
+        """6 个合法表且总输出 >12000 字符：返回全部 6 表、顺序与逐表状态不变。"""
+        from langgraph.prebuilt import ToolNode
+
+        from src.tests.db_deepagent.conftest import FakeBusinessDb, FakeMilvus
+
+        tables = [f"public.t{i:02d}" for i in range(1, 7)]
+        db = FakeBusinessDb(_fake_columns(30))
+        milvus = FakeMilvus()
+        for t in tables:
+            milvus.cards[f"orders.{t}"] = _card(t)
+        node = ToolNode(
+            build_business_tools(_local_services(db_agent_config, db, milvus))
+        )
+
+        _, msg = invoke_tool_node(
+            node,
+            [("inspect_tables", {"table_ids": tables}, "c1")],
+            db_agent_context,
+        )
+        payload = json.loads(msg.content)
+        entries = payload["data"]["tables"]
+        assert len(entries) == 6
+        assert [e["display"] for e in entries] == tables
+        assert all(e["status"] == "ok" for e in entries)
+
+
 # ============================================================================
 # plan_joins（§7.4）
 # ============================================================================

@@ -49,12 +49,12 @@ class TestSummaryPrompt:
 
 class TestAssemblyWiring:
     def test_summary_middleware_instance_wired(self, assembly_services, monkeypatch):
-        """生产显式构造 SummarizationMiddleware 时传入 summarizer= 独立副本。
+        """生产接线 model=主模型, summarizer=独立摘要模型（doc 5.1 §4.3）。
 
-        包装公开别名记录真实构造实参并继续真实装配：主模型提供上下文依据，
-        摘要副本带 summarization 用途 metadata；backend/prompt/阈值/trim 与
-        生产配置一致。SDK 默认栈也会构造默认实例（summarizer=None），故保留
-        全部记录、以第一条（生产显式构造，先于 create_deep_agent）定位。
+        分别替换两个构造器，注入名称不同的假主模型与假摘要模型；包装公开
+        构造器记录实参并继续真实装配。SDK 默认栈也会构造默认实例
+        （summarizer=None），故保留全部记录、以第一条（生产显式构造，先于
+        create_deep_agent）定位。两模型配置本应不同，不再断言副本相等。
         """
         import inspect
 
@@ -62,9 +62,18 @@ class TestAssemblyWiring:
 
         import src.modules.db_deepagent.agent as agent_mod
 
-        model = ScriptedChatModel(responses=["offline"])
-        metadata_before = dict(model.metadata or {})
-        monkeypatch.setattr(agent_mod, "build_model", lambda _cfg: model)
+        main_model = ScriptedChatModel(responses=["offline"])
+        summary_model = ScriptedChatModel(
+            model_name="fake-flash-summarizer",
+            responses=["历史业务口径摘要（假摘要模型）"],
+            metadata={"dbda_call_kind": "summarization"},
+        )
+        assert main_model.model_name != summary_model.model_name
+        metadata_before = dict(main_model.metadata or {})
+        monkeypatch.setattr(agent_mod, "build_model", lambda _cfg: main_model)
+        monkeypatch.setattr(
+            agent_mod, "build_summarizer_model", lambda _cfg: summary_model
+        )
 
         real_constructor = sdk_summary.SummarizationMiddleware
         signature = inspect.signature(real_constructor)
@@ -90,17 +99,13 @@ class TestAssemblyWiring:
         production = records[0]
 
         assert "summarizer" in production
-        assert production["model"] is model
-        assert production["summarizer"] is not model
-        assert model.metadata == metadata_before
-        assert production["summarizer"].metadata == {
-            **metadata_before,
-            "dbda_call_kind": "summarization",
-        }
-        # 副本与主模型同类型；配置相同指排除有意不同的 metadata，不做全对象相等
-        assert type(production["summarizer"]) is type(model)
-        assert production["summarizer"].model_dump(exclude={"metadata"}) == (
-            model.model_dump(exclude={"metadata"})
+        assert production["model"] is main_model
+        assert production["summarizer"] is summary_model
+        assert production["summarizer"] is not production["model"]
+        # 主模型 metadata 不被摘要用途污染；摘要用途标记存在于独立摘要模型
+        assert main_model.metadata == metadata_before
+        assert (
+            production["summarizer"].metadata.get("dbda_call_kind") == "summarization"
         )
         # 其余实参与生产配置一致
         assert production["backend"] is backends[0]

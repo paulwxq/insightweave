@@ -124,9 +124,10 @@ results:
   read_max_rows: 200                     # read_result 工具单次分页的行数上限（模型显式翻页
                                          #   取历史结果时生效）
 
-  max_tool_output_chars: 12000           # 单个工具返回文本的字符总预算，超出即截断；保证不触发
-                                         #   SDK 大结果转存。作用于 read_result / analyze_result /
-                                         #   schema / guard 等全部业务工具
+  max_tool_output_chars: 12000           # 单个工具返回文本的字符总预算，超出即截断。
+                                         #   read_result / analyze_result / search_schema /
+                                         #   plan_joins / guard / SQL 等仍使用此字符上限；
+                                         #   inspect_tables 改由 SDK 转存管理，不使用此字符上限
 
   placeholder_max_values: 1000           # 结果占位符展开的最大值个数
 
@@ -140,13 +141,17 @@ budget:
   run_timeout_seconds: 300               # 协作式时限（§11.1）
   final_answer_reminders: 1              # 模型未提交就结束时的提醒次数（§11.3）
 
-summarization:                           # qwen3_max 的初始默认值，待实测；更换模型时重新确定
+summarization:                           # 摘要器配置（doc 5.1：独立摘要模型 qwen3.8-flash）
+  llm_profile: qwen3_8_flash             # 引用全局 config.yaml 的 llm_profiles（2026-11-10 起）
+  overrides: {}                          # 仅覆盖摘要参数，不继承 model.overrides
+  request_timeout_seconds: 120           # 摘要请求独立超时；暂取 120s，按实际耗时记录再调整
   summary_trigger_tokens: 96000          # 须低于模型实际输入上限并留余量
   recent_context_tokens: 24000           # 必须小于 summary_trigger_tokens
   trim_tokens_to_summarize: null         # 显式传 None，所选待摘要历史不再按 SDK 默认 4000 Token 裁剪
 
 filesystem:
-  tool_token_limit_before_evict: 20000   # SDK 默认值，显式写出便于核对
+  tool_token_limit_before_evict: 20000   # SDK 近似转存阈值；当前版本按 4 字符/token 判断，
+                                         #   20000 对应 80000 字符（超过即转存）
 
 thread:
   rotate_after_messages: 400             # 线程消息数超过该值时，下一轮前轮换线程
