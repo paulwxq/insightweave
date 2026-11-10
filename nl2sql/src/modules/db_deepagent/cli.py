@@ -19,7 +19,8 @@ from src.utils.logger import get_module_logger
 logger = get_module_logger("nl2sql.db_deepagent.cli")
 
 # 依赖版本核对清单（§2.1；sqlglot 为锁定版本，其余记录实际值）
-_LOCKED_VERSIONS = {"sqlglot": "30.22.0"}
+# 2026-11-09 依赖升级：sqlglot 30.22.0 → 30.30.0（doc 1 §4.2，与 pyproject 同步）
+_LOCKED_VERSIONS = {"sqlglot": "30.30.0"}
 _VERSION_PACKAGES = (
     "deepagents",
     "langchain",

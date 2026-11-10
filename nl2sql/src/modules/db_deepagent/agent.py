@@ -358,14 +358,19 @@ def build_backend(session_dir: Path, cfg: "DbAgentConfig"):
 
 
 def build_filesystem_middleware(backend, permissions, cfg: "DbAgentConfig"):
-    """§10.2 私有适配点：白名单实例，显式传 _permissions 与转存阈值。"""
+    """§10.2 适配点：白名单实例，显式传 permissions 与转存阈值。
+
+    DeepAgents 0.7.31 起公开 `permissions=`（`_permissions` 弃用，0.9.0 移除）；
+    0.7.34 对自定义文件中间件做 Agent 权限继承与冲突检查，本函数必须与
+    `create_deep_agent(permissions=...)` 传同一组规则（doc 1 §4.1）。
+    """
     from deepagents import FilesystemMiddleware
 
     return FilesystemMiddleware(
         backend=backend,
         tools=list(_FILE_TOOLS),
         tool_token_limit_before_evict=cfg.filesystem.tool_token_limit_before_evict,
-        _permissions=permissions,
+        permissions=permissions,
     )
 
 

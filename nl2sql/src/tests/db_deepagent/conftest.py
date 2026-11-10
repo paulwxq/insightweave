@@ -3,16 +3,19 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from types import SimpleNamespace
 from datetime import date, datetime
 from decimal import Decimal
+from types import SimpleNamespace
 from typing import Any
 from zoneinfo import ZoneInfo
 
 import pytest
+from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.outputs import ChatGeneration, ChatResult
 from langgraph.runtime import Runtime
 from langgraph.types import Command
+from pydantic import Field
 
 from src.modules.db_deepagent.config import DbAgentConfig, load_db_agent_config
 from src.modules.db_deepagent.context import DbAgentContext
@@ -376,6 +379,32 @@ def _result_analysis(cfg, results):
 # ============================================================================
 # 步骤 4 假件（装配／Runner 测试）
 # ============================================================================
+
+
+class ScriptedChatModel(BaseChatModel):
+    """受控假模型：顺序返回脚本响应；支持 bind_tools（返回自身）。
+
+    不做真实模型调用；供真实 SDK 中间件栈（Summarization／ModelRefusal）
+    消费，驱动真实图路径（doc 1 §4.4／§6.4 专项）。
+    """
+
+    model_name: str = "scripted-fake"
+    responses: list = Field(default_factory=list)
+
+    @property
+    def _llm_type(self) -> str:
+        return "scripted-fake"
+
+    def bind_tools(self, tools, **kwargs):
+        return self
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        index = min(getattr(self, "_cursor", 0), len(self.responses) - 1)
+        response = self.responses[index]
+        object.__setattr__(self, "_cursor", getattr(self, "_cursor", 0) + 1)
+        if isinstance(response, str):
+            response = AIMessage(content=response)
+        return ChatResult(generations=[ChatGeneration(message=response)])
 
 
 class FakeAgent:

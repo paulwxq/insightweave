@@ -48,7 +48,7 @@ def _read(middleware, path: str):
             [("read_file", {"file_path": path}, "tc-read")],
             context=None,
         )
-    except Exception as exc:  # noqa: BLE001（权限拒绝以错误 ToolMessage 呈现）
+    except Exception as exc:  # noqa: BLE001  权限拒绝以错误 ToolMessage 呈现
         return False, str(exc)
     text = msg.content if isinstance(msg.content, str) else str(msg.content)
     ok = (
@@ -64,6 +64,36 @@ def _dispatchable_names(middleware) -> set[str]:
 
 
 class TestP09Permissions:
+    def test_middleware_uses_public_permissions_param(
+        self, db_agent_config_module, tmp_path
+    ):
+        """doc 1 §4.1：公开 permissions= 构造，规则与 Agent 级同一组。
+
+        DeepAgents 0.7.31 起 `_permissions` 弃用（0.9.0 移除）；0.7.34 对
+        覆盖实例做 Agent 权限继承与冲突检查。构造走公开参数时不得触发
+        弃用告警，且中间件持有的规则与传入列表一致。
+        """
+        import inspect
+        import warnings
+
+        from deepagents import FilesystemMiddleware
+
+        assert (
+            "permissions" in inspect.signature(FilesystemMiddleware.__init__).parameters
+        ), "目标 SDK 必须提供公开 permissions 参数"
+
+        cfg = db_agent_config_module
+        session_dir = tmp_path / "public-perm"
+        session_dir.mkdir()
+        (session_dir / "artifacts").mkdir()
+        (session_dir / "empty_root").mkdir()
+        backend = build_backend(session_dir, cfg)
+        permissions = build_permissions(cfg)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", DeprecationWarning)
+            middleware = build_filesystem_middleware(backend, permissions, cfg)
+        assert list(middleware._permissions) == list(permissions)
+
     def test_skills_readable(self, _env):
         backend, middleware, _ = _env
         ok, content = _read(middleware, "/skills/query-planning/SKILL.md")

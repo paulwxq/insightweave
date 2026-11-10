@@ -390,8 +390,6 @@ uv run pytest src/tests/unit/nl2sql_father/ -v
 # 运行集成测试（需要真实数据库连接）
 uv run pytest src/tests/integration/ -v
 
-# 生成覆盖率报告
-uv run pytest src/tests/unit/ --cov=src --cov-report=term-missing
 ```
 
 ---

@@ -785,3 +785,102 @@ class TestCarriedDedup:
         dim_items = [i for i in carried if i["kind"] == "dim"]
         assert len(dim_items) == 1
         assert dim_items[0]["record"]["values"] == ["cancelled"]
+
+
+class TestModelRefusalThroughMainGraph:
+    """doc 1 §4.4／§6.4 专项：标准 refusal 块走完整主图到 Runner。
+
+    受控假模型返回标准 refusal 内容块（非普通文本拒答），经真实
+    ModelRefusalMiddleware（0.7.34 默认栈）→ 完整中间件栈 → agent.invoke()
+    → Runner：确认 ModelRefusalError 传播为 P1 runtime、优先于
+    "未提交最终答案"、预算条目在 finally 中 close_run。
+    """
+
+    def _build_handle(self, assembly_services, monkeypatch, responses):
+        from langgraph.checkpoint.memory import InMemorySaver
+
+        import src.modules.db_deepagent.agent as agent_mod
+        from src.tests.db_deepagent.conftest import ScriptedChatModel
+
+        fake = ScriptedChatModel(responses=responses)
+        monkeypatch.setattr(agent_mod, "build_model", lambda _cfg: fake)
+        return agent_mod.build_db_agent(
+            assembly_services,
+            session_id="t-refusal",
+            checkpointer=InMemorySaver(),
+        )
+
+    def test_standard_refusal_propagates_as_p1_runtime(
+        self, assembly_services, monkeypatch
+    ):
+        from langchain_core.messages import AIMessage
+
+        from src.modules.db_deepagent.persistence.archive import QaArchive
+
+        handle = self._build_handle(
+            assembly_services,
+            monkeypatch,
+            responses=[
+                AIMessage(
+                    content=[{"type": "refusal", "refusal": "我不能协助这个请求。"}]
+                ),
+            ],
+        )
+        store = FakeStore()
+        runner = DbAgentRunner(
+            services=assembly_services,
+            handle=handle,
+            archive=QaArchive(store),
+        )
+        close_calls: list[str] = []
+        original_close = assembly_services.budget.close_run
+
+        def _spy_close(run_id):
+            close_calls.append(run_id)
+            return original_close(run_id)
+
+        assembly_services.budget.close_run = _spy_close
+        result = runner.run("敏感问题", "s-refusal", request_id="req-refusal")
+
+        assert result.status == "failed"
+        p1 = [f for f in result.errors if f.phase == "P1"]
+        assert p1, f"必须记录 P1 失败: {result.errors}"
+        assert any(
+            "ModelRefusalError" in f.message for f in p1
+        ), f"P1 应含 ModelRefusalError 传播: {[f.message for f in p1]}"
+        assert any(f.kind == "runtime" for f in p1)
+        # runtime 优先：不得同时判定"未提交最终答案"
+        assert not any(f.kind == "no_final_answer" for f in result.errors)
+        # 预算条目在 finally 中关闭
+        assert close_calls == [
+            result.run_id
+        ], f"close_run 必须恰好对本 run 调用一次: {close_calls}"
+
+    def test_plain_text_refusal_is_not_protocol_refusal(
+        self, assembly_services, monkeypatch
+    ):
+        """对照：普通文本拒答不是标准 refusal 块，不抛 ModelRefusalError。
+
+        运行自然结束，按既有协议判"未提交最终答案"（P2）。
+        """
+        from langchain_core.messages import AIMessage
+
+        from src.modules.db_deepagent.persistence.archive import QaArchive
+
+        handle = self._build_handle(
+            assembly_services,
+            monkeypatch,
+            responses=[AIMessage(content="抱歉，这个问题我无法回答。")],
+        )
+        store = FakeStore()
+        runner = DbAgentRunner(
+            services=assembly_services,
+            handle=handle,
+            archive=QaArchive(store),
+        )
+        result = runner.run("普通问题", "s-plain", request_id="req-plain")
+        assert result.status == "failed"
+        assert not any(
+            "ModelRefusalError" in f.message for f in result.errors
+        ), "普通文本拒答不得触发 ModelRefusalError"
+        assert any(f.kind == "no_final_answer" for f in result.errors)

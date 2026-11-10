@@ -2,6 +2,7 @@
 
 import sys
 import os
+from importlib.metadata import PackageNotFoundError, version
 
 project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, project_root)
@@ -11,7 +12,6 @@ load_dotenv()
 
 from langgraph.checkpoint.postgres import PostgresSaver
 from src.services.langgraph_persistence.postgres import build_db_uri_from_config
-import pkg_resources
 
 
 def check_versions():
@@ -21,15 +21,15 @@ def check_versions():
     print("=" * 80)
     
     try:
-        lg_version = pkg_resources.get_distribution("langgraph").version
+        lg_version = version("langgraph")
         print(f"\nlanggraph 版本: {lg_version}")
-    except Exception as e:
+    except PackageNotFoundError as e:
         print(f"无法获取 langgraph 版本: {e}")
     
     try:
-        lgcp_version = pkg_resources.get_distribution("langgraph-checkpoint-postgres").version
+        lgcp_version = version("langgraph-checkpoint-postgres")
         print(f"langgraph-checkpoint-postgres 版本: {lgcp_version}")
-    except Exception as e:
+    except PackageNotFoundError as e:
         print(f"无法获取 langgraph-checkpoint-postgres 版本: {e}")
     
     print("\n" + "=" * 80)
