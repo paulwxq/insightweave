@@ -45,7 +45,7 @@ starlette、pandas、cryptography 现已按业务直接导入分别显式声明�
 | **`ModelCallLimitMiddleware` / `ToolCallLimitMiddleware`，当前 LangChain 已有** | `RunBudgetMiddleware` + `RunBudgetLedger`：模型、工具、数据库执行额度及运行时限 | **通用的模型与工具调用次数限制** | 数据库执行额度、探针和下推计数、跨入口共享额度、加锁预占、deadline、稳定 stop_reason 和统计 | §7.1 |
 | **SDK 工具大输出转存，0.7.25 已有** | `_envelope.finalize_output()` 缩减或截断工具返回；`ResultStore` 存数据库结果 | **通用长文本工具结果的缩减与转存**，可研究减少整体字符串硬截断 | 结果类型、分页、原始结果截断标记、证据和快照；不能整体替换 `ResultStore` | §5.3 |
 | **公开 `permissions=`，0.7.31 新增** | `build_filesystem_middleware()` 传 `_permissions` 私有参数 | **直接替换私有构造参数** | 权限规则与只读工具白名单；本次最明确、范围最小的替代项 | §6.1 |
-| **`summarizer=`，0.7.26 新增** | `build_db_agent()` 复制主模型作为摘要模型 | **将上下文管理模型与摘要生成模型分离** | 摘要用途 metadata、回调统计、配置与质量验收；复制模型设置 metadata 不是无意义的重复代码 | §6.2 |
+| **`summarizer=`，0.7.26 新增** | 已显式设置 `model=主模型, summarizer=主模型副本`（2026-11-10，[doc 5](5_独立摘要器接入修改方案.md)），副本保留摘要用途标记；尚未配置不同的摘要模型 | **将上下文管理模型与摘要生成模型分离** | 摘要用途 metadata、回调统计、配置与质量验收；复制模型设置 metadata 不是无意义的重复代码 | §6.2 |
 | **`RubricMiddleware`，0.7.25 已有、0.7.33 退出 Beta** | 当前提交门控只做硬约束和漏提交提醒，没有独立的答案质量评分循环 | **可复用 SDK 的评分与修订循环**，避免未来另写一套；属于增补能力 | **不能直接替换证据守卫；直接追加会与已提交即结束、禁止重复提交冲突** | §5.4 |
 
 ### 1.2 当前已用、未用与部分使用的能力
@@ -87,7 +87,7 @@ starlette、pandas、cryptography 现已按业务直接导入分别显式声明�
 - 原 `model` 仍负责模型上下文配置及 token 计数。
 - 该配置同时用于自动摘要和 `compact_conversation` 工具。
 
-当前项目在 [agent.py](../src/modules/db_deepagent/agent.py) 中复制主模型作为摘要模型，尚未配置独立的 `summarizer`。升级不会自动降低摘要成本；后续可以使用较便宜的模型承担摘要，或接入自行实现的摘要流程。
+当前项目已在 [agent.py](../src/modules/db_deepagent/agent.py) 中显式传入 `model=主模型, summarizer=主模型副本`（2026-11-10 按 [doc 5](5_独立摘要器接入修改方案.md) 实施）：主模型提供上下文依据，副本带 `dbda_call_kind=summarization` 用途标记执行摘要；尚未配置不同的摘要模型或自研摘要流程。升级与本次接线都不会自动降低摘要成本；后续如使用较便宜的模型承担摘要，需另做质量、成本与容量对照。
 
 旧版本已经可以通过摘要中间件的 `model` 参数选择模型。本次新增的价值是进一步分离“管理上下文所依据的模型”和“实际生成摘要的模型或流程”。
 

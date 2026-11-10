@@ -16,6 +16,7 @@ from src.modules.db_deepagent.agent import (
     read_summary_for_handoff,
 )
 from src.modules.db_deepagent.errors import AssemblyVerificationError
+from src.modules.db_deepagent.middleware.model_observer import ModelCallObserver
 from src.tests.db_deepagent.conftest import ScriptedChatModel
 
 pytestmark = pytest.mark.unit
@@ -47,12 +48,73 @@ class TestSummaryPrompt:
 
 
 class TestAssemblyWiring:
-    def test_summary_middleware_instance_wired(self, assembly_services):
-        """装配后的 middleware 栈含 SummarizationMiddleware 且触发阈值来自配置。"""
+    def test_summary_middleware_instance_wired(self, assembly_services, monkeypatch):
+        """生产显式构造 SummarizationMiddleware 时传入 summarizer= 独立副本。
+
+        包装公开别名记录真实构造实参并继续真实装配：主模型提供上下文依据，
+        摘要副本带 summarization 用途 metadata；backend/prompt/阈值/trim 与
+        生产配置一致。SDK 默认栈也会构造默认实例（summarizer=None），故保留
+        全部记录、以第一条（生产显式构造，先于 create_deep_agent）定位。
+        """
+        import inspect
+
+        import deepagents.middleware.summarization as sdk_summary
+
+        import src.modules.db_deepagent.agent as agent_mod
+
+        model = ScriptedChatModel(responses=["offline"])
+        metadata_before = dict(model.metadata or {})
+        monkeypatch.setattr(agent_mod, "build_model", lambda _cfg: model)
+
+        real_constructor = sdk_summary.SummarizationMiddleware
+        signature = inspect.signature(real_constructor)
+        records = []
+
+        def capture_constructor(*args, **kwargs):
+            records.append(dict(signature.bind_partial(*args, **kwargs).arguments))
+            return real_constructor(*args, **kwargs)
+
+        monkeypatch.setattr(sdk_summary, "SummarizationMiddleware", capture_constructor)
+
+        real_build_backend = agent_mod.build_backend
+        backends = []
+
+        def capture_backend(session_dir, cfg):
+            backend = real_build_backend(session_dir, cfg)
+            backends.append(backend)
+            return backend
+
+        monkeypatch.setattr(agent_mod, "build_backend", capture_backend)
+
         build_db_agent(assembly_services, session_id="t-summary")
+        production = records[0]
+
+        assert "summarizer" in production
+        assert production["model"] is model
+        assert production["summarizer"] is not model
+        assert model.metadata == metadata_before
+        assert production["summarizer"].metadata == {
+            **metadata_before,
+            "dbda_call_kind": "summarization",
+        }
+        # 副本与主模型同类型；配置相同指排除有意不同的 metadata，不做全对象相等
+        assert type(production["summarizer"]) is type(model)
+        assert production["summarizer"].model_dump(exclude={"metadata"}) == (
+            model.model_dump(exclude={"metadata"})
+        )
+        # 其余实参与生产配置一致
+        assert production["backend"] is backends[0]
+        assert production["summary_prompt"] == build_summary_prompt(load_prompts())
         cfg = assembly_services.config
-        assert cfg.summarization.summary_trigger_tokens > 0
-        # summary 模型副本用途 metadata 在 §10.1 第 5 步设置；经装配成功间接验证
+        assert production["trigger"] == (
+            "tokens",
+            cfg.summarization.summary_trigger_tokens,
+        )
+        assert production["keep"] == (
+            "tokens",
+            cfg.summarization.recent_context_tokens,
+        )
+        assert production["trim_tokens_to_summarize"] is None
 
 
 class TestHandoffRead:
@@ -118,7 +180,7 @@ def summary_agent_env(assembly_services, monkeypatch, tmp_path):
     return handle, saver, fake, assembly_services
 
 
-def _invoke_with_context(handle, thread_id: str, question: str):
+def _invoke_with_context(handle, thread_id: str, question: str, *, observer=None):
     from datetime import UTC, datetime
 
     from src.modules.db_deepagent.context import DbAgentContext
@@ -137,6 +199,9 @@ def _invoke_with_context(handle, thread_id: str, question: str):
         carried_evidence=(),
         deadline_monotonic=float("inf"),
     )
+    config["metadata"] = {"dbda_call_kind": "agent"}
+    if observer is not None:
+        config["callbacks"] = [observer]
     handle.agent.invoke(
         {"messages": [HumanMessage(content=question)]}, config=config, context=ctx
     )
@@ -213,3 +278,25 @@ class TestSdkSummarizationEvent:
         assert isinstance(handoff_message, HumanMessage)
         assert "上一线程摘要" in handoff_message.content
         assert read_summary_for_handoff(old_values) in handoff_message.content
+
+    def test_production_summary_calls_keep_observer_classification(
+        self, summary_agent_env
+    ):
+        """完整生产图（新接线）下摘要调用与主模型调用均被观测且分类正确。
+
+        摘要副本带 summarization 用途 metadata，主调用的 agent 用途来自
+        调用 config（与生产 Runner 一致）；假模型无用量，不要求
+        token_usage_complete=True，也不把模拟用量当成本数据。
+        """
+        handle, _saver, _fake, _services = summary_agent_env
+        observer = ModelCallObserver("req-summary", "run-summary")
+        _invoke_with_context(
+            handle, "th-observer", "统计上个月的订单量", observer=observer
+        )
+        values = handle.agent.get_state(
+            {"configurable": {"thread_id": "th-observer"}}
+        ).values
+        assert read_summary_for_handoff(values)
+        snapshot = observer.finalize()
+        assert snapshot.anomalies == []
+        assert snapshot.total_model_calls > snapshot.summary_model_calls >= 1

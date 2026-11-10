@@ -492,7 +492,8 @@ def build_db_agent(
         "dbda_call_kind": "summarization",
     }
     summary_mw = SummarizationMiddleware(
-        summary_model,
+        model=model,
+        summarizer=summary_model,
         backend=backend,
         summary_prompt=build_summary_prompt(prompts),
         trigger=("tokens", cfg.summarization.summary_trigger_tokens),

@@ -30,6 +30,9 @@ def test_summary_near_trigger_real_model(db_agent_config, tmp_path):
 
     cfg = db_agent_config
     model = build_model(cfg)
+    # 本脚本显式标记主模型；生产主调用的 agent 标记由 Runner config 提供。
+    agent_model = model.model_copy()
+    agent_model.metadata = {**(model.metadata or {}), "dbda_call_kind": "agent"}
     summary_model = model.model_copy()
     summary_model.metadata = {
         **(model.metadata or {}),
@@ -37,7 +40,8 @@ def test_summary_near_trigger_real_model(db_agent_config, tmp_path):
     }
     backend = FilesystemBackend(root_dir=tmp_path, virtual_mode=True)
     middleware = SummarizationMiddleware(
-        summary_model,
+        model=agent_model,
+        summarizer=summary_model,
         backend=backend,
         trigger=("tokens", _TRIGGER),
         keep=("tokens", _KEEP),
@@ -49,9 +53,6 @@ def test_summary_near_trigger_real_model(db_agent_config, tmp_path):
         "callbacks": [observer],
         "metadata": {"request_id": "req-summary-window", "dbda_call_kind": "agent"},
     }
-    # 主模型也带 agent 用途标记（与生产装配一致）
-    agent_model = model.model_copy()
-    agent_model.metadata = {**(model.metadata or {}), "dbda_call_kind": "agent"}
 
     from deepagents import create_deep_agent
 
