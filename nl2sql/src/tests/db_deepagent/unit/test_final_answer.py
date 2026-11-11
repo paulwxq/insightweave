@@ -159,3 +159,25 @@ class TestChecks:
         )
         assert msg.content == "已接收最终答案"
         assert db_agent_context.run_id in updates["db_final_answers"]
+
+    def test_error_json_shared_envelope_layout_regression(self, node, db_agent_context):
+        """doc 9 §3：共享 error_envelope 的缩进布局影响本工具错误 JSON。
+
+        布局变为 indent=2 多行，但错误语义不变：error_type/retryable、
+        未接受时不写正式答案。成功回执与登记语义由上方用例覆盖。
+        """
+        existing = {
+            db_agent_context.run_id: {"run_id": db_agent_context.run_id, "answer": {}}
+        }
+        updates, msg = invoke_tool_node(
+            node,
+            [("submit_final_answer", _args(), "tc-sub")],
+            db_agent_context,
+            extra_state=_extra_state(answers=existing),
+        )
+        assert "\n  " in msg.content  # 共享信封的 indent=2 多行布局
+        payload = json.loads(msg.content)
+        assert payload["status"] == "error"
+        assert payload["error"]["error_type"] == "final_answer_already_submitted"
+        assert payload["error"]["retryable"] is False
+        assert "db_final_answers" not in updates  # 未接受时不写正式答案

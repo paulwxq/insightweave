@@ -203,6 +203,63 @@ class TestExecutionAnalysisReuse:
         assert len(payload["data"]["mapping"]) == 1
         assert len(updates["db_executions"]) == 1
 
+    def test_large_ea_mapping_matches_ledger(self, guard_services, db_agent_context):
+        """doc 9 §5：大型 E/A mapping（10+10，达到入参上限）逐项核对。
+
+        消息是 new_id 的唯一返回入口：全部 20 条映射须完整出现在返回中，
+        且每条 new_id/result_ref 与账本登记一致；E/A 沿用 warnings 恰两条。
+        """
+        exec_metas = [
+            _save_query_result(guard_services, db_agent_context) for _ in range(10)
+        ]
+        analysis_metas = [
+            _save_query_result(guard_services, db_agent_context) for _ in range(10)
+        ]
+        exec_records = [
+            _exec_record(m, evidence_id=f"E-old{i:02d}")
+            for i, m in enumerate(exec_metas)
+        ]
+        analysis_records = [
+            _analysis_record(m, evidence_id=f"A-old{i:02d}")
+            for i, m in enumerate(analysis_metas)
+        ]
+        ids = [r["evidence_id"] for r in exec_records] + [
+            r["evidence_id"] for r in analysis_records
+        ]
+        node = _node(guard_services, _clock(FROZEN))
+        updates, msg = _reuse(
+            node,
+            ids,
+            db_agent_context,
+            {"db_executions": exec_records, "db_analyses": analysis_records},
+        )
+        payload = json.loads(msg.content)
+        assert payload["status"] == "ok", payload
+        mapping = payload["data"]["mapping"]
+        assert [m["old_id"] for m in mapping] == ids  # 20 条全在、顺序与输入一致
+        assert payload["warnings"] == [
+            "沿用口径须在回答中写明（原始表达与区间/取值）",
+            "沿用历史结果须在回答中写明原结果生成时间与数据源",
+        ]
+        ledger_exec = {r["evidence_id"]: r for r in updates["db_executions"]}
+        ledger_ana = {r["evidence_id"]: r for r in updates["db_analyses"]}
+        assert len(ledger_exec) == 10 and len(ledger_ana) == 10
+        meta_by_old = {
+            **{f"E-old{i:02d}": m for i, m in enumerate(exec_metas)},
+            **{f"A-old{i:02d}": m for i, m in enumerate(analysis_metas)},
+        }
+        for entry in mapping:
+            record = ledger_exec.get(entry["new_id"]) or ledger_ana.get(entry["new_id"])
+            assert record is not None, entry
+            assert record["run_id"] == db_agent_context.run_id
+            assert entry["result_ref"] == meta_by_old[entry["old_id"]].result_ref
+            assert entry["kind"] == (
+                "execution" if entry["old_id"].startswith("E-") else "analysis"
+            )
+            assert entry["new_id"] == _expected_new_id(
+                db_agent_context, entry["old_id"], entry["new_id"][:2]
+            )
+
 
 class TestReuseChecks:
     def test_probe_execution_not_reusable(self, guard_services, db_agent_context):

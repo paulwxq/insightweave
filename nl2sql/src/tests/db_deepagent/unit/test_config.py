@@ -202,6 +202,24 @@ def test_unknown_keys_rejected(config_dict: dict):
         DbAgentConfig.model_validate(config_dict)
 
 
+def test_results_no_max_tool_output_chars(config_dict: dict):
+    """doc 9：results.max_tool_output_chars 已删除；真实 YAML 与模型一致。"""
+    from src.modules.db_deepagent.config import ResultsConfig
+
+    assert "max_tool_output_chars" not in ResultsConfig.model_fields
+    assert "max_tool_output_chars" not in config_dict["results"]
+    # 其余业务行数限制保留（doc 9 §2：业务层继续决定数据量）
+    assert "preview_rows" in ResultsConfig.model_fields
+    assert "read_max_rows" in ResultsConfig.model_fields
+
+
+def test_readded_max_tool_output_chars_rejected(config_dict: dict):
+    """严格配置模型：重新加回旧字段报 extra_forbidden，不再是软上限。"""
+    config_dict["results"]["max_tool_output_chars"] = 12000
+    with pytest.raises(Exception, match="max_tool_output_chars"):
+        DbAgentConfig.model_validate(config_dict)
+
+
 def test_error_messages_leak_no_password(
     config_dict: dict, db_agent_config: DbAgentConfig
 ):

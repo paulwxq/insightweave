@@ -18,11 +18,13 @@ from src.modules.db_deepagent.services import DbAgentServices
 from src.modules.db_deepagent.services.result_store import _encode_value
 from src.modules.db_deepagent.services.sql_pipeline import LedgerView
 from src.modules.db_deepagent.state import DbDeepAgentState
-from src.modules.db_deepagent.tools._envelope import finalize_output, tool_command
+from src.modules.db_deepagent.tools._envelope import (
+    serialize_tool_output,
+    tool_command,
+)
 from src.modules.db_deepagent.tools.schema_tools import (
     RuntimeToolArgs,
     _attach_validation_handler,
-    _merge_warnings,
 )
 from src.utils.logger import get_module_logger
 
@@ -86,10 +88,7 @@ def make_validate_sql_tool(services: DbAgentServices):
                     "维度值先 search_schema(dim_values) 或 probe_dimension_values",
                 },
             }
-        content, finalize_warnings = finalize_output(
-            payload, services.config.results.max_tool_output_chars
-        )
-        content = _merge_warnings(content, finalize_warnings)
+        content = serialize_tool_output(payload)
         logger.info(
             "[request_id=%s run_id=%s] validate_sql: valid=%s codes=%s",
             ctx.request_id,
@@ -176,10 +175,7 @@ def make_execute_sql_tool(services: DbAgentServices):
                 "data": data,
                 "warnings": [],
             }
-        content, finalize_warnings = finalize_output(
-            payload, services.config.results.max_tool_output_chars
-        )
-        content = _merge_warnings(content, finalize_warnings)
+        content = serialize_tool_output(payload)
         logger.info(
             "[request_id=%s run_id=%s] execute_sql: ok=%s error_type=%s",
             ctx.request_id,

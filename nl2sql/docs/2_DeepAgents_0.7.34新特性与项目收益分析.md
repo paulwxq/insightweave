@@ -303,7 +303,9 @@ agent.invoke(
 
 ### 5.3 【重点：局部替代】SDK 大工具输出转存与手工截断
 
-> **实施状态（2026-11-11，[doc 7](7_工具大输出SDK转存接入方案.md)）：** 已以 `inspect_tables` 为试点接入。该工具不再经 `finalize_output` 压缩/硬截断，直接返回完整缩进 JSON；超过转存阈值（20000 token ≈ 80000 字符，SDK 按 4 字符/token 近似）时由 `FilesystemMiddleware` 写入 `/artifacts/large_tool_results/`，模型收到预览+路径并可用既有 `read_file` 按行回读。离线验证覆盖边界、逐字相等、权限回读、Command 账本、写入失败与完整生产图（详见 doc 7 实施记录）。默认头尾各 5 行预览对缩进 JSON 主要是结构/括号信息；真实模型是否主动回读、费用与生产性能未验证；其他工具的 12000 字符硬截断与 JSON 中部截断缺陷保持原状、未全局修复。本节以下为实施前分析，保留原文。
+> **实施状态（2026-11-11，[doc 7](7_工具大输出SDK转存接入方案.md)）：** 已以 `inspect_tables` 为试点接入。该工具不再经 `finalize_output` 压缩/硬截断，直接返回完整缩进 JSON；超过转存阈值（20000 token ≈ 80000 字符，SDK 按 4 字符/token 近似）时由 `FilesystemMiddleware` 写入 `/artifacts/large_tool_results/`，模型收到预览+路径并可用既有 `read_file` 按行回读。离线验证覆盖边界、逐字相等、权限回读、Command 账本、写入失败与完整生产图（详见 doc 7 实施记录）。SDK 默认头尾各 5 行预览，关键字段是否可见取决于布局。doc 7 已记录真实模型+模拟结构的受控验收：`inspect_tables → grep → read_file` 成功读取预览之外的中部字段；不保证所有自然问题都会主动回读。
+>
+> **截断缺陷修复（2026-11-11，[doc 9](9_工具输出JSON完整性修复方案.md) 已实施）：** 其余工具的 12000 字符硬截断与 JSON 中部截断缺陷已按 doc 9 修复：`finalize_output`/`_merge_warnings` 与 `results.max_tool_output_chars` 已删除，全部业务工具（含共享错误信封）统一经 `serialize_tool_output`（`ensure_ascii=False, indent=2`）完整序列化，不再裁列/删行/字符截断；超过 80000 字符由 SDK 转存。离线测试覆盖大页/大预览/宽表行列错位复现、连续分页、警告精确性、大 E/A mapping、真实 `read_result`/`execute_sql` 转存逐字回读与 Command 账本保留，及完整生产图 `validate_sql → execute_sql → read_file → submit_final_answer` 闭环（假模型）。该轮为离线假件验证；其后已完成真实模型受控验收（2026-11-11，真实 `qwen3.8-max`＋模拟业务数据，见 [doc 9](9_工具输出JSON完整性修复方案.md) §6.6：execute 大输出转存→模型自决分窗回读取得预览外目标值→合法引用提交通过门控）。真实业务大输出样本、费用及生产性能仍未验证，也不证明所有自然问题主动回读；[doc 9](9_工具输出JSON完整性修复方案.md) §1 列明的编码边界（NaN/Infinity、嵌套非 JSON 类型）不在修复范围。本节以下为实施前分析，保留原文。
 
 当前 [_envelope.py](../src/modules/db_deepagent/tools/_envelope.py) 的 `finalize_output()` 先缩短 SQL、卡片、列表，仍过长时执行 `text[:max_chars]`。这可能截断 JSON，并且模型无法从被丢弃的正文恢复全部内容。
 

@@ -35,13 +35,12 @@ from src.modules.db_deepagent.services.sql_pipeline import LedgerView
 from src.modules.db_deepagent.state import DbDeepAgentState
 from src.modules.db_deepagent.tools._envelope import (
     error_envelope,
-    finalize_output,
+    serialize_tool_output,
     tool_command,
 )
 from src.modules.db_deepagent.tools.schema_tools import (
     RuntimeToolArgs,
     _attach_validation_handler,
-    _merge_warnings,
 )
 from src.utils.logger import get_module_logger
 
@@ -170,11 +169,7 @@ def make_resolve_time_range_tool(services: DbAgentServices):
             "timezone": ev["timezone"],
             "sql_hint": _sql_hint(ev),
         }
-        content, finalize_warnings = finalize_output(
-            {"status": "ok", "data": data, "warnings": []},
-            services.config.results.max_tool_output_chars,
-        )
-        content = _merge_warnings(content, finalize_warnings)
+        content = serialize_tool_output({"status": "ok", "data": data, "warnings": []})
         logger.info(
             "[request_id=%s run_id=%s] resolve_time_range: %s -> [%s, %s)",
             ctx.request_id,
@@ -314,7 +309,7 @@ def make_probe_dimension_values_tool(services: DbAgentServices):
         evidence_id = exec_record["evidence_id"] if exec_record else ""
         warnings: list[str] = []
         if not values:
-            content = finalize_output(
+            content = serialize_tool_output(
                 {
                     "status": "empty",
                     "data": {"values": [], "values_truncated": False},
@@ -325,9 +320,8 @@ def make_probe_dimension_values_tool(services: DbAgentServices):
                         "retryable": True,
                         "hint": "向用户澄清该取值，或检查列是否正确",
                     },
-                },
-                services.config.results.max_tool_output_chars,
-            )[0]
+                }
+            )
             return tool_command(
                 content,
                 runtime.tool_call_id or "",
@@ -358,7 +352,7 @@ def make_probe_dimension_values_tool(services: DbAgentServices):
         dim_evidence_id = dim_evidence["dim_evidence_id"]
         if mode == "distinct" and values_truncated:
             warnings.append(f"该列取值多于 limit（{n}），只有列出的值有证据")
-        content, finalize_warnings = finalize_output(
+        content = serialize_tool_output(
             {
                 "status": "ok",
                 "data": {
@@ -369,10 +363,8 @@ def make_probe_dimension_values_tool(services: DbAgentServices):
                     "sql": probe_sql,
                 },
                 "warnings": warnings,
-            },
-            services.config.results.max_tool_output_chars,
+            }
         )
-        content = _merge_warnings(content, finalize_warnings + warnings)
         logger.info(
             "[request_id=%s run_id=%s] probe_dimension_values: %s.%s mode=%s 命中 %d 值",
             ctx.request_id,
@@ -689,15 +681,13 @@ def make_reuse_evidence_tool(services: DbAgentServices, storage_clock=None):
         warnings = ["沿用口径须在回答中写明（原始表达与区间/取值）"]
         if new_executions or new_analyses:
             warnings.append("沿用历史结果须在回答中写明原结果生成时间与数据源")
-        content, finalize_warnings = finalize_output(
+        content = serialize_tool_output(
             {
                 "status": "ok",
                 "data": {"mapping": mapping},
                 "warnings": warnings,
-            },
-            services.config.results.max_tool_output_chars,
+            }
         )
-        content = _merge_warnings(content, finalize_warnings)
         logger.info(
             "[request_id=%s run_id=%s] reuse_evidence: time=%d dim=%d exec=%d analysis=%d",
             ctx.request_id,

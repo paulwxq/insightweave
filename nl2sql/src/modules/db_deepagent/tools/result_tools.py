@@ -24,13 +24,12 @@ from src.modules.db_deepagent.services.sql_pipeline import LedgerView, LedgerUpd
 from src.modules.db_deepagent.state import DbDeepAgentState
 from src.modules.db_deepagent.tools._envelope import (
     error_envelope,
-    finalize_output,
+    serialize_tool_output,
     tool_command,
 )
 from src.modules.db_deepagent.tools.schema_tools import (
     RuntimeToolArgs,
     _attach_validation_handler,
-    _merge_warnings,
 )
 from src.utils.logger import get_module_logger
 
@@ -84,11 +83,7 @@ def make_read_result_tool(services: DbAgentServices):
             "preview_truncated": page.next_offset is not None,
             "source_truncated": page.source_truncated,
         }
-        content, warnings = finalize_output(
-            {"status": "ok", "data": data, "warnings": []},
-            services.config.results.max_tool_output_chars,
-        )
-        content = _merge_warnings(content, warnings)
+        content = serialize_tool_output({"status": "ok", "data": data, "warnings": []})
         return tool_command(content, runtime.tool_call_id or "")
 
     _attach_validation_handler(read_result)
@@ -269,11 +264,9 @@ def make_analyze_result_tool(services: DbAgentServices):
         }
         if outcome.executed_sql:
             data["executed_sql"] = outcome.executed_sql[:3000]
-        content, finalize_warnings = finalize_output(
-            {"status": "ok", "data": data, "warnings": list(outcome.warnings)},
-            services.config.results.max_tool_output_chars,
+        content = serialize_tool_output(
+            {"status": "ok", "data": data, "warnings": list(outcome.warnings)}
         )
-        content = _merge_warnings(content, finalize_warnings)
         logger.info(
             "[request_id=%s run_id=%s] analyze_result: %s rows=%d pushdown=%s",
             ctx.request_id,

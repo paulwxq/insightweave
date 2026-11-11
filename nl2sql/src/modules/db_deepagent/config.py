@@ -176,9 +176,11 @@ class ValidationConfig(_StrictModel):
 
 
 class ResultsConfig(_StrictModel):
+    # doc 9 §2：本段只约束业务数据量（预览行数/分页/保存上限等）；
+    # 工具返回文本不再有字符预算，超长正文由 SDK FilesystemMiddleware
+    # 按 filesystem.tool_token_limit_before_evict 转存
     preview_rows: int = Field(gt=0)
     read_max_rows: int = Field(gt=0)
-    max_tool_output_chars: int = Field(gt=0)
     placeholder_max_values: int = Field(gt=0)
     probe_max_values: int = Field(gt=0)
 

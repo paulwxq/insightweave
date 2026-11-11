@@ -46,6 +46,12 @@ agent:
     - 预览不足时用 read_result 分页读取；占比／环比显式传 round_digits。
     - 用户要求严格原时点结论时，analyze_result 用 allow_pushdown=false；
       源结果截断会返回 incomplete_source，如实告知无法恢复完整原快照。
+    - 工具返回 /artifacts/large_tool_results/ 路径时，先看附带预览；信息
+      不足再用 grep/read_file 定位并分窗口读取（大文件不要一次整读）。
+      文件路径本身不是 result_ref/evidence_id，引用仍用返回中的真实标识。
+    - 分析结果被转存时，先从预览或文件取得 result_ref/evidence_id 再继续
+      分页、分析或提交；跨运行沿用仍遵循 reuse_evidence 规则。结果分页
+      和计算继续用业务工具，不能把已保存部分冒充总体。
 
     ## 表述
     - 空结果、查询失败、数据缺失、业务异常分别表述；空结果不等于数值为 0。

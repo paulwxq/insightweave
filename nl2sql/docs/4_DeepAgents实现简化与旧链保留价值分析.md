@@ -38,7 +38,7 @@
 | 0.7.25 → 0.7.34 的升级候选与旧版本表 | 升级已经落地，应使用上表作为当前基线；旧表保留研究时点含义 |
 | pandas 仍直接声明在 web extra 等旧说明 | 旧 UI 清理后 web extra 已删除，pandas 作为其他组件的传递依赖保留，不据旧描述恢复依赖 |
 | 独立摘要器 | 已接入（2026-11-10，[doc 5](5_独立摘要器接入修改方案.md)）并独立配置摘要模型（同日，[doc 5.1](5.1_摘要器独立LLM配置与Qwen3.8-Flash接入方案.md)）：`model=主模型(qwen3.8-max), summarizer=build_summarizer_model 产物(qwen3.8-flash)`，离线回归、完整图分类与低阈值真实调用验证通过 |
-| 工具按需加载、结构化输出 | 仍未在当前主 Agent 按这些方案启用，需继续评估 |
+| 工具按需加载、结构化输出 | 均未在当前主 Agent 启用；工具按需加载仍待评估，最终答案结构化输出已完成离线评估，暂不迁移（见 §4.4） |
 
 依据：[当前依赖声明](../pyproject.toml)、[Agent 装配](../src/modules/db_deepagent/agent.py)、[旧 UI 清理实施记录](3_NL2SQL旧前端清理设计.md)。
 
@@ -72,7 +72,9 @@
 
 ### 4.1 工具输出：优先保证结构完整，再评估 SDK 转存
 
-**试点已实施（2026-11-11，[doc 7](7_工具大输出SDK转存接入方案.md)）：** `inspect_tables` 改为直接返回完整缩进 JSON，不再走 `finalize_output`；超过 SDK 转存阈值（≈80000 字符）时自动写入 `/artifacts/large_tool_results/` 并可按行回读。下述建议 2、3（转存位置/权限回读/`Command` 账本保留/模型实际可见内容）已由 doc 7 的离线测试逐一验证（含完整生产图：动态假模型从替换消息提取路径并回读到末列标记）。建议 1（其余工具返回包的结构完整性）**仍未实施**：`finalize_output` 的 JSON 中部截断缺陷对 read_result/analyze_result/search_schema/plan_joins/guard/SQL 等工具保持原状；真实大输出样本与真实模型主动回读行为未验证。以下为实施前分析，保留原文。
+**试点已实施（2026-11-11，[doc 7](7_工具大输出SDK转存接入方案.md)）：** `inspect_tables` 改为直接返回完整缩进 JSON，不再走 `finalize_output`；超过 SDK 转存阈值（≈80000 字符）时自动写入 `/artifacts/large_tool_results/` 并可按行回读。下述建议 2、3（转存位置/权限回读/`Command` 账本保留/模型实际可见内容）已由 doc 7 的离线测试逐一验证（含完整生产图：动态假模型从替换消息提取路径并回读到末列标记）。doc 7 还完成了真实模型+模拟结构的受控回读验收，实际执行 `inspect_tables → grep → read_file`；这不保证所有自然问题主动回读。
+
+**建议 1 已实施（2026-11-11，[doc 9](9_工具输出JSON完整性修复方案.md)）：** `finalize_output` 的 JSON 中部截断/裁列缺陷已按 doc 9 修复：删除 `finalize_output`/`_merge_warnings` 与 `results.max_tool_output_chars`，read_result/analyze_result/search_schema/plan_joins/validate_sql/execute_sql/resolve_time_range/probe_dimension_values/reuse_evidence 九个工具（及共享错误信封影响的 submit_final_answer）统一改为 `serialize_tool_output`（`ensure_ascii=False, indent=2`）完整序列化，不裁列/删行/字符截断；超 80000 字符经 SDK 转存。离线测试覆盖宽表行列错位复现、大页/大预览、连续分页无跳重、probe 警告精确单条、大 E/A mapping 逐项对账、read_result/execute_sql 真实转存逐字回读与 Command 账本保留，及完整生产图 `validate_sql → execute_sql → read_file → submit_final_answer` 闭环（假模型，提交内容来自预览之外的实际回读数据）。覆盖界限：离线验证之外，真实模型受控验收已于 2026-11-11 通过（真实 `qwen3.8-max`＋模拟业务数据，见 [doc 9](9_工具输出JSON完整性修复方案.md) §6.6；doc 7 的真实模型受控回读仍仅覆盖 `inspect_tables → grep → read_file`）；真实业务大输出样本及费用/生产性能未验证，也不证明所有自然问题主动回读；doc 9 §1 列明的编码边界（NaN/Infinity、嵌套非 JSON 类型）明确不在修复范围。以下为实施前分析，保留原文。
 
 当前 [tools/_envelope.py](../src/modules/db_deepagent/tools/_envelope.py) 的 `finalize_output()` 会先压缩部分字段，仍超长时执行 `text[:max_chars]`。这能限制长度，却不能保证 JSON 仍可解析。
 
@@ -114,6 +116,10 @@
 这属于调用协议变化，当前不宜仅为减少几行工具装配代码而接入。
 
 ### 4.4 最终答案：SDK 可替代格式处理，业务证据接受逻辑保留
+
+**评估已完成，暂不迁移（2026-11-11）：** 两路源码分析与离线探针确认 `response_format` / `ToolStrategy` 可以接入，但以“减少自研代码”为目标未体现净收益。现有提交工具已经通过 `args_schema`、框架参数校验与 `handle_validation_error` 获得格式校验、错误反馈和模型修正循环；四项业务检查与正式答案记录仍需保留。迁移还要增加业务接受桥接，适配 SDK 的结束路由、结构化工具在模型绑定阶段追加造成的审计覆盖差异，以及提交尝试不再经过 `wrap_tool_call` 的计数变化。
+
+桥接可以继续写同形 `db_final_answers[run_id]`，**不必修改 Runner 的读取契约**；业务拒绝后的模型重试仍受现有预算约束。补充离线检查确认当前 `ChatOpenAI(model="qwen3.8-max")` 配置的自动策略选择为 `ToolStrategy`，`tool_choice="any"` 在适配层绑定为 `required`。这些检查未调用真实供应商，也未验证完整业务装配或 PostgreSQL 检查点下的迁移行为，不代表已证明真实模型的答案格式质量收益。结论仅针对当前链路的减码目标，不代表结构化输出对独立提取、分类等任务无用。本次保留提交工具、门控与 Runner，不为迁移预先抽取业务函数。下文保留评估前的候选思路。
 
 当前 [final_answer.py](../src/modules/db_deepagent/tools/final_answer.py) 不只是生成答案 Schema，还检查独立提交、重复提交、证据归属、禁止引用探针和状态一致性，并写入 run 级 `FinalAnswerRecord`。`FinalAnswerGateMiddleware` 控制接受后结束与漏提交提醒；Runner 从 `db_final_answers[run_id]` 读取正式结果。
 
@@ -184,7 +190,7 @@
 1. **先处理工具返回结构问题**：明确保留字段与超长结果策略，再验证 SDK 转存能否减少通用截断处理。
 2. **做摘要器隔离对照**：保留主模型的上下文依据，单独配置实际摘要生成器；核对质量、观测与交接，不急于更换模型。
 3. **顺带清理等价装配覆盖**：已完成（2026-11-11，[doc 8](8_默认工具调用修补中间件装配精简方案.md)）——显式覆盖已删除，行为保留测试与回归通过。
-4. **再决定工具披露与答案协议是否值得迁移**：分别验证净收益，不捆绑实施。
+4. **再决定工具披露与答案协议是否值得迁移**：最终答案结构化输出已完成离线评估，当前以减码为目标暂不迁移（§4.4）；工具披露另行评估，不捆绑实施。
 5. **旧链先冻结保留**：只有明确停止其 CLI/对照用途后，再制定删除清单。
 
 这是分析后的优先级建议，不是本轮开始实施这些改动的声明。
