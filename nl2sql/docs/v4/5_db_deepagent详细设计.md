@@ -1835,6 +1835,24 @@ pool = ConnectionPool(conninfo, min_size=..., max_size=...,
 - **`qa` 的 `status` 字段直接保存 Runner 判定的真实运行状态**（与 `DbAgentResult.status` 同一七值枚举），不另设 qa 专用枚举、不为凑枚举改写状态：SQL 成功后预算耗尽（满足 a、状态 `budget_exhausted`）、查询成功但空结果（`no_data`）、待澄清（`needs_clarification`）均按真实状态入 `qa`；`persistence_error` 按 §14.3 P3 规则归档本身失败、不写 `qa`。预算耗尽但无成功真实执行的请求不满足 a → `run_errors`。
 - `qa` 的 evidence 摘要保留 `reused_from` 来源标记（§14.2 `EvidenceItem`）。
 
+**最终答案兜底的归档契约 v2（待实施变更）**：以下是 [doc 6.2 §7.4](../6.2_db_deepagent最终答案兜底问题与补齐建议.md) 定义的目标契约，当前业务代码尚未实施，不将旧审核结论当作运行时已生效证明。
+
+| 字段 | 旧记录（v1） | 新记录（v2，QA／run_errors） |
+| --- | --- | --- |
+| `archive_schema_version` | 缺失时按 LEGACY_ARCHIVE_SCHEMA_VERSION（1）解释 | 写读共用 ARCHIVE_SCHEMA_VERSION（当前为 2） |
+| `answer` | QA 中原模型提交 payload | 仅缺失 answer 键或外层记录时为 `{}`；原键的 None、空串、列表等非法值仍按原类型和值保存，不替换为兜底或资格视图 |
+| `delivery_answer` | 缺失 | 实际交付 payload，正文用于实时、历史、CLI；其中 status 是 P3 写入时的 Runner 状态 |
+| `answer_source` | 缺失，历史来源未标注 | `model`／`system_fallback`／`none`，描述 delivery_answer 来源 |
+| 顶层 `status` | Runner 状态 | 继续为 Runner 状态；P3 部分写入失败仍不承诺事务回滚或历史原子一致 |
+| `read_delivery_answer()` 的状态字段 | 视图将模型 status 改名为 submitted_status，不返回 status | 视图保留 delivery_answer.status，表示 Runner 写入时状态 |
+
+- 不新增与原 `answer` 重复的 `submitted_answer`。需要模型原始提交的读者继续读取 `answer`；需要历史交付浅投影的新读者经 `QaArchive.read_delivery_answer()` 按版本读取。v1 返回副本时将原 status 改名为 submitted_status，防止与 v2 Runner 状态同名异义，不补造 Runner 状态；跨版本展示/统计统一读取归档顶层 status，不能以 submitted_status 替代。除此改名外，该函数只检查版本及字典容器，不验证字段内容；不得据此认定归档合法。旧 v1 原 answer 非字典时可返回空视图，不重写原值；未知版本或非字典 v2 容器显式报错。
+- 版本常量集中定义于 persistence/archive.py，由 Runner 与读取函数导入；新增格式须保留旧版本读取路径及兼容测试。
+- 同步强化条件 b：除既有状态、有效 E／A 沿用引用外，按当前 run_id 键取得的记录，其外层 run_id、request_id 还必须与 Runner 本轮参数精确一致，且 payload 通过结构及非空白正文检查；缺失或不一致均无效，不从字典键补齐。`_finalize()` 通过 `normalize_final_answer_record()` 一次生成归一字典或 None，供评估、交付与归档复用，后两者不重新解析。空白或归属不符的提交即使存在 FinalAnswerRecord 也不满足 b；有真实执行时仍可按条件 a 归档。原 answer 保留供审计，不因归属不符而改写，也不能据此把交付判为成功。这不扩大历史浅投影的校验职责。
+- 提取原值统一使用 `extract_raw_final_answer_payload()`；资格判断只读取通过验证并归一后的 eligible_payload，无效时为 `{}`。不能在检查为无效后仍遍历原始 findings 或调用其 `.get()`，否则无效提交会在 P3 触发二次异常。
+- 当前运行的有效正文检查同时在提交参数模型、Runner `_evaluate()` 和条件 b 使用；归档读取兼容不意味着历史记录自动满足当前有效性规则。
+- 实施前登记并核查已知仓库内外消费者，不能以仓库内搜索未命中证明没有外部读者。保留原字段用于降低兼容风险，新增版本和交付字段仍须验收；新旧记录读取、正常答案原文保留、系统兜底、前置拒绝来源 none 均须测试。
+
 同一线程的模型上下文来自 checkpoint，不从 Store 读取问答再注入（F12“历史不重复注入”）。
 
 ### 13.4 线程轮换
