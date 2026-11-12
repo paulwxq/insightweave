@@ -1,20 +1,10 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
-import { useRoute, useRouter } from 'vue-router'
-import ConversationList from '../modules/nl2sql/components/ConversationList.vue'
-import {
-  activeSessionId,
-  loadMoreSessions,
-  refreshSessions,
-  sessions,
-  sessionsError,
-  sessionsHasMore,
-  sessionsLoading,
-  sessionsNotice,
-} from '../modules/nl2sql/sessionList'
+import { computed, inject, ref } from 'vue'
+import { useRoute } from 'vue-router'
+import { queryBusyKey } from '../modules/nl2sql/queryBusy'
 
 const route = useRoute()
-const router = useRouter()
+const queryBusy = inject(queryBusyKey, ref(false))
 const assetsActive = computed(
   () => route.path === '/data-assets' || route.path.startsWith('/data-assets/'),
 )
@@ -44,28 +34,33 @@ function toggleWorkspacesMenu() {
   if (onGlobalJobsPage.value) return // 强制展开时点击箭头不改状态、不跳转（§4.3）
   manualExpanded.value = !manualExpanded.value
 }
-const queryActive = computed(
-  () => route.path === '/query' || route.path.startsWith('/query/'),
-)
+const queryActive = computed(() => route.path === '/query' || route.path.startsWith('/query/'))
+const onNewQueryPage = computed(() => route.path === '/query/new')
+const queryManualOpen = ref(false)
+const queryMenuOpen = computed(() => onNewQueryPage.value || queryManualOpen.value)
 
-function openSession(sessionId: string) {
-  void router.push({ name: 'nl2sql-query-session', params: { sessionId } })
+function toggleQueryMenu() {
+  if (onNewQueryPage.value) return
+  queryManualOpen.value = !queryManualOpen.value
+}
+
+function guardNewQuery(event: MouseEvent, navigate: (event: MouseEvent) => void) {
+  if (queryBusy.value) {
+    event.preventDefault()
+    return
+  }
+  navigate(event)
 }
 </script>
 
 <template>
-  <aside class="sidebar" :class="{ 'sidebar-lock': queryActive }">
+  <aside class="sidebar">
     <div class="brand">
       <img class="brand-logo" src="/favicon.svg" width="34" height="34" alt="" />
       <div class="brand-text">
         <strong>MetaWeave</strong>
         <small>智能数据分析工作台</small>
       </div>
-    </div>
-
-    <div class="sidebar-actions">
-      <RouterLink to="/query" class="button button-primary full-width query-entry">›&nbsp; 新建查询</RouterLink>
-      <button class="button button-outline full-width" disabled title="后续阶段开放">＋&nbsp; 新建分析</button>
     </div>
 
     <nav class="sidebar-nav" aria-label="主导航">
@@ -83,6 +78,39 @@ function openSession(sessionId: string) {
           数据资产
         </a>
       </RouterLink>
+      <div class="nav-row" :class="{ active: queryActive }">
+        <RouterLink to="/query">
+          <span class="nav-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" /></svg>
+          </span>
+          智能问数
+        </RouterLink>
+        <button
+          type="button"
+          class="nav-chevron"
+          :class="{ open: queryMenuOpen }"
+          :aria-expanded="queryMenuOpen"
+          :aria-disabled="onNewQueryPage || undefined"
+          aria-label="展开或收起智能问数子菜单"
+          @click="toggleQueryMenu"
+        >
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6" /></svg>
+        </button>
+      </div>
+      <template v-if="queryMenuOpen">
+        <RouterLink to="/query/new" custom v-slot="{ href, navigate }">
+          <a
+            :href="href"
+            class="nav-sub query-sub"
+            :class="{ active: onNewQueryPage, 'is-busy': queryBusy }"
+            :aria-disabled="queryBusy || undefined"
+            @click="guardNewQuery($event, navigate)"
+          >
+            新建查询
+          </a>
+        </RouterLink>
+        <span class="nav-disabled nav-sub query-sub" title="即将开放">新建分析 <small>即将开放</small></span>
+      </template>
       <RouterLink to="/data-sources" custom v-slot="{ href, navigate }">
         <a :href="href" :class="{ active: sourcesActive }" @click="navigate">
           <span class="nav-icon" aria-hidden="true">
@@ -127,38 +155,10 @@ function openSession(sessionId: string) {
         系统设置 <small>待开放</small>
       </span>
     </nav>
-
-    <div v-if="queryActive" class="sidebar-history">
-      <ConversationList
-        :sessions="sessions"
-        :loading="sessionsLoading"
-        :error="sessionsError"
-        :has-more="sessionsHasMore"
-        :notice="sessionsNotice"
-        :current-session-id="activeSessionId"
-        @open="openSession"
-        @load-more="loadMoreSessions"
-        @refresh="refreshSessions"
-      />
-    </div>
-    <div v-else class="sidebar-footer">
-      <span class="eyebrow">RECENT PROJECTS</span>
-      <p>分析项目待接入</p>
-      <small>当前可登记并管理数据源连接。</small>
-    </div>
   </aside>
 </template>
 
 <style scoped>
-.sidebar-actions :deep(.button) {
-  border-radius: 12px;
-}
-
-.sidebar-actions :deep(.query-entry) {
-  background: #2e7cd6;
-  box-shadow: none;
-}
-
 /* doc 9 §4.3 行容器承担选中背景与悬停样式；箭头是相邻 <button>，不嵌在 <a> 内 */
 .nav-row {
   min-height: 44px;
@@ -242,24 +242,20 @@ function openSession(sessionId: string) {
 
 @media (max-width: 800px) {
   /* 移动端侧边栏收窄为图标态，隐藏折叠箭头（沿用既有行为） */
-  .nav-chevron {
-    display: none;
+  .nav-chevron,
+  .query-sub {
+    display: none !important;
   }
 }
 
-.sidebar-lock {
-  height: 100vh;
-  position: sticky;
-  top: 0;
-  overflow: hidden;
+.nav-sub.is-busy {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 
-.sidebar-history {
-  flex: 1;
-  min-height: 0;
-  display: flex;
-  margin-top: 8px;
-  padding-top: 14px;
-  border-top: 1px solid #d9e3ef;
+span.query-sub {
+  padding-left: 36px;
+  color: #98a6ba;
 }
+
 </style>

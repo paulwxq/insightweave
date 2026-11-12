@@ -4,7 +4,7 @@
  * 后端时间为带时区 ISO 8601（+08:00 偏移），与 MetaWeave 的 UTC 微秒格式
  * 不同；不共用 displayDate（其正则只接受 `…Z` 六位微秒）。按北京时间展示。
  */
-export function formatNl2sqlTime(value: string | null | undefined): string {
+export function formatNl2sqlTime(value: string | null | undefined, withSeconds = false): string {
   if (typeof value !== 'string' || value === '') return '—'
   const date = new Date(value)
   if (Number.isNaN(date.getTime())) return '—'
@@ -16,10 +16,12 @@ export function formatNl2sqlTime(value: string | null | undefined): string {
     day: '2-digit',
     hour: '2-digit',
     minute: '2-digit',
+    ...(withSeconds ? { second: '2-digit' as const } : {}),
   }).formatToParts(date)
   const part = (type: string): string =>
     parts.find((item) => item.type === type)?.value ?? ''
-  return `${part('year')}-${part('month')}-${part('day')} ${part('hour')}:${part('minute')}`
+  const clock = `${part('hour')}:${part('minute')}${withSeconds ? `:${part('second')}` : ''}`
+  return `${part('year')}-${part('month')}-${part('day')} ${clock}`
 }
 
 /** 问题长度按 Unicode 码点计（doc 2 §4.2：1–1000）。 */
@@ -64,27 +66,19 @@ function dayKeyOffset(key: string, days: number): string {
   return `${y}-${m}-${d}`
 }
 
-/** 侧栏历史时间：刚刚 / N 分钟前 / N 小时前 / 昨天 HH:mm / N 天前 / 日期。 */
-export function formatRelativeTime(value: string | null | undefined, now = new Date()): string {
-  if (typeof value !== 'string' || value === '') return ''
-  const date = new Date(value)
-  const clock = shanghaiClock(date)
-  const today = shanghaiClock(now)
-  if (!clock || !today) return ''
-  const diffMs = now.getTime() - date.getTime()
-  if (diffMs >= 0 && diffMs < 60_000) return '刚刚'
-  if (clock.key === today.key) {
-    const minutes = Math.floor(diffMs / 60_000)
-    if (minutes < 60) return `${Math.max(minutes, 1)} 分钟前`
-    return `${Math.floor(minutes / 60)} 小时前`
+/** 会话标题搜索上限，与后端 q 的码点上限一致。 */
+export const SESSION_KEYWORD_MAX = 100
+
+/** 问题长度上限（doc 2 §4.2：1–1000 码点），输入组件与发送入口共用。 */
+export const QUESTION_MAX = 1000
+
+/** 整理后的搜索词；超限返回提示，不截短。空字符串表示不搜索。 */
+export function sessionKeyword(raw: string): { keyword: string; error: string } {
+  const keyword = raw.trim()
+  if (codepointLength(keyword) > SESSION_KEYWORD_MAX) {
+    return { keyword: '', error: '关键字最多 100 个字符' }
   }
-  if (clock.key === dayKeyOffset(today.key, -1)) return `昨天 ${clock.hour}:${clock.minute}`
-  const dayDiff = Math.round(
-    (Date.parse(`${today.key}T00:00:00Z`) - Date.parse(`${clock.key}T00:00:00Z`)) / 86_400_000,
-  )
-  if (dayDiff > 1 && dayDiff < 7) return `${dayDiff} 天前`
-  if (dayDiff >= 7 && dayDiff < 14) return '上周'
-  return `${Number(clock.month)}月${Number(clock.day)}日`
+  return { keyword, error: '' }
 }
 
 /** 消息区日期分隔：今天 14:20 / 昨天 18:07 / 10月16日 09:41。 */

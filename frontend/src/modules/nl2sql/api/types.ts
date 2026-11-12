@@ -63,13 +63,21 @@ export interface WebTurn {
   evidence?: TurnEvidenceView[]
 }
 
-/** 会话/轮次分页 data：{items, limit, offset, has_more, next_offset}。 */
+/** 轮次等通用分页 data：{items, limit, offset, has_more, next_offset}。 */
 export interface PageData<T> {
   items: T[]
   limit: number
   offset: number
   has_more: boolean
   next_offset: number | null
+}
+
+/** 会话列表分页。统计只属于会话列表，不进入轮次分页。 */
+export interface SessionListData<T> extends PageData<T> {
+  total_all: number
+  total_filtered: number
+  /** 全部有效 Web 会话登记 turn_count 缓存之和（doc 12 §2.1，全局不受筛选影响）。 */
+  total_turns_all: number
 }
 
 // --------------------------------------------------------------- 查询响应

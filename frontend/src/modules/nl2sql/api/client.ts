@@ -17,6 +17,7 @@ import type {
   ReadinessData,
   ResultPageData,
   SessionInfo,
+  SessionListData,
   WebQueryResult,
   WebTurn,
 } from './types'
@@ -152,17 +153,19 @@ export function createSession(sourceId: string): Promise<SessionInfo> {
 
 export interface SessionListParams {
   sourceId?: string
+  q?: string
   limit?: number
   offset?: number
 }
 
-export function listSessions(params: SessionListParams = {}): Promise<PageData<SessionInfo>> {
+export function listSessions(params: SessionListParams = {}): Promise<SessionListData<SessionInfo>> {
   const query = new URLSearchParams()
   if (params.sourceId) query.set('source_id', params.sourceId)
+  if (params.q) query.set('q', params.q)
   if (params.limit !== undefined) query.set('limit', String(params.limit))
   if (params.offset !== undefined) query.set('offset', String(params.offset))
   const suffix = query.size > 0 ? `?${query.toString()}` : ''
-  return request<PageData<SessionInfo>>(`/api/v2/sessions${suffix}`)
+  return request<SessionListData<SessionInfo>>(`/api/v2/sessions${suffix}`)
 }
 
 export function getSession(sessionId: string): Promise<SessionInfo> {

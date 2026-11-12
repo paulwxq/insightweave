@@ -21,17 +21,10 @@ import {
   submitQuery,
 } from '../api/client'
 import type { ReadinessData, SessionInfo, WebQueryResult, WebTurn } from '../api/types'
+import { codepointLength, QUESTION_MAX } from '../format'
 import { NL2SQL_MESSAGES, messageForNl2sql } from '../messages'
-import {
-  activeSessionId,
-  loadMoreSessions,
-  refreshSessions,
-  sessions,
-  sessionsError,
-  sessionsHasMore,
-  sessionsLoading,
-  sessionsNotice,
-} from '../sessionList'
+import { nl2sqlPageGuard } from '../pageGuard'
+import { sessionBackTarget } from '../queryHomeLink'
 
 export { NL2SQL_MESSAGES, messageForNl2sql }
 
@@ -57,6 +50,10 @@ export interface CurrentTurn {
 export type ReadinessState = 'idle' | 'checking' | 'ready' | 'blocked' | 'error'
 
 export function useNl2sqlChat(router: Router) {
+  const page = nl2sqlPageGuard.openInstance()
+  function stillHere(): boolean {
+    return page.stillHere()
+  }
   // ------------------------------------------------------------- 数据源（平台 API）
   const sources = ref<DataSourceListItem[]>([])
   const sourcesLoading = ref(false)
@@ -85,6 +82,11 @@ export function useNl2sqlChat(router: Router) {
   const currentTurn = shallowRef<CurrentTurn | null>(null)
   const elapsedSeconds = ref(0)
   const askNotice = ref('')
+  const sessionsNotice = ref('')
+  /** 受控首问草稿（doc 11）：创建失败或路由切换不丢输入。 */
+  const questionDraft = ref('')
+  /** 首次发送的创建阶段忙碌标记。 */
+  const creatingSession = ref(false)
 
   let requestToken = 0
   let elapsedTimer: ReturnType<typeof setInterval> | null = null
@@ -115,6 +117,18 @@ export function useNl2sqlChat(router: Router) {
       askState.value !== 'submitting',
   )
 
+  /** 页面统一忙碌（doc 11）：创建中或查询执行中。 */
+  const busy = computed(() => creatingSession.value || askState.value === 'submitting')
+
+  /** 允许输入并发送：无会话看选库+就绪，有会话沿用既有可提交条件。 */
+  const canCompose = computed(() => {
+    if (busy.value) return false
+    if (currentSessionId.value === '') {
+      return selectedSourceId.value !== '' && readinessState.value === 'ready'
+    }
+    return canSubmit.value
+  })
+
   function stopElapsed() {
     if (elapsedTimer !== null) {
       clearInterval(elapsedTimer)
@@ -122,7 +136,10 @@ export function useNl2sqlChat(router: Router) {
     }
   }
 
-  onUnmounted(stopElapsed)
+  onUnmounted(() => {
+    stopElapsed()
+    page.release()
+  })
 
   // ------------------------------------------------------------- 数据源与列表
 
@@ -150,6 +167,8 @@ export function useNl2sqlChat(router: Router) {
     readinessState.value = 'checking'
     readinessError.value = ''
     readinessData.value = null
+    // 更换来源即清上一次创建提示，避免旧错误遮住新校验结果（doc 11）
+    sessionsNotice.value = ''
     try {
       const data = await getReadiness(sourceId)
       // 迟到响应不得覆盖新选择的源状态
@@ -172,12 +191,16 @@ export function useNl2sqlChat(router: Router) {
     readinessState.value = 'idle'
     readinessData.value = null
     readinessError.value = ''
+    sessionsNotice.value = ''
   }
 
   // ------------------------------------------------------------- 会话打开
 
   function resetCurrentSession() {
     requestToken += 1
+    // 作废进行中的首次发送：同步释放创建忙碌，避免同页残留（doc 11 任务 2）
+    creatingSession.value = false
+    questionDraft.value = ''
     stopElapsed()
     currentSessionId.value = ''
     sessionInfo.value = null
@@ -189,7 +212,6 @@ export function useNl2sqlChat(router: Router) {
     askState.value = 'idle'
     currentTurn.value = null
     askNotice.value = ''
-    activeSessionId.value = ''
   }
 
   /** 历史分页页大小：正序接口按“尾部一页 + 向前加载更早”使用。 */
@@ -250,11 +272,13 @@ export function useNl2sqlChat(router: Router) {
   }
 
   /** 打开会话：详情（含 metadata_invalid 单次重读）→ turns（doc 2 §7.1）。
-   * 每次异步写入前核对令牌与会话，迟到响应不覆盖新页面状态。 */
+   * 每次异步写入前核对令牌与会话，迟到响应不覆盖新页面状态。
+   * 同一会话的重读（如“刷新对话”）保留未发送草稿；真正切换会话仍清空（Kimi R1-01）。 */
   async function openSession(sessionId: string) {
+    const preservedDraft = currentSessionId.value === sessionId ? questionDraft.value : ''
     resetCurrentSession()
+    if (preservedDraft !== '') questionDraft.value = preservedDraft
     currentSessionId.value = sessionId
-    activeSessionId.value = sessionId
     const token = requestToken
     const stale = () => token !== requestToken || currentSessionId.value !== sessionId
     try {
@@ -295,38 +319,151 @@ export function useNl2sqlChat(router: Router) {
     await loadTurns(sessionId, token)
   }
 
-  // ------------------------------------------------------------- 新建会话
+  // ------------------------------------------------------------- 新建会话（doc 11：首次发送时创建）
 
-  async function createNewSession(): Promise<boolean> {
-    if (selectedSourceId.value === '' || readinessState.value !== 'ready') return false
+  /** 创建结果不确定时的统一提示：网络失败也可能发生在请求送达之后，不能断言未创建。 */
+  const CREATE_PENDING_NOTICE = '会话创建结果尚未确认，请勿重复发送，可稍后从查询历史查看。'
+
+  function invalidatePendingCreate() {
+    nl2sqlPageGuard.invalidateCreate()
+    // 作废时同步释放创建忙碌，迟到 finally 不得清掉之后新发起的创建状态
+    creatingSession.value = false
+  }
+
+  /** 当前页面是否已接管该会话：当前 ID 与真实 sessionInfo 均一致。 */
+  function hasCurrentSession(sessionId: string): boolean {
+    if (currentSessionId.value !== sessionId) return false
+    const info = sessionInfo.value
+    return info !== null && info.session_id === sessionId
+  }
+
+  /** 只创建会话，不导航：成功返回真实 SessionInfo，失败或过期返回 null。 */
+  async function createSessionForFirstQuestion(): Promise<SessionInfo | null> {
+    if (selectedSourceId.value === '' || readinessState.value !== 'ready') return null
+    const token = requestToken
+    const createdAt = nl2sqlPageGuard.createStamp()
+    const createCurrent = () =>
+      stillHere() && token === requestToken && createdAt === nl2sqlPageGuard.createStamp()
     sessionsNotice.value = ''
     try {
       const info = await createSession(selectedSourceId.value)
-      await router.push({ path: `/query/${info.session_id}` })
-      await refreshSessions()
-      return true
+      if (!createCurrent()) return null
+      return info
     } catch (error) {
+      if (!createCurrent()) return null
       if (
         error instanceof Nl2sqlApiError &&
         (error.code === 'timeout' || error.code === 'network_error')
       ) {
-        // 创建结果未确认：刷新列表由用户选择，不自动重试（doc 2 §7.1）
-        sessionsNotice.value = messageForNl2sql(error)
-        await refreshSessions()
-        return false
+        // 创建结果未确认：统一文案，不自动重试，也不再刷新全局列表（doc 10/11）
+        sessionsNotice.value = CREATE_PENDING_NOTICE
+        return null
       }
       sessionsNotice.value =
         error instanceof Nl2sqlApiError || error instanceof Nl2sqlNotConfiguredError
           ? messageForNl2sql(error)
           : '会话创建失败，请重试。'
-      return false
+      return null
     }
   }
 
-  function startNewConversation() {
-    resetCurrentSession()
-    resetReadiness()
-    router.push({ path: '/query' })
+  /** 把 /query/new 替换为会话地址；query 只保留规范化的 home，不带预选 source_id。
+   * 导航守卫抛错、异步组件加载 reject 等 Promise 拒绝同样按导航失败处理（doc11 R1-02）；
+   * 过期流程的提示写入由调用方的归属检查兜底。 */
+  async function replaceToSessionRoute(sessionId: string): Promise<boolean> {
+    const query: Record<string, string> = {}
+    const home = router.currentRoute.value.query.home
+    if (typeof home === 'string') query.home = sessionBackTarget(home)
+    let failure: unknown = undefined
+    try {
+      failure = await router.replace({
+        name: 'nl2sql-query-session',
+        params: { sessionId },
+        query,
+      })
+    } catch {
+      return false
+    }
+    // replace 以 resolve 送达导航失败：须核对导航结果与实际路由会话 ID（doc 11）
+    return (
+      failure == null && router.currentRoute.value.params.sessionId === sessionId
+    )
+  }
+
+  /** 新建页预选变化时放弃“已接管但尚未完成路由交接”的会话状态（doc11 R1-01）。
+   * 仅当地址仍在新建页（未对齐到会话）时生效；保留草稿等待新来源校验；
+   * 不触碰服务端旧空会话，也不影响已打开的真实历史会话。 */
+  function releaseUnalignedTakeover() {
+    if (router.currentRoute.value.params.sessionId !== undefined) return
+    if (currentSessionId.value === '' && sessionInfo.value === null) return
+    requestToken += 1
+    creatingSession.value = false
+    stopElapsed()
+    currentSessionId.value = ''
+    sessionInfo.value = null
+    currentTurn.value = null
+    askState.value = 'idle'
+    askNotice.value = ''
+  }
+
+  /**
+   * 统一发送入口（doc 11）：
+   * 无会话 → 创建 → 接管 → replace 对齐 → 提问；
+   * 已有会话且地址对齐 → 直接提问；地址未对齐（创建后路由失败重试）→ 只补路由再提问。
+   */
+  async function sendQuestion(question: string): Promise<void> {
+    if (busy.value) return
+    if (question.trim() === '' || codepointLength(question) > QUESTION_MAX) return
+    if (!canCompose.value) return
+    const sessionId = currentSessionId.value
+    if (sessionId !== '') {
+      if (router.currentRoute.value.params.sessionId === sessionId) {
+        await ask(question)
+        return
+      }
+      creatingSession.value = true
+      const token = requestToken
+      const stamp = nl2sqlPageGuard.createStamp()
+      const flowCurrent = () =>
+        stillHere() && token === requestToken && stamp === nl2sqlPageGuard.createStamp()
+      try {
+        const navOk = await replaceToSessionRoute(sessionId)
+        if (!navOk) {
+          if (flowCurrent()) {
+            askNotice.value = '会话已创建，但页面切换失败，尚未提交问题；请再次发送。'
+          }
+          return
+        }
+        if (flowCurrent() && canSubmit.value) await ask(question)
+      } finally {
+        if (flowCurrent()) creatingSession.value = false
+      }
+      return
+    }
+    // 首次发送：同步置忙碌后再进入第一个 await，双击/连发不重复创建
+    creatingSession.value = true
+    const token = requestToken
+    const stamp = nl2sqlPageGuard.createStamp()
+    const flowCurrent = () =>
+      stillHere() && token === requestToken && stamp === nl2sqlPageGuard.createStamp()
+    try {
+      const info = await createSessionForFirstQuestion()
+      if (info === null || !flowCurrent()) return
+      // 接管返回的真实会话：不重置、不清草稿、不额外请求详情和历史
+      currentSessionId.value = info.session_id
+      sessionInfo.value = info
+      if (inputBlockedReason.value !== '') return
+      const navOk = await replaceToSessionRoute(info.session_id)
+      if (!navOk) {
+        if (flowCurrent()) {
+          askNotice.value = '会话已创建，但页面切换失败，尚未提交问题；请再次发送。'
+        }
+        return
+      }
+      if (flowCurrent() && canSubmit.value) await ask(question)
+    } finally {
+      if (flowCurrent()) creatingSession.value = false
+    }
   }
 
   /** 把刚保存的当前轮收成历史卡片。不安全终态不带回 SQL 和结果引用。 */
@@ -351,10 +488,11 @@ export function useNl2sqlChat(router: Router) {
 
   // ------------------------------------------------------------- 提问
 
-  async function refreshCurrentDetail(sessionId: string) {
+  async function refreshCurrentDetail(sessionId: string, token: number) {
     try {
       const info = await getSession(sessionId)
-      if (currentSessionId.value === sessionId) sessionInfo.value = info
+      if (!stillHere() || token !== requestToken || currentSessionId.value !== sessionId) return
+      sessionInfo.value = info
     } catch {
       // 刷新失败保留原状态；用户可手动刷新
     }
@@ -375,6 +513,9 @@ export function useNl2sqlChat(router: Router) {
     askState.value = 'submitting'
     askNotice.value = ''
     currentTurn.value = { question, result: null, error: null, errorMessage: '' }
+    // 通过入口检查、即将真实提交：清空所提交的草稿；只清仍等于本次问题的草稿，
+    // 不让迟到回调删除后续输入（doc 11 任务 1）
+    if (questionDraft.value === question) questionDraft.value = ''
     elapsedSeconds.value = 0
     stopElapsed()
     elapsedTimer = setInterval(() => {
@@ -382,21 +523,22 @@ export function useNl2sqlChat(router: Router) {
     }, 1000)
     try {
       const result = await submitQuery(sessionId, question, sourceId)
-      if (token !== requestToken || currentSessionId.value !== sessionId) return
+      if (!stillHere() || token !== requestToken || currentSessionId.value !== sessionId) return
       currentTurn.value = { question, result, error: null, errorMessage: '' }
       askState.value = 'done'
-      // 不重读历史：已保存轮次在下次提问/重开会话时转入历史展示；
-      // 只刷新详情（turn_count）与会话列表
-      await Promise.allSettled([refreshCurrentDetail(sessionId), refreshSessions()])
+      // 不重读历史：已保存轮次在下次提问/重开会话时转入历史展示；只刷新详情。
+      await refreshCurrentDetail(sessionId, token)
     } catch (error) {
-      if (token !== requestToken || currentSessionId.value !== sessionId) return
+      if (!stillHere() || token !== requestToken || currentSessionId.value !== sessionId) return
       const apiError =
         error instanceof Nl2sqlApiError
           ? error
           : new Nl2sqlApiError('internal_error', '请求失败，请稍后重试。')
       if (apiError.code === 'session_busy') {
-        // 保留输入，不自动重试（doc 2 §7.2）
+        // 保留输入，不自动重试（doc 2 §7.2；本约定由 doc 11 落地恢复）：
+        // 仅在归属仍有效且草稿为空时恢复本次问题，不覆盖新输入
         askNotice.value = messageForNl2sql(apiError)
+        if (questionDraft.value === '') questionDraft.value = question
         currentTurn.value = null
         askState.value = 'idle'
         return
@@ -404,8 +546,11 @@ export function useNl2sqlChat(router: Router) {
       if (apiError.code === 'session_metadata_invalid') {
         // 立即禁用输入，重读一次详情决定只读或恢复（doc 2 §7.1）
         try {
-          sessionInfo.value = await getSession(sessionId)
+          const info = await getSession(sessionId)
+          if (!stillHere() || token !== requestToken || currentSessionId.value !== sessionId) return
+          sessionInfo.value = info
         } catch (retryError) {
+          if (!stillHere() || token !== requestToken || currentSessionId.value !== sessionId) return
           if (
             retryError instanceof Nl2sqlApiError &&
             retryError.code === 'session_metadata_invalid'
@@ -413,14 +558,16 @@ export function useNl2sqlChat(router: Router) {
             readonlyHistory.value = true
           }
         }
+        if (!stillHere() || token !== requestToken || currentSessionId.value !== sessionId) return
         askNotice.value = messageForNl2sql(apiError)
         currentTurn.value = { question, result: null, error: apiError, errorMessage: '' }
         askState.value = 'error'
         return
       }
       if (SESSION_DEAD_CODES.has(apiError.code)) {
-        await refreshCurrentDetail(sessionId)
+        await refreshCurrentDetail(sessionId, token)
       }
+      if (!stillHere() || token !== requestToken || currentSessionId.value !== sessionId) return
       currentTurn.value = {
         question,
         result: (apiError.data as { result?: WebQueryResult } | null)?.result ?? null,
@@ -429,14 +576,14 @@ export function useNl2sqlChat(router: Router) {
       }
       askState.value = 'error'
     } finally {
-      if (token === requestToken) stopElapsed()
+      if (stillHere() && token === requestToken) stopElapsed()
     }
   }
 
   // ------------------------------------------------------------- 初始化
 
   async function initialize() {
-    await Promise.allSettled([loadSources(), refreshSessions()])
+    await loadSources()
   }
 
   return {
@@ -451,14 +598,8 @@ export function useNl2sqlChat(router: Router) {
     readinessError,
     checkReadiness,
     resetReadiness,
-    // 会话列表
-    sessions,
-    sessionsLoading,
-    sessionsError,
-    sessionsHasMore,
+    invalidatePendingCreate,
     sessionsNotice,
-    refreshSessions,
-    loadMoreSessions,
     // 当前会话
     currentSessionId,
     sessionInfo,
@@ -472,15 +613,19 @@ export function useNl2sqlChat(router: Router) {
     inputBlockedReason,
     canSubmit,
     openSession,
-    createNewSession,
-    startNewConversation,
     resetCurrentSession,
+    hasCurrentSession,
+    releaseUnalignedTakeover,
     // 提问
+    questionDraft,
+    creatingSession,
+    busy,
+    canCompose,
+    sendQuestion,
     askState,
     currentTurn,
     elapsedSeconds,
     askNotice,
-    ask,
     // 生命周期
     initialize,
   }

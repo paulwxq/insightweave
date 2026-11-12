@@ -133,7 +133,7 @@ v4 的 session_id 不是旧历史的 thread_id；没有 user_id 的 CLI 会话�
 | GET | `/api/v2/health` | 新链 Web 存活检查，不能以旧父图 health 代替新链就绪验证 |
 | GET | `/api/v2/sources/{source_id}/readiness` | 选源后、创建会话前读取；返回 §5.5 的配置兼容性、按源知识及依赖检查，不调用问答模型 |
 | POST | `/api/v2/sessions` | 请求 `{source_id}`；验证登记及就绪，生成 session_id，保存 Runner 来源绑定和 Web guest 登记，返回 SessionInfo |
-| GET | `/api/v2/sessions` | 仅列 guest 的 Web 会话，可按 source_id 过滤；limit 默认 30、最大 100，offset 默认 0 |
+| GET | `/api/v2/sessions` | 仅列 guest 的 Web 会话。`source_id` 可选；`q` 为标题原文包含，最多 100 个码点，`strip()` 后为空则不搜索。响应在分页字段外增加 `total_all`、`total_filtered`、`total_turns_all`（全部有效会话登记 `turn_count` 缓存之和）。轮次分页不加这三个统计字段。搜索与统计见 [doc 10](../nl2sql/docs/10_智能问数导航与会话首页设计方案.md) 与 [doc 12](../nl2sql/docs/12_智能问数首页问答次数统计修改方案.md) |
 | GET | `/api/v2/sessions/{session_id}` | 返回 SessionInfo，直接打开 URL 时读取，不依赖当前列表页是否包含该会话 |
 | GET | `/api/v2/sessions/{session_id}/turns` | limit 默认 50、最大 200，offset 默认 0；按时间正序返回问答，每项仅 question、answer |
 | POST | `/api/v2/sessions/{session_id}/query` | 请求仅 `{question, source_id}`；服务端生成 request_id，核对来源及就绪后同步调用 Runner，返回 WebQueryResult |
@@ -165,9 +165,9 @@ state 为 `active | invalidated`；invalid_reason 为 `knowledge_changed | depen
 
 会话和轮次分页的 data 统一为 `{items, limit, offset, has_more, next_offset}`；limit 为正整数、offset 为非负整数，超上限返回 422，不静默截断。服务端多读取一条确定 has_more；有后页时 next_offset 为 offset + 本页条数，否则为 null。会话按 last_active_at 降序、session_id 升序打破同刻并列，轮次按锁内保存时间升序、request_id 升序排列；Store 默认顺序不能代替该排序。首版使用 offset，会话列表和 turns 均不承诺跨请求快照；新增、迟到收尾及 maintenance 删除可能改变分页位置。会话列表变化后从第一页刷新并按 session_id 合并；轮次“加载更多”按正序追加，本页发起新查询或发现历史变化时重新加载，不能按 question/answer 文本去重（相同问答可合法重复），不做后台全量预取。
 
-**会话列表 offset 是过滤并排序后的有效 SessionInfo 条目偏移，不是原始 Store 键偏移**；其中包含可完整构造 DTO 的失效会话，不等同于只计 continuable=true。服务端须遍历所需 Store 分页、完成归属/source_id 过滤及展示字段检查和排序，再从有效集合取 offset 后最多 limit+1 条；原始记录扫描量可能超过 limit+1，不得直接把 API offset 传给 Store 后只过滤那一页。next_offset 仍为有效 offset 加本页有效条数，不加扫描/跳过的原始记录数；损坏记录修复后进入有效集合造成的位置变化，沿用上述非快照刷新规则。
+**会话列表 offset 是过滤并排序后的有效 SessionInfo 条目偏移，不是原始 Store 键偏移**；其中包含可完整构造 DTO 的失效会话，不等同于只计 continuable=true。服务端只按 guest 命名空间枚举，不把 `source_id` 或关键字下推到 Store filter / query。单条顺序是归属、展示字段、计入 `total_all`、累加 `total_turns_all`（登记 `turn_count` 缓存、筛选前累计，doc 12）、再按来源和标题包含进入筛选集合；`q` 区分大小写，且只匹配已确认的非空标题，不读取轮次原文。随后排序，再从筛选集合取 offset 后最多 limit+1 条。原始记录扫描量可能超过 limit+1，不得直接把 API offset 传给 Store 后只过滤那一页。next_offset 仍为有效 offset 加本页有效条数，不加扫描/跳过的原始记录数；损坏记录不计入三项统计。损坏记录修复后进入有效集合造成的位置变化，沿用上述非快照刷新规则。
 
-列表扫描设置单请求上限（首版最多检查 10000 条原始记录、最长 5 秒）；Store 分页读取也须受剩余时间限制，不能只在外层计时后放任后台读取继续占用线程。到达任一上限而尚未完成过滤、排序及 has_more 判断时，整次返回 503/history_unavailable，不返回部分列表或错误的空页/next_offset；页面保留已显示列表并提示稍后重试。本期不为此新增索引或缓存服务；如果实际 Web 会话量触及上限，再调整分页实现。
+列表扫描设置单请求上限（首版最多检查 10000 条原始记录、最长 5 秒）；Store 分页读取也须受剩余时间限制，不能只在外层计时后放任后台读取继续占用线程。到达任一上限而尚未完成过滤、排序及 has_more 判断时，整次返回 503/history_unavailable，不返回部分列表或错误的空页/next_offset。页面按 [doc 10](../nl2sql/docs/10_智能问数导航与会话首页设计方案.md) 区分两次失败：第一页（含筛选变化后的重新请求）失败时清空本次列表，三项统计保持未知并显示失败状态，不沿用上一筛选的列表或统计；加载更多失败时保留已加载列表、已确认数量和待重试偏移，并提示稍后重试。本期不为此新增索引或缓存服务；如果实际 Web 会话量触及上限，再调整分页实现。
 
 GET turns 的 offset、排序和切页以本次完整校验通过的保留日志为准；扫描时一旦发现最小有效记录判定失败，立即整页返回 500/history_record_invalid。只有尚未发现无效记录、但达到资源上限且仍未完成扫描时，才返回 503/history_unavailable；错误选择不因扫描耗时变化而漂移。SessionInfo.turn_count 仍按 §4.4 的缓存/校正规则处理；记录损坏时保留已确认缓存并报告，不用本次扫描结果改写计数。单次 GET turns 的全量扫描最多读取 10000 条原始轮次、最长 5 秒；Store 分页读取受剩余时间限制。达到任一上限仍未完成校验/排序时整次返回 503/history_unavailable，不返回部分历史或错误分页信息；读取线程槽须等底层调用实际结束后才释放，不能只超时返回后让后台读取无限占用资源。本期用该上限保护异常长会话，需要更大历史范围时由后续分页实现另行设计。
 
@@ -390,7 +390,7 @@ last_collected_at 实际取该源作业 updated_at 最大值，包含运行中�
 
 当前 API 和表约束只支持 `db_type = postgresql`。保留类型展示和检查，不将“可以选择多个数据源”表述成已经支持 MySQL 等其他数据库。
 
-新建流程为：加载列表 → 选源并读取 NL2SQL readiness → 配置兼容且必需项就绪后创建会话 → 提问。下拉显示 display_name/db_type，可辅以 db_name；value 固定为短 ID source_id（`db_src_N`）。停用、类型不支持或 db_name/selected_schemas 不符合知识键空间的源标记原因并禁用创建；列表信息可作初步提示，服务端 readiness/创建仍按可信登记重查。无源、全部不可用、读取失败分开显示，不能等到模型运行才暴露键空间不兼容；不要求修改 MetaWeave 的通用登记规则。
+新建流程为：加载列表 → 选源并读取 NL2SQL readiness → 配置兼容且必需项就绪后开放输入 → 首次发送时创建会话、替换地址并提交首问（[doc 11](../nl2sql/docs/11_首次提问创建会话与新建查询交互优化方案.md)，替代早期“就绪后点按钮显式创建”的交互）。下拉显示 display_name/db_type，可辅以 db_name；value 固定为短 ID source_id（`db_src_N`）。停用、类型不支持或 db_name/selected_schemas 不符合知识键空间的源标记原因并禁止开始提问；列表信息可作初步提示，服务端 readiness/创建仍按可信登记重查。无源、全部不可用、读取失败分开显示，不能等到模型运行才暴露键空间不兼容；不要求修改 MetaWeave 的通用登记规则。
 
 ### 5.2 前端列表与后端连接是两条路径
 
@@ -570,9 +570,9 @@ frontend/src/
         └── ResultTable.vue
 ```
 
-建议 `/query` 表示选择数据源并新建对话；`/query/:sessionId` 表示已有 v4 会话，进入时由后端解析源绑定。来源选择只对新会话生效，不信任 URL query 中的 source_id 覆盖已有绑定。页面文件按模块维护；现有 MetaWeave 页面目录暂不整体重排，以降低这次接入的回归范围。
+`/query` 是智能问数首页，`/query/new` 是未绑定的新建页，`/query/:sessionId` 是已有会话。地址中的 `source_id` 只在 `/query/new` 预选并做就绪检查。已有会话进入时由后端解析源绑定，不信任 URL query 中的 source_id 覆盖已有绑定。页面文件按模块维护；现有 MetaWeave 页面目录暂不整体重排，以降低这次接入的回归范围。菜单、首页和历史对话框的行为见 [doc 10](../nl2sql/docs/10_智能问数导航与会话首页设计方案.md)。
 
-AppSidebar 保持平台主导航；查询页内部提供自己的会话列表与内容区，不额外重复整个应用侧栏。细节样式复用现有 styles.css，新增样式限定在查询模块，避免覆盖已有数据资产页面。
+AppSidebar 提供智能问数入口、可用的「新建查询」和灰色的「新建分析」。会话列表放在首页和查询页的历史对话框，不放在全局侧栏。细节样式复用现有 styles.css，新增样式限定在查询模块，避免覆盖已有数据资产页面。
 
 当前没有通用 table/th/td 全局样式，现有表格样式主要位于各 view 的 scoped style；ResultTable 首版自行提供模块内样式即可，不要求先抽全局表格系统。当前也没有全局 toast，沿用 ApiError.code 的结构化识别方式和页面内联加载/错误/重试状态块；NL2SQL 客户端仍须按自身数字 code 协议映射错误，不直接套用 MetaWeave 解包逻辑。
 
@@ -593,16 +593,16 @@ NL2SQL 客户端处理顺序：HTTP 状态 → JSON/结构校验 → 外层业�
 ### 7.1 页面状态
 
 ```text
-未配置 / 就绪 → 加载数据源与会话 → 选源新建或恢复会话 → 输入 → 提交中 → 完成 / 部分完成 / 待澄清 / 无数据 / 失败
+未配置 / 就绪 → 首页加载会话，查询页加载数据源 → 选源检查就绪后开放输入（首次发送时创建会话并替换地址，见 doc 11）或恢复会话 → 输入 → 提交中 → 完成 / 部分完成 / 待澄清 / 无数据 / 失败
 ```
 
-同步 API 没有逐步进度。提交时显示等待与已耗时，禁用同一会话重复提交；不展示编造的百分比、SQL 阶段或 Token 流。
+同步 API 没有逐步进度。提交时显示等待与已耗时，禁用同一会话重复提交；不展示编造的百分比、SQL 阶段或 Token 流。首次发送的创建阶段只显示“正在创建会话…”，不画执行气泡、不累计查询秒数，创建与提问之间不出现可再次发送的窗口（[doc 11](../nl2sql/docs/11_首次提问创建会话与新建查询交互优化方案.md)）。
 
-- 选源先读取 readiness，兼容且 ready 后允许创建；创建成功更新路由，空会话显示“新对话”。提交完成后刷新列表，turn_count 与文本保存结果一致。
+- 选源先读取 readiness，兼容且 ready 后开放输入；首次发送时创建会话并以 replace 把 `/query/new` 换成会话地址（后退回到来源页），随后提交首问；草稿由查询状态持有，创建失败、路由失败或换库等待期间不丢失。提交完成后只刷新当前会话详情，turn_count 与文本保存结果一致。会话列表由首页和历史对话框各自加载，查询页初始化不刷新它们。
 - 每次提交携带当前会话信息中的 source_id；切换来源走新建会话流程，不能复用旧 session_id。恢复已有会话以服务端返回的绑定为准，绑定缺失时提示新建，绑定冲突时保留输入并展示明确错误。
 - 保留稳定 session_id，当前 thread_id 变化不新建业务会话；Vue 不将旧链 thread_id 传给新 API。
 - 新建对话清空当前输入与展示状态，不调用会话删除 API。
-- 创建按钮在请求期间禁用，创建请求超时不自动重试，先刷新列表并提示结果未确认；若发现对应会话已 active/continuable=true，可直接选中使用，不要求因先前 503/超时重新创建。有错误响应 session_id 时按该 ID 定位；纯网络超时没有 ID 时由用户选择列表项，不按“新对话”标题自动认定是同一次创建。用户仍手动再建可能产生另一空会话，不声称创建幂等。
+- 创建会话由首次发送触发（[doc 11](../nl2sql/docs/11_首次提问创建会话与新建查询交互优化方案.md)，不再有独立“开始查询”按钮）：发送入口在首个 await 前置忙碌，双击/连续回车只创建一次、提交一次；创建请求超时或网络失败统一提示“会话创建结果尚未确认”，不自动重试，也不再刷新一份全局列表。用户仍停留在新建页时提示结果未确认；离开后的成功响应不得自动跳回新会话，失败响应也不得改写新页面的提示。空会话会保留在历史中，由用户自行打开。用户仍手动再建可能产生另一空会话，不声称创建幂等。
 - 历史读取成功后才替换页面；失败时保留原消息，给出重试提示。
 - 用会话 ID 和请求序号/令牌关联响应，切换会话后旧响应不能插入新对话；组件卸载可放弃展示，但不宣称服务端已停止。
 - 直接访问历史 URL 先读取单会话详情；成功时按正常流程读取 turns。详情返回 409/session_metadata_invalid 时仍以路由中合法的 session_id 调用 turns，进入只读历史模式：顶部提示“会话展示信息不完整，可刷新；若无法恢复请新建会话”，禁用本会话提问，只展示 question/answer；不读取结果 API，不展示历史 SQL/表格。不构造假的 SessionInfo，不从页面选源/URL query 猜 source_id，不填造创建时间或计数；没有有效详情时可用“历史对话”作页面占位标题。仅该稳定错误码触发此分支，404、归属/绑定错误、其他 409 或依赖故障不因此绕过检查；turns 自身仍独立验证 Web 归属。
@@ -665,7 +665,7 @@ request_id 为服务端权威标识，重复标识拒绝仅用于防覆盖，不
 - 完整响应：冻结 WebQueryResult 全字段、嵌套投影和空数组/nullable；不含 preview/rows/columns/preview_truncated。零行及正常表格均调用结果 GET，columns 精确为 name/pg_type，rows 为 CellV2；查询期编码错误为 HTTP 200/partial 或 failed，结果 GET 转码错误为 500。health、未知路由、405、HTTPException、未捕获异常均统一外层，trace_id 始终存在且与业务 request_id 分开，Allow/Retry-After 不丢失。
 - 不可信终态投影：知识变化及终态复核不可用均只返回安全 answer，findings/evidence/口径/待澄清等数组为空，诊断中不泄露原答案/SQL/result_ref；文本日志与 HTTP 使用同一摘要。普通归档失败但知识已复核通过时保留有效证据。验证 error_code/kind 闭集及优先级，不靠中文匹配；Store 写入未发出且回读不存在、写入及回读均不明、回读安全摘要成功分别为 history_saved=false/null/true。
 - 会话接口与分页：直接访问不在列表首页的 session_id 仍可加载详情；Web 空会话可见、CLI/测试会话不可见；limit/offset 边界、has_more/next_offset 和排序正确，读取全部所需 Store 页而非只排序首页。原始记录夹杂损坏/归属不符项时，offset 仅计算过滤排序后的有效 SessionInfo（含完整的失效会话），不得按 Store 原始偏移或扫描数推进；必要时扫描超过 limit+1 条，修复条目重新进入列表后按非快照规则刷新。模拟原始记录数/读取耗时达到 §4.2 上限时整次返回 503/history_unavailable，不返回部分页或错误 next_offset，底层读取结束后才释放受控线程槽。列表刷新不因迟到响应重复插入。
-- 创建与分页竞争：创建超时不自动重发，重复点击被禁用；创建 pending 和 run pending 均提示“上一操作尚未确认”，不暗示创建会话已执行查询。模拟清除实际已提交而响应 503，刷新出现 active/continuable=true 空会话时可直接使用，不强制重建；无 session_id 时不按标题自动关联。记录手动重试可产生独立空会话的范围。turns 在并发新增/迟到收尾/清理导致 offset 变化时按约定重载，不按问答文本去重，重复问答仍可见。
+- 创建与分页竞争：创建超时不自动重发，重复发送在首个 await 前被忙碌状态拦截（[doc 11](../nl2sql/docs/11_首次提问创建会话与新建查询交互优化方案.md)，无独立创建按钮）；创建 pending 和 run pending 均提示“上一操作尚未确认”，不暗示创建会话已执行查询。模拟清除实际已提交而响应 503，刷新出现 active/continuable=true 空会话时可直接使用，不强制重建；无 session_id 时不按标题自动关联。记录手动重试可产生独立空会话的范围。turns 在并发新增/迟到收尾/清理导致 offset 变化时按约定重载，不按问答文本去重，重复问答仍可见。
 - 创建写序与残留：断言先通用绑定、再 Web 创建 pending、写后复核后才清除，创建全程持同一锁；creation_id 为 create_ 加完整 UUID hex，不进入 Runner/轮次。先覆盖创建取锁异常 503/lock_backend_error、明确占用 409/session_busy，两者都不写通用/Web 记录，不进入 Runner，定位 ID 保留且锁连接回收。再分别注入两次写入和清除的明确失败/超时已提交/超时未提交及回读故障，验证 503/409/确认后 200、定位字段及列表可见性按 §4.4 处理，不自动重试或覆盖；maintenance 只报告创建 pending 及符合边界的疑似创建残留，不自动删除/解禁。
 - 状态协调：重复提交、切换会话后的迟到响应、历史失败不清空旧消息。
 - 历史边界：每轮只返回 question/answer；即使内部 Store/checkpoint 有 SQL 和 result_ref，历史 DTO 也不透出。历史页面无 SQL/表格展开按钮、不发结果读取请求，结果文件缺失不影响问答文本展示。
