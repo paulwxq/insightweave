@@ -197,6 +197,64 @@ class TestSessionsEndpoints:
         assert len(data["items"]) == 1 and data["has_more"] is True
         assert data["next_offset"] == 1
 
+    def test_list_title_search_totals_and_q_bounds(self, web_env, client):
+        first = create_web_session(web_env.runtime, SOURCE_ID)
+        second = create_web_session(web_env.runtime, OTHER_SOURCE)
+        webstore = web_env.runtime.get_webstore()
+        for info, title in ((first, "Order"), (second, "order")):
+            record = webstore.get_registration(info["session_id"])
+            record["title"] = title
+            webstore.put_registration(info["session_id"], record)
+
+        exact = client.get("/api/v2/sessions?q=Order", headers=LOCAL)
+        assert exact.status_code == 200
+        data = exact.json()["data"]
+        assert [item["session_id"] for item in data["items"]] == [first["session_id"]]
+        assert data["total_filtered"] == 1 and data["total_all"] == 2
+
+        blank = client.get("/api/v2/sessions?q=%20", headers=LOCAL)
+        assert blank.status_code == 200
+        assert blank.json()["data"]["total_filtered"] == 2
+
+        accepted = client.get("/api/v2/sessions?q=" + ("测" * 100), headers=LOCAL)
+        assert accepted.status_code == 200
+        assert accepted.json()["data"]["total_filtered"] == 0
+        assert accepted.json()["data"]["total_all"] == 2
+
+        rejected = client.get("/api/v2/sessions?q=" + ("测" * 101), headers=LOCAL)
+        assert rejected.status_code == 422
+        assert rejected.json()["data"]["error_code"] == "invalid_request"
+
+    def test_list_total_turns_all_contract(self, web_env, client):
+        # doc 12 §5 任务 1：total_turns_all 契约——不受筛选影响、随列表返回。
+        # 登记缓存设为 3/2 并把 metadata_reconciled_at 固定为当前时间、
+        # retry_after 置 None：新鲜校正时间使 reconcile_needed 为 False，
+        # 防止列表读取按需安排的异步元数据校正把 turn_count 重算为日志
+        # 条数（0）导致统计回退；勿删这两个字段赋值。
+        first = create_web_session(web_env.runtime, SOURCE_ID)
+        second = create_web_session(web_env.runtime, OTHER_SOURCE)
+        webstore = web_env.runtime.get_webstore()
+        for info, count in ((first, 3), (second, 2)):
+            record = webstore.get_registration(info["session_id"])
+            record["turn_count"] = count
+            record["metadata_reconciled_at"] = webstore.now_iso()
+            record["metadata_reconcile_retry_after"] = None
+            webstore.put_registration(info["session_id"], record)
+
+        r = client.get("/api/v2/sessions?limit=1", headers=LOCAL)
+        assert r.status_code == 200
+        data = r.json()["data"]
+        assert len(data["items"]) == 1 and data["has_more"] is True
+        assert data["next_offset"] == 1
+        assert data["total_all"] == 2 and data["total_filtered"] == 2
+        assert data["total_turns_all"] == 5
+
+        r = client.get("/api/v2/sessions?q=" + "不存在的标题", headers=LOCAL)
+        assert r.status_code == 200
+        data = r.json()["data"]
+        assert data["items"] == [] and data["total_filtered"] == 0
+        assert data["total_all"] == 2 and data["total_turns_all"] == 5
+
     def test_list_store_failure_503(self, web_env, client, api_session):
         web_env.store.fail_reads = True
         r = client.get("/api/v2/sessions", headers=LOCAL)

@@ -156,7 +156,9 @@ class TestListSessions:
         # 同刻并列：session_id 升序
         self._put(store, "s_" + "a" * 32, last_active_at="2026-10-17T11:00:00+08:00")
         self._put(store, "s_" + "9" * 32, last_active_at="2026-10-17T11:00:00+08:00")
-        infos, has_more, next_offset, skipped = store.list_session_infos()
+        infos, has_more, next_offset, skipped, _all, _filtered, _turns_all = (
+            store.list_session_infos()
+        )
         order = [i["session_id"] for i in infos]
         assert order == [
             "s_" + "1" * 32,
@@ -168,13 +170,19 @@ class TestListSessions:
     def test_source_filter(self, store):
         self._put(store, "s_" + "1" * 32)
         self._put(store, "s_" + "2" * 32, source_id="db_src_2")
-        infos, _, _, _ = store.list_session_infos(source_id="db_src_1")
+        infos, _, _, _, total_all, total_filtered, _turns_all = store.list_session_infos(
+            source_id="db_src_1"
+        )
+        assert total_all == 2 and total_filtered == 1
         assert [i["session_id"] for i in infos] == ["s_" + "1" * 32]
 
     def test_invalid_metadata_skipped_with_fields(self, store):
         self._put(store, "s_" + "1" * 32)
         self._put(store, "s_" + "2" * 32, title="")
-        infos, _, _, skipped = store.list_session_infos()
+        infos, _, _, skipped, total_all, total_filtered, _turns_all = (
+            store.list_session_infos()
+        )
+        assert total_all == 1 and total_filtered == 1
         assert len(infos) == 1
         assert skipped[0]["session_id"] == "s_" + "2" * 32
         assert "title" in skipped[0]["problem_fields"]
@@ -183,10 +191,13 @@ class TestListSessions:
         for i in range(5):
             self._put(store, f"s_{i:032d}")
         self._put(store, "s_" + "z" * 32, turn_count=-1)
-        infos, has_more, next_offset, _ = store.list_session_infos(limit=2, offset=0)
+        infos, has_more, next_offset, _, total_all, _filtered, _turns_all = (
+            store.list_session_infos(limit=2, offset=0)
+        )
+        assert total_all == 5
         assert len(infos) == 2 and has_more
         assert next_offset == 2
-        infos2, has_more2, next2, _ = store.list_session_infos(limit=3, offset=2)
+        infos2, has_more2, next2, _, _, _, _ = store.list_session_infos(limit=3, offset=2)
         assert len(infos2) == 3 and not has_more2 and next2 is None
 
     def test_scan_limit_maps_to_exception(self, store, monkeypatch):
@@ -203,6 +214,142 @@ class TestListSessions:
         store._store.fail_reads = True
         with pytest.raises(ws.StoreUnavailable):
             store.list_session_infos()
+
+    def test_title_search_is_case_sensitive_and_ignores_bad_records(self, store):
+        self._put(store, "s_" + "1" * 32, title="Order", source_id="db_src_1")
+        self._put(store, "s_" + "2" * 32, title="order", source_id="db_src_2")
+        self._put(store, "s_" + "3" * 32, title=None)
+        self._put(store, "s_" + "4" * 32, title=12)
+        self._put(store, "s_" + "5" * 32, title="   ")
+        bare = _registration(session_id="s_" + "6" * 32)
+        del bare["title"]
+        store.put_registration("s_" + "6" * 32, bare)
+        calls: list[dict] = []
+        original = store._store.search
+
+        def wrapped(*args, **kwargs):
+            calls.append(kwargs)
+            return original(*args, **kwargs)
+
+        store._store.search = wrapped
+        infos, _, _, skipped, total_all, total_filtered, _turns_all = (
+            store.list_session_infos(q="Order")
+        )
+        assert [item["session_id"] for item in infos] == ["s_" + "1" * 32]
+        assert total_all == 2 and total_filtered == 1
+        assert {item["session_id"] for item in skipped} == {
+            "s_" + "3" * 32,
+            "s_" + "4" * 32,
+            "s_" + "5" * 32,
+            "s_" + "6" * 32,
+        }
+        assert calls and all("filter" not in call and "query" not in call for call in calls)
+
+        infos, _, _, _, total_all, total_filtered, _turns_all = store.list_session_infos(
+            source_id="db_src_2", q="order"
+        )
+        assert [item["session_id"] for item in infos] == ["s_" + "2" * 32]
+        assert total_all == 2 and total_filtered == 1
+
+        infos, _, _, _, total_all, total_filtered, _turns_all = store.list_session_infos(q="   ")
+        assert total_all == total_filtered == 2 and len(infos) == 2
+
+        long_keyword = "问" * 41
+        infos, _, _, _, total_all, total_filtered, _turns_all = store.list_session_infos(
+            q=long_keyword
+        )
+        assert infos == [] and total_all == 2 and total_filtered == 0
+
+    def test_question_tail_beyond_title_is_not_searched(self, store):
+        question = "前" * 40 + "后半段独有"
+        self._put(store, "s_" + "1" * 32, title=derive_title(question))
+        infos, _, _, _, _, total_filtered, _turns_all = store.list_session_infos(
+            q="后半段独有"
+        )
+        assert infos == [] and total_filtered == 0
+        infos, _, _, _, _, total_filtered, _turns_all = store.list_session_infos(
+            q="前" * 40
+        )
+        assert len(infos) == 1 and total_filtered == 1
+
+    def test_total_turns_all_before_filter_and_pagination(self, store):
+        # doc 12 §5 任务 1：total_turns_all 在 total_all 后、来源/标题筛选与
+        # 排序分页前累计，覆盖全部有效会话而不只当前页。
+        self._put(
+            store,
+            "s_" + "a" * 32,
+            turn_count=3,
+            last_active_at="2026-10-18T09:00:00+08:00",
+        )
+        self._put(
+            store,
+            "s_" + "b" * 32,
+            turn_count=2,
+            state="invalidated",
+            invalid_reason="knowledge_changed",
+            invalidated_at="2026-10-18T10:00:00+08:00",
+            last_active_at="2026-10-18T08:00:00+08:00",
+        )
+        self._put(
+            store,
+            "s_" + "c" * 32,
+            turn_count=0,
+            last_active_at="2026-10-17T11:00:00+08:00",
+        )
+        # 展示字段损坏的两条坏登记：跳过且计入 skipped_invalid
+        self._put(store, "s_" + "d" * 32, turn_count=99, title="   ")
+        self._put(store, "s_" + "e" * 32, turn_count=-1)
+        # 非 Web（归属不符）登记：静默跳过，不进 skipped_invalid
+        self._put(store, "s_" + "f" * 32, turn_count=50, origin="cli")
+
+        for offset in (0, 1, 2):
+            (
+                infos,
+                has_more,
+                next_offset,
+                skipped,
+                total_all,
+                total_filtered,
+                total_turns_all,
+            ) = store.list_session_infos(limit=1, offset=offset)
+            assert total_all == 3 and total_turns_all == 5
+            assert total_filtered == 3 and len(infos) == 1
+            assert has_more == (offset < 2)
+            assert next_offset == (offset + 1 if offset < 2 else None)
+            assert {item["session_id"] for item in skipped} == {
+                "s_" + "d" * 32,
+                "s_" + "e" * 32,
+            }
+
+        infos, _, _, _, _, total_filtered, total_turns_all = store.list_session_infos(
+            source_id="db_src_404"
+        )
+        assert infos == [] and total_filtered == 0 and total_turns_all == 5
+
+        infos, _, _, _, _, total_filtered, total_turns_all = store.list_session_infos(
+            q="不存在的标题"
+        )
+        assert infos == [] and total_filtered == 0 and total_turns_all == 5
+
+    def test_total_turns_all_empty_and_zero_turn_sessions(self, store):
+        # doc 12 §5 任务 1：空 Store 与全零 turn_count 的空值语义。
+        infos, _, _, skipped, total_all, total_filtered, total_turns_all = (
+            store.list_session_infos()
+        )
+        assert (infos, skipped, total_all, total_filtered, total_turns_all) == (
+            [],
+            [],
+            0,
+            0,
+            0,
+        )
+        for i in range(2):
+            self._put(store, f"s_{i:032d}", turn_count=0)
+        infos, _, _, _, total_all, total_filtered, total_turns_all = (
+            store.list_session_infos()
+        )
+        assert len(infos) == 2 and total_all == 2 and total_filtered == 2
+        assert total_turns_all == 0
 
 
 class TestTurns:

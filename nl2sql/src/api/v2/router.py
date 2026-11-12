@@ -18,7 +18,7 @@ from fastapi import APIRouter, Query, Request
 from fastapi.responses import Response
 
 from src.api.v2 import codes
-from src.api.v2.dto import QueryRequest, SessionCreateRequest
+from src.api.v2.dto import QueryRequest, SessionCreateRequest, SessionListData
 from src.api.v2.envelope import success_response
 from src.api.v2.readiness import ReadinessError
 from src.api.v2.runtime import capacity_slot, get_web_runtime
@@ -332,17 +332,30 @@ async def create_session(payload: SessionCreateRequest, request: Request):
 async def list_sessions(
     request: Request,
     source_id: Optional[str] = Query(None),
+    q: str = Query("", max_length=100),
     limit: int = Query(30, ge=1, le=100),
     offset: int = Query(0, ge=0),
 ):
-    """guest Web 会话列表（doc 2 §4.2）：last_active 降序分页。"""
+    """guest Web 会话列表（doc 10 §6）：last_active 降序分页，标题原文包含。"""
     runtime = get_web_runtime()
     filter_source = str(source_id) if source_id is not None else None
+    keyword = q.strip()
 
     def _work() -> dict:
         webstore = runtime.get_webstore()
-        infos, has_more, next_offset, skipped = webstore.list_session_infos(
-            source_id=filter_source, limit=limit, offset=offset
+        (
+            infos,
+            has_more,
+            next_offset,
+            skipped,
+            total_all,
+            total_filtered,
+            total_turns_all,
+        ) = webstore.list_session_infos(
+            source_id=filter_source,
+            q=keyword,
+            limit=limit,
+            offset=offset,
         )
         # 按需校正（列表页条目 + 跳过的损坏登记；不等待完成）
         for info in infos:
@@ -353,13 +366,16 @@ async def list_sessions(
             record = webstore.get_registration(item["session_id"])
             if record is not None:
                 _schedule_reconcile(runtime, webstore, item["session_id"], record)
-        return {
-            "items": infos,
-            "limit": limit,
-            "offset": offset,
-            "has_more": has_more,
-            "next_offset": next_offset,
-        }
+        return SessionListData(
+            items=infos,
+            limit=limit,
+            offset=offset,
+            has_more=has_more,
+            next_offset=next_offset,
+            total_all=total_all,
+            total_filtered=total_filtered,
+            total_turns_all=total_turns_all,
+        ).model_dump()
 
     data = await _run_read(request, _work)
     return success_response(data, request)

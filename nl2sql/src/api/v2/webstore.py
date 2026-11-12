@@ -478,18 +478,30 @@ class WebStore:
         }
 
     def list_session_infos(
-        self, *, source_id: Optional[str] = None, limit: int = 30, offset: int = 0
-    ) -> tuple[list[dict], bool, Optional[int], list[dict]]:
-        """枚举 guest Web 会话并分页（doc 2 §4.2）。
+        self,
+        *,
+        source_id: Optional[str] = None,
+        q: Optional[str] = None,
+        limit: int = 30,
+        offset: int = 0,
+    ) -> tuple[list[dict], bool, Optional[int], list[dict], int, int, int]:
+        """枚举 guest Web 会话并分页（doc 10 §6；统计扩展见 doc 12）。
 
-        返回 (items, has_more, next_offset, skipped_invalid)；offset 是过滤
-        排序后的有效条目偏移，不是原始 Store 键偏移；损坏条目跳过并返回
-        问题字段；达到扫描上限抛 _ScanLimitExceeded（调用方 503）。空会话
-        也显示（含完整失效会话）。
+        返回 (items, has_more, next_offset, skipped_invalid, total_all,
+        total_filtered, total_turns_all)。只按 guest 命名空间读取，不把
+        source_id 或关键字下推到 Store filter / query。单条顺序：归属 →
+        展示字段 → total_all → total_turns_all（登记 turn_count 缓存之和，
+        doc 12 §2.1）→ source_id 与标题包含 → 筛选集合。标题包含区分大小写，
+        且只在 title 已确认为非空字符串后执行。offset 是筛选排序后的有效
+        条目偏移。total_turns_all 与 total_all 同集合、不受筛选与分页影响，
+        不读取 web_turns 现场重算。
         """
+        keyword = q.strip() if isinstance(q, str) else ""
         budget = ScanBudget.create()
         collected: list[tuple[Optional[datetime], str, dict]] = []
         skipped: list[dict] = []
+        total_all = 0
+        total_turns_all = 0
         scan_offset = 0
         while True:
             items = _search_page(self._store, WEB_SESSIONS_NS, scan_offset)
@@ -500,22 +512,31 @@ class WebStore:
                 record = dict(item.value) if hasattr(item, "value") else dict(item)
                 if not core_ownership_ok(record, item.key):
                     continue
-                if source_id is not None and record.get("source_id") != source_id:
-                    continue
-                if display_field_problems(record):
+                problems = display_field_problems(record)
+                if problems:
                     skipped.append(
                         {
                             "session_id": item.key,
                             "reason": "session_metadata_invalid",
-                            "problem_fields": display_field_problems(record),
+                            "problem_fields": problems,
                         }
                     )
+                    continue
+                total_all += 1
+                # doc 12 §2.1：与 total_all 同集合，在筛选前累加登记缓存；
+                # 展示字段检查已保证 turn_count 为非负 int。
+                total_turns_all += record["turn_count"]
+                if source_id is not None and record.get("source_id") != source_id:
+                    continue
+                title = record["title"]
+                if keyword and keyword not in title:
                     continue
                 last_active = parse_tz_datetime(record.get("last_active_at"))
                 collected.append((last_active, item.key, record))
             if len(items) < _PAGE:
                 break
             scan_offset += _PAGE
+        total_filtered = len(collected)
         # last_active_at 降序、session_id 升序打破同刻并列：先按 session_id
         # 升序排，再稳定排序按时间倒序（并列保持 session_id 升序）
         collected.sort(key=lambda entry: entry[1])
@@ -525,7 +546,15 @@ class WebStore:
         page = page[:limit]
         infos = [self.session_info(key, rec) for _t, key, rec in page]
         next_offset = offset + len(page) if has_more else None
-        return infos, has_more, next_offset, skipped
+        return (
+            infos,
+            has_more,
+            next_offset,
+            skipped,
+            total_all,
+            total_filtered,
+            total_turns_all,
+        )
 
     # ------------------------------------------------------------ 文本轮次
 

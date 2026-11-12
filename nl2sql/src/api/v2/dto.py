@@ -113,13 +113,27 @@ class WebTurn(StrictModel):
 
 
 class PageData(StrictModel):
-    """会话/轮次分页 data（doc 2 §4.2）：{items, limit, offset, has_more, next_offset}。"""
+    """轮次等通用分页 data（doc 2 §4.2）：{items, limit, offset, has_more, next_offset}。"""
 
     items: list[Any]
     limit: int
     offset: int
     has_more: bool
     next_offset: Optional[int]
+
+
+class SessionListData(StrictModel):
+    """会话列表分页（doc 10 §6；统计扩展见 doc 12 §3）。
+    不把统计字段加到轮次等其他分页响应。"""
+
+    items: list[Any]
+    limit: int
+    offset: int
+    has_more: bool
+    next_offset: Optional[int]
+    total_all: int
+    total_filtered: int
+    total_turns_all: int
 
 
 class CellV2(StrictModel):
