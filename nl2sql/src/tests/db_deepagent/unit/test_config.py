@@ -229,3 +229,41 @@ def test_error_messages_leak_no_password(
     with pytest.raises(DbAgentConfigError) as exc_info:
         run_config_checks(_validated(config_dict), check_embedding_profile=False)
     assert secret not in str(exc_info.value)
+
+
+# ----------------------------------------------------------------------------
+# doc 6.2 §7.5：主模型有限重试配置
+# ----------------------------------------------------------------------------
+
+
+class TestModelRetryConfig:
+    def test_code_default_disabled(self):
+        from src.modules.db_deepagent.config import ModelRetryConfig
+
+        cfg = ModelRetryConfig()
+        assert cfg.enabled is False  # 代码默认关闭：旧配置不改变启动行为
+        assert cfg.max_retries == 2
+
+    def test_standard_yaml_enables_retry(self, db_agent_config: DbAgentConfig):
+        assert db_agent_config.model.retry.enabled is True
+        assert db_agent_config.model.retry.max_retries == 2
+
+    @pytest.mark.parametrize("bad", [-1, 3], ids=["below", "above"])
+    def test_max_retries_bounds(self, config_dict: dict, bad):
+        from pydantic import ValidationError
+
+        config_dict["model"]["retry"] = {"enabled": True, "max_retries": bad}
+        with pytest.raises(ValidationError):
+            DbAgentConfig.model_validate(config_dict)
+
+    def test_unknown_retry_keys_rejected(self, config_dict: dict):
+        from pydantic import ValidationError
+
+        config_dict["model"]["retry"] = {"enabled": True, "backoff": 1}
+        with pytest.raises(ValidationError):
+            DbAgentConfig.model_validate(config_dict)
+
+    def test_model_retry_defaults_when_absent(self, config_dict: dict):
+        del config_dict["model"]["retry"]
+        cfg = DbAgentConfig.model_validate(config_dict)
+        assert cfg.model.retry.enabled is False  # 未声明 → 默认关闭

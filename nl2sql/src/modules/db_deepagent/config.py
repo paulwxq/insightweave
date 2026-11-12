@@ -32,11 +32,25 @@ class _StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class ModelRetryConfig(_StrictModel):
+    """主模型有限重试（doc 6.2 §7.5）。
+
+    enabled=true 时启用项目层 BudgetAwareModelRetryMiddleware，并在主模型
+    构造时强制客户端 max_retries=0（单层重试，不与 SDK 内部重试叠加）。
+    代码默认关闭：旧配置未声明 model.retry 时不改变原 provider 启动行为；
+    标准部署由 YAML 显式开启。max_retries 为首次调用之外的重试次数。
+    """
+
+    enabled: bool = False
+    max_retries: int = Field(default=2, ge=0, le=2)
+
+
 class ModelConfig(_StrictModel):
     llm_profile: str
     overrides: dict[str, Any] = Field(default_factory=dict)
     expected_harness_key: str | None = None
     request_timeout_seconds: float = Field(gt=0)
+    retry: ModelRetryConfig = Field(default_factory=ModelRetryConfig)
 
 
 class EmbeddingConfig(_StrictModel):

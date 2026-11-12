@@ -425,7 +425,9 @@ class FakeAgent:
         if self.invoke_side_effect is not None:
             raise self.invoke_side_effect
         if context is not None:
-            self.state_values = _remap_run_id(self.state_values, context.run_id)
+            self.state_values = _remap_run_id(
+                self.state_values, context.run_id, context.request_id
+            )
         return {"messages": self.state_values.get("messages", [])}
 
     def get_state(self, config):
@@ -450,8 +452,15 @@ class FakeAgent:
         return snapshot
 
 
-def _remap_run_id(state: dict[str, Any], run_id: str) -> dict[str, Any]:
-    """把假状态里的占位 run_id（run-x）改写为实际运行，账本键随之对齐。"""
+def _remap_run_id(
+    state: dict[str, Any], run_id: str, request_id: str | None = None
+) -> dict[str, Any]:
+    """把假状态里的占位 run_id（run-x）改写为实际运行，账本键随之对齐。
+
+    request_id 一并改写（doc 6.2 §7.2.1 运行归属校验）：模拟正常提交工具
+    用 ctx.run_id/ctx.request_id 写入的记录；不传时保持原值（用于构造归属
+    不符的用例）。
+    """
     import copy
 
     values = copy.deepcopy(state)
@@ -463,6 +472,8 @@ def _remap_run_id(state: dict[str, Any], run_id: str) -> dict[str, Any]:
     if "run-x" in answers:
         answers[run_id] = answers.pop("run-x")
         answers[run_id]["run_id"] = run_id
+        if request_id is not None:
+            answers[run_id]["request_id"] = request_id
     return values
 
 

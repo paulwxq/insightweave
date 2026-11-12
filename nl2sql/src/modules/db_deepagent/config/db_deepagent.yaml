@@ -13,6 +13,9 @@ model:
   # 可选：显式声明期望的 SDK 匹配键；声明后与实际解析结果不一致则初始化失败
   expected_harness_key: null             # 例如 "tongyi:qwen3.8-max"
   request_timeout_seconds: 120           # 单次模型 HTTP 请求超时（§11.1），需实测调整
+  retry:                                 # 主模型有限重试（doc 6.2 §7.5）
+    enabled: true                        # 启用时主模型客户端强制 max_retries=0，项目层统一管理
+    max_retries: 2                       # 首次调用之外；一个模型步骤最多尝试三次
 
 embedding:
   profile: qwen3_7_text_embedding        # 引用全局 embedding_profiles，不跟随 active

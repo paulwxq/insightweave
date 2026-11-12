@@ -20,6 +20,7 @@ from src.modules.db_deepagent.state import DbDeepAgentState
 from src.modules.db_deepagent.tools import build_business_tools
 from src.modules.db_deepagent.errors import (
     AssemblyVerificationError,
+    DbAgentConfigError,
     HarnessProfileError,
 )
 from src.utils.logger import get_module_logger
@@ -168,12 +169,16 @@ def read_summary_for_handoff(state_values: dict) -> str | None:
 
 
 def build_model(cfg: DbAgentConfig) -> BaseChatModel:
-    """构造主模型并设置请求超时（§11.1）。
+    """构造主模型并设置请求超时（§11.1；doc 6.2 §7.5.2）。
 
     OpenAI 兼容路径：timeout 作为工厂覆盖参数在构造时传入（映射为
     request_timeout，客户端按该值构建）；显式配置的 overrides.timeout 优先。
     ChatTongyi：工厂拒绝 timeout 覆盖（C12），构造后经 apply_request_timeout
     写入 model_kwargs（DashScope SDK 每次调用时读取）。
+
+    model.retry.enabled=true 时（doc 6.2 §7.5.2）：构造前强制主模型客户端
+    max_retries=0（单层重试，由项目中间件统一管理次数），构造后核验实际
+    同步/异步客户端确已为零——client 为 None 只表示无法确认，同样拒绝启用。
     """
     from src.services.config_loader import get_config
     from src.services.llm_factory import get_llm
@@ -183,10 +188,48 @@ def build_model(cfg: DbAgentConfig) -> BaseChatModel:
     overrides = dict(cfg.model.overrides)
     if provider != "dashscope":
         overrides.setdefault("timeout", cfg.model.request_timeout_seconds)
+    if cfg.model.retry.enabled:
+        if provider == "dashscope":
+            raise DbAgentConfigError(
+                "统一模型重试暂只支持 OpenAI 兼容主模型；"
+                "如需保持原行为，请设置 model.retry.enabled=false"
+            )
+        if "max_retries" in overrides and (
+            type(overrides["max_retries"]) is not int or overrides["max_retries"] != 0
+        ):
+            raise DbAgentConfigError(
+                "启用项目重试时，主模型客户端 max_retries 必须为 0"
+            )
+        overrides["max_retries"] = 0
     model = get_llm(cfg.model.llm_profile, **overrides).llm
     if provider == "dashscope":
         apply_request_timeout(model, cfg.model.request_timeout_seconds)
+    if cfg.model.retry.enabled:
+        # 版本依赖（doc 6.2 §7.5.2）：root_client/root_async_client 为
+        # langchain_openai 1.7.4 的公开字段（当前为急切构造）；升级 SDK 或
+        # 改变构造方式后必须复验本检查与实际 HTTP 次数。
+        from langchain_openai import ChatOpenAI
+
+        if not isinstance(model, ChatOpenAI):
+            raise DbAgentConfigError("主模型不支持已验证的单层重试配置")
+        verify_single_layer_retry_clients(model)
     return model
+
+
+def verify_single_layer_retry_clients(model: Any) -> None:
+    """核验主模型 SDK 内部重试确已关闭（doc 6.2 §7.5.2）。
+
+    model.max_retries 与同步/异步 root 客户端的 max_retries 均须为 0；
+    client 为 None 只表示本方案当前无法确认其重试配置（不等同于已证明
+    开启重试），首版一律按拒绝启用处理，不静默跳过。
+    """
+    if model.max_retries != 0 or any(
+        client is None or client.max_retries != 0
+        for client in (model.root_client, model.root_async_client)
+    ):
+        raise DbAgentConfigError(
+            "无法确认主模型 SDK 内部重试已关闭，请检查客户端初始化或适配"
+        )
 
 
 def build_summarizer_model(cfg: DbAgentConfig) -> BaseChatModel:
@@ -498,6 +541,7 @@ def build_db_agent(
     from deepagents.middleware.summarization import SummarizationMiddleware
 
     from src.modules.db_deepagent.middleware import (
+        BudgetAwareModelRetryMiddleware,
         FinalAnswerGateMiddleware,
         RequestAuditMiddleware,
         RunBudgetMiddleware,
@@ -530,14 +574,22 @@ def build_db_agent(
     extra_mw = [
         FinalAnswerGateMiddleware(services.budget, cfg.budget),
         RunBudgetMiddleware(services.budget, cfg.budget),
+    ]
+    # doc 6.2 §7.6：重试放在请求审计外层（wrapper 链以列表较前项为外层），
+    # 每次重试尝试重新经过工具集合核对；仅 model.retry.enabled 时装配。
+    if cfg.model.retry.enabled:
+        extra_mw.append(
+            BudgetAwareModelRetryMiddleware(services.budget, cfg.model.retry)
+        )
+    extra_mw.append(
         RequestAuditMiddleware(
             expected_tool_names=lambda: stage_expected_tool_names(
                 cfg, include_result_tools=include_result_tools
             ),
             budget=services.budget,
             workspace_root=Path(cfg.workspace.root),
-        ),
-    ]
+        )
+    )
     if cfg.features.todo_list:
         from langchain.agents.middleware import TodoListMiddleware
 

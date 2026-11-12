@@ -125,6 +125,7 @@ def make_result(
     answer: str = "答案文本",
     evidence: Optional[list[EvidenceItem]] = None,
     errors: Optional[list[Any]] = None,
+    warnings: Optional[list[str]] = None,
     archived: bool = True,
 ) -> DbAgentResult:
     from src.modules.db_deepagent.schemas import RunFailureRecord
@@ -145,7 +146,7 @@ def make_result(
             e if isinstance(e, RunFailureRecord) else RunFailureRecord(**e)
             for e in (errors or [])
         ],
-        warnings=[],
+        warnings=warnings or [],
         archived=archived,
         stats=_stats(),
     )

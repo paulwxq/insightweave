@@ -1017,3 +1017,98 @@ class TestReconcileSuppression:
         webstore = web_env.runtime.get_webstore()
         record = webstore.get_registration(sid)
         assert webstore.suppressed(sid, record) is False
+
+
+class TestFallbackDeliveryLinkage:
+    """doc 6.2 §7.8：Runner 生成的兜底结果经真实收尾钩子与投影的联动。
+
+    R2：实时 answer、写入历史与读回文本一致；来源前缀保留；一致性复核
+    失败仍走现有安全投影，不因兜底绕过复核。
+    """
+
+    @staticmethod
+    def _real_fallback_text():
+        """用 Runner 生产实现生成兜底正文与真实证据（非手写字符串）。"""
+        from src.modules.db_deepagent.runner import DbAgentRunner
+        from src.modules.db_deepagent.schemas import EvidenceItem
+
+        evidence = [
+            EvidenceItem(
+                evidence_id="E-web1",
+                kind="sql_query",
+                tool_call_id="tc-w",
+                source="orders",
+                sql="SELECT count(*) FROM orders",
+                result_ref="res_" + "w" * 32,
+                row_count=7,
+                preview_truncated=False,
+                source_truncated=False,
+            )
+        ]
+        text = DbAgentRunner._build_fallback_answer("failed", evidence, {"E-web1": 7})
+        return text, evidence
+
+    def test_live_history_and_text_consistent(self, web_env, web_session):
+        text, evidence = self._real_fallback_text()
+        warning = "最终说明由服务端兜底生成，非模型最终提交。"
+        web_env.runtime._query_runner = _hook_runner(
+            status="failed",
+            answer=text,
+            evidence=evidence,
+            warnings=[warning],
+            errors=[
+                {
+                    "phase": "P1",
+                    "kind": "runtime",
+                    "message": "RuntimeError: model boom",
+                    "primary": True,
+                }
+            ],
+        )
+        result = execute_web_query(
+            web_env.runtime,
+            session_id=web_session["session_id"],
+            question="问",
+            source_id=SOURCE_ID,
+        )
+        # 实时响应：兜底正文原样、前缀保留、来源 warning 透传、状态与证据保留
+        assert result.answer == text
+        assert result.answer.startswith("系统兜底说明：")
+        assert "已记录 7 行结果" in result.answer
+        assert result.status == "failed"
+        assert warning in result.warnings
+        assert [e.evidence_id for e in result.evidence] == ["E-web1"]
+        # 历史写入与读回：与实时同一份文本（残余替文案不再触发）
+        assert result.history_saved is True
+        turn = web_env.runtime.get_webstore().read_turn(
+            web_session["session_id"], result.request_id
+        )
+        assert turn["answer"] == text
+        assert "本轮未生成答案" not in turn["answer"]
+
+    def test_fallback_does_not_bypass_consistency_recheck(self, web_env, web_session):
+        """一致性复核失败：兜底原文被现有安全投影替换，不绕过复核。"""
+        text, evidence = self._real_fallback_text()
+        state = {"n": 0}
+        orig = web_env.backend.load_publish_records
+
+        def wrapped(sid):
+            state["n"] += 1
+            if state["n"] > 2:  # 收尾复核时知识快照变化
+                return [*orig(sid), {"table": "extra", "record": {}}]
+            return orig(sid)
+
+        web_env.backend.load_publish_records = wrapped
+        web_env.runtime._query_runner = _hook_runner(
+            status="failed", answer=text, evidence=evidence
+        )
+        result = execute_web_query(
+            web_env.runtime,
+            session_id=web_session["session_id"],
+            question="问",
+            source_id=SOURCE_ID,
+        )
+        # 一致性未确认（changed 或无法复核）：兜底原文被安全投影替换
+        assert result.answer.startswith("本轮知识一致性无法确认")
+        assert "系统兜底说明" not in result.answer  # 兜底原文不绕过复核
+        assert result.findings == [] and result.evidence == []

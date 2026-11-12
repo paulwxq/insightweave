@@ -11,7 +11,7 @@ from __future__ import annotations
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Any, Literal
 
 from src.modules.db_deepagent.config import BudgetConfig
 from src.utils.logger import get_module_logger
@@ -66,6 +66,9 @@ class BudgetSnapshot:
 class _RunEntry:
     limits: BudgetLimits
     deadline_monotonic: float
+    # 运行级共享状态（doc 6.2 §7.6：模型重试的步骤额度等）：随 close_run()
+    # 一起移除，不在运行结束后滞留（含其中可能引用的异常回溯）。
+    extra: dict[str, Any] = field(default_factory=dict)
     counters: dict[str, int] = field(
         default_factory=lambda: {
             "model_call": 0,
@@ -147,6 +150,17 @@ class RunBudgetLedger:
         with self._lock:
             entry = self._runs.get(run_id)
             return dict(entry.counters) if entry else {}
+
+    def run_shared_state(self, run_id: str) -> dict[str, Any] | None:
+        """该运行的共享状态字典（doc 6.2 §7.6 步骤尝试额度等）。
+
+        返回条目内字典的引用，调用方在其上读写即全局可见；随 close_run()
+        移除条目而释放。未注册运行返回 None（不自动创建），调用方自行
+        决定回退存储；禁止把运行状态写入其他 run_id 的条目。
+        """
+        with self._lock:
+            entry = self._runs.get(run_id)
+            return entry.extra if entry else None
 
     def close_run(self, run_id: str) -> BudgetSnapshot:
         """返回快照并删除条目（Runner 在 finally 中调用）。"""

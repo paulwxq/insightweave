@@ -8,7 +8,14 @@ from __future__ import annotations
 
 from typing import Any, Literal, NotRequired, TypedDict
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 
 class ValidationRecord(TypedDict):
@@ -203,6 +210,65 @@ class DbAgentFinalAnswer(BaseModel):
     metric_definitions: list[str] = []  # 采用的口径
     limitations: list[str] = []  # 截断、缺失、口径限制
     open_questions: list[str] = []  # 待澄清或未完成事项
+
+    @field_validator("answer")
+    @classmethod
+    def _require_nonblank_answer(cls, value: str) -> str:
+        """正文必须非空白（doc 6.2 §7.2.1）：纯空白提交在参数层即拒绝。"""
+        if not has_nonblank_answer(value):
+            raise ValueError("answer 必须包含非空白正文")
+        return value  # 不重写正常正文的首尾格式。
+
+
+# ----------------------------------------------------------------------------
+# 共享有效性校验（doc 6.2 §7.2.1：提交参数、Runner 评估与归档资格同一规则）
+# ----------------------------------------------------------------------------
+
+
+def extract_raw_final_answer_payload(answer_record: object) -> Any:
+    """原值提取：answer 键存在时按原类型原值返回（含 None/空串/列表）。"""
+    if isinstance(answer_record, dict) and "answer" in answer_record:
+        return answer_record["answer"]
+    return {}  # 仅外层记录/answer 键缺失时使用缺失约定值。
+
+
+def has_nonblank_answer(value: object) -> bool:
+    """正文是否为非空白字符串（strip 后非空）。"""
+    return isinstance(value, str) and bool(value.strip())
+
+
+def normalize_valid_final_answer_payload(payload: object) -> dict[str, Any] | None:
+    """结构 + 非空白正文校验通过时返回归一字典，否则 None。
+
+    只做一次 Pydantic 解析（model_validate），不先以布尔函数预检再二次校验。
+    """
+    if not isinstance(payload, dict) or not has_nonblank_answer(payload.get("answer")):
+        return None
+    try:
+        return DbAgentFinalAnswer.model_validate(payload).model_dump()
+    except ValidationError:
+        return None
+
+
+def normalize_final_answer_record(
+    answer_record: object,
+    *,
+    run_id: str,
+    request_id: str,
+) -> dict[str, Any] | None:
+    """运行归属严格校验（doc 6.2 §7.2.1）：外层 run_id/request_id 必须与
+    Runner 本轮参数精确相等（比较基准来自 Runner，不从记录推导）；缺失或
+    任一不一致视为无效提交，不根据字典键自动补齐或改写。
+    """
+    if not isinstance(answer_record, dict):
+        return None
+    if answer_record.get("run_id") != run_id:
+        return None
+    if answer_record.get("request_id") != request_id:
+        return None
+    return normalize_valid_final_answer_payload(
+        extract_raw_final_answer_payload(answer_record)
+    )
 
 
 class EvidenceItem(BaseModel):

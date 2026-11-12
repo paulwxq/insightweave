@@ -20,6 +20,12 @@ _NS_SESSIONS = ("db_deepagent", "sessions")
 _ARCHIVE_PREFIXES = (("db_deepagent", "qa"), ("db_deepagent", "run_errors"))
 _PAGE = 100
 
+# 归档契约版本（doc 6.2 §7.4 / v4/5 §13.3）：写读共用，集中定义，不得各处硬编码。
+# v1=旧记录（无版本号，answer 保存原模型提交 payload）；v2=新增 delivery_answer/
+# answer_source，answer 继续保留原值。新增格式须保留旧版本读取分支并同步测试。
+LEGACY_ARCHIVE_SCHEMA_VERSION = 1
+ARCHIVE_SCHEMA_VERSION = 2
+
 
 def _ns(template: str, session_id: str) -> tuple[str, ...]:
     return tuple(part.format(session_id=session_id) for part in template.split("/"))
@@ -74,6 +80,38 @@ class QaArchive:
         self._store.put(
             _ns("db_deepagent/run_errors/{session_id}", session_id), request_id, record
         )
+
+    @staticmethod
+    def read_delivery_answer(record: dict[str, Any]) -> dict[str, Any]:
+        """按归档契约版本返回历史交付浅投影（doc 6.2 §7.4）。
+
+        职责边界：仅版本路由与字典容器检查，不验证内容（status/answer/
+        findings 是否有效由调用方另行验证）；只改读取副本，不回写、不迁移。
+
+        - v1：answer 的浅拷贝，并把模型提交状态 status 显式改名为
+          submitted_status——v1 answer.status 是模型状态，与 v2
+          delivery_answer.status（Runner 状态）同名异义，不得混用于展示或
+          统计；跨版本状态读取统一用归档顶层 ``record["status"]``。原键
+          缺失则不补造；非字典 answer 返回空视图，不改写原档。
+        - v2：delivery_answer 的浅拷贝（缺失或非字典容器报错）。
+        - 未知版本或非整数版本号报错（bool 不算整数版本）。
+        """
+        version = record.get("archive_schema_version", LEGACY_ARCHIVE_SCHEMA_VERSION)
+        if type(version) is not int:
+            raise ValueError("归档契约版本必须为整数")
+        if version == LEGACY_ARCHIVE_SCHEMA_VERSION:
+            raw = record["answer"] if "answer" in record else {}
+            view = dict(raw) if isinstance(raw, dict) else {}
+            # v1 的 status 是模型提交状态，不能伪装为 Runner 状态。
+            if "status" in view:
+                view["submitted_status"] = view.pop("status")
+            return view
+        if version == ARCHIVE_SCHEMA_VERSION:
+            raw = record.get("delivery_answer")
+            if not isinstance(raw, dict):
+                raise ValueError("归档 v2 缺少字典型 delivery_answer")
+            return dict(raw)
+        raise ValueError(f"不支持的归档契约版本: {version}")
 
     def upsert_session(self, session_id: str, record: dict[str, Any]) -> None:
         """sessions 记录整体覆盖写（当前 thread_id、序号、活动时间）。"""

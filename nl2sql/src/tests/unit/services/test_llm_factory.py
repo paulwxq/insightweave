@@ -15,10 +15,10 @@ from src.services.llm_factory import (
     get_llm,
 )
 
-
 # ---------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------
+
 
 def _make_config(
     *,
@@ -48,6 +48,7 @@ def _make_config(
 # ---------------------------------------------------------------------------
 # _build_params — DashScope 分支
 # ---------------------------------------------------------------------------
+
 
 class TestBuildParamsDashScope:
     """DashScope provider 参数构建规则"""
@@ -94,26 +95,37 @@ class TestBuildParamsDashScope:
 
     def test_top_p_routed_to_model_kwargs(self):
         params = _build_params(
-            "dashscope", {"api_key": "sk-xxx"}, "qwen-max", {"top_p": 0.9},
+            "dashscope",
+            {"api_key": "sk-xxx"},
+            "qwen-max",
+            {"top_p": 0.9},
         )
         assert params["model_kwargs"] == {"top_p": 0.9}
 
     def test_enable_thinking_routed_to_model_kwargs(self):
         params = _build_params(
-            "dashscope", {"api_key": "sk-xxx"}, "qwen-plus", {"enable_thinking": True},
+            "dashscope",
+            {"api_key": "sk-xxx"},
+            "qwen-plus",
+            {"enable_thinking": True},
         )
         assert params["model_kwargs"] == {"enable_thinking": True}
 
     def test_enable_search_routed_to_model_kwargs(self):
         params = _build_params(
-            "dashscope", {"api_key": "sk-xxx"}, "qwen-plus", {"enable_search": True},
+            "dashscope",
+            {"api_key": "sk-xxx"},
+            "qwen-plus",
+            {"enable_search": True},
         )
         assert params["model_kwargs"] == {"enable_search": True}
 
     def test_search_options_routed_to_model_kwargs(self):
         opts = {"enable_source": True, "forced_search": True, "search_strategy": "max"}
         params = _build_params(
-            "dashscope", {"api_key": "sk-xxx"}, "qwen-plus",
+            "dashscope",
+            {"api_key": "sk-xxx"},
+            "qwen-plus",
             {"enable_search": True, "search_options": opts},
         )
         assert params["model_kwargs"]["enable_search"] is True
@@ -122,13 +134,19 @@ class TestBuildParamsDashScope:
     def test_response_format_routed_to_model_kwargs(self):
         fmt = {"type": "json_object"}
         params = _build_params(
-            "dashscope", {"api_key": "sk-xxx"}, "qwen-plus", {"response_format": fmt},
+            "dashscope",
+            {"api_key": "sk-xxx"},
+            "qwen-plus",
+            {"response_format": fmt},
         )
         assert params["model_kwargs"] == {"response_format": fmt}
 
     def test_stream_mapped_to_streaming(self):
         params = _build_params(
-            "dashscope", {"api_key": "sk-xxx"}, "qwen-plus", {"stream": True},
+            "dashscope",
+            {"api_key": "sk-xxx"},
+            "qwen-plus",
+            {"stream": True},
         )
         assert params["streaming"] is True
         assert "stream" not in params
@@ -136,7 +154,9 @@ class TestBuildParamsDashScope:
 
     def test_all_dashscope_overrides_combined(self):
         params = _build_params(
-            "dashscope", {"api_key": "sk-xxx"}, "qwen-plus",
+            "dashscope",
+            {"api_key": "sk-xxx"},
+            "qwen-plus",
             {
                 "temperature": 0.6,
                 "max_tokens": 4096,
@@ -181,6 +201,7 @@ class TestBuildParamsDashScope:
 # ---------------------------------------------------------------------------
 # _build_params — OpenAI 分支
 # ---------------------------------------------------------------------------
+
 
 class TestBuildParamsOpenAI:
     """OpenAI provider 参数构建规则"""
@@ -237,13 +258,19 @@ class TestBuildParamsOpenAI:
 
     def test_top_p_as_direct_field(self):
         params = _build_params(
-            "openai", {"api_key": "sk-openai"}, "gpt-4", {"top_p": 0.9},
+            "openai",
+            {"api_key": "sk-openai"},
+            "gpt-4",
+            {"top_p": 0.9},
         )
         assert params["top_p"] == 0.9
 
     def test_stream_mapped_to_streaming(self):
         params = _build_params(
-            "openai", {"api_key": "sk-openai"}, "gpt-4", {"stream": True},
+            "openai",
+            {"api_key": "sk-openai"},
+            "gpt-4",
+            {"stream": True},
         )
         assert params["streaming"] is True
         assert "stream" not in params
@@ -251,7 +278,10 @@ class TestBuildParamsOpenAI:
     def test_response_format_as_direct_field(self):
         fmt = {"type": "json_object"}
         params = _build_params(
-            "openai", {"api_key": "sk-openai"}, "gpt-4", {"response_format": fmt},
+            "openai",
+            {"api_key": "sk-openai"},
+            "gpt-4",
+            {"response_format": fmt},
         )
         assert params["response_format"] == fmt
 
@@ -270,14 +300,18 @@ class TestBuildParamsOpenAI:
     def test_dashscope_only_params_rejected(self):
         with pytest.raises(ValueError, match="仅适用于 DashScope"):
             _build_params(
-                "openai", {"api_key": "sk-openai"}, "gpt-4",
+                "openai",
+                {"api_key": "sk-openai"},
+                "gpt-4",
                 {"enable_thinking": True},
             )
 
     def test_dashscope_only_search_rejected(self):
         with pytest.raises(ValueError, match="仅适用于 DashScope"):
             _build_params(
-                "openai", {"api_key": "sk-openai"}, "gpt-4",
+                "openai",
+                {"api_key": "sk-openai"},
+                "gpt-4",
                 {"enable_search": True, "search_options": {"forced_search": True}},
             )
 
@@ -285,6 +319,7 @@ class TestBuildParamsOpenAI:
 # ---------------------------------------------------------------------------
 # _build_params — OpenRouter 分支（OpenAI 兼容）
 # ---------------------------------------------------------------------------
+
 
 class TestBuildParamsOpenRouter:
     """OpenRouter provider 参数构建规则（复用 ChatOpenAI，需 base_url）"""
@@ -353,6 +388,7 @@ class TestBuildParamsOpenRouter:
 # _build_params — DeepSeek 分支
 # ---------------------------------------------------------------------------
 
+
 class TestBuildParamsDeepSeek:
     """DeepSeek provider 参数构建规则"""
 
@@ -413,9 +449,7 @@ class TestBuildParamsDeepSeek:
 
     def test_no_thinking_no_extra_body(self):
         """不传 thinking 时不应产生 extra_body 字段"""
-        params = _build_params(
-            "deepseek", self._provider_cfg, "deepseek-reasoner", {}
-        )
+        params = _build_params("deepseek", self._provider_cfg, "deepseek-reasoner", {})
         assert "extra_body" not in params
 
     def test_deepseek_reasoner_with_max_tokens(self):
@@ -452,7 +486,10 @@ class TestBuildParamsDeepSeek:
     def test_dashscope_only_params_rejected(self):
         with pytest.raises(ValueError, match="仅适用于 DashScope"):
             _build_params(
-                "deepseek", self._provider_cfg, "deepseek-chat", {"enable_thinking": True}
+                "deepseek",
+                self._provider_cfg,
+                "deepseek-chat",
+                {"enable_thinking": True},
             )
 
     def test_dashscope_search_rejected(self):
@@ -585,6 +622,7 @@ class TestGetLlmDeepSeek:
 # _build_params — 白名单校验
 # ---------------------------------------------------------------------------
 
+
 class TestBuildParamsWhitelist:
     """Override 白名单校验"""
 
@@ -594,7 +632,9 @@ class TestBuildParamsWhitelist:
 
     def test_api_key_override_rejected(self):
         with pytest.raises(ValueError, match="不允许.*override"):
-            _build_params("dashscope", {"api_key": "x"}, "qwen-max", {"api_key": "other"})
+            _build_params(
+                "dashscope", {"api_key": "x"}, "qwen-max", {"api_key": "other"}
+            )
 
     def test_unknown_field_rejected(self):
         with pytest.raises(ValueError, match="不允许.*override"):
@@ -604,6 +644,7 @@ class TestBuildParamsWhitelist:
 # ---------------------------------------------------------------------------
 # _build_params — 不支持的 provider
 # ---------------------------------------------------------------------------
+
 
 class TestBuildParamsAutoDetected:
     """自动检测的 provider（不在 _PROVIDER_MAP 中）走 OpenAI 兼容路径"""
@@ -615,7 +656,10 @@ class TestBuildParamsAutoDetected:
 
     def test_basic_params(self):
         params = _build_params(
-            "dashscope_openai", self._provider_cfg, "qwen3.5-plus", {},
+            "dashscope_openai",
+            self._provider_cfg,
+            "qwen3.5-plus",
+            {},
         )
         assert params == {
             "model": "qwen3.5-plus",
@@ -626,7 +670,9 @@ class TestBuildParamsAutoDetected:
     def test_enable_thinking_passthrough_via_extra_body(self):
         """自动检测的 provider 允许 enable_thinking，透传为 extra_body"""
         params = _build_params(
-            "dashscope_openai", self._provider_cfg, "qwen3.5-plus",
+            "dashscope_openai",
+            self._provider_cfg,
+            "qwen3.5-plus",
             {"enable_thinking": False},
         )
         assert params["extra_body"] == {"enable_thinking": False}
@@ -634,7 +680,9 @@ class TestBuildParamsAutoDetected:
 
     def test_enable_search_passthrough_via_extra_body(self):
         params = _build_params(
-            "dashscope_openai", self._provider_cfg, "qwen3.5-plus",
+            "dashscope_openai",
+            self._provider_cfg,
+            "qwen3.5-plus",
             {"enable_search": True, "search_options": {"forced_search": True}},
         )
         assert params["extra_body"] == {
@@ -644,7 +692,9 @@ class TestBuildParamsAutoDetected:
 
     def test_temperature_as_direct_field(self):
         params = _build_params(
-            "dashscope_openai", self._provider_cfg, "qwen3.5-plus",
+            "dashscope_openai",
+            self._provider_cfg,
+            "qwen3.5-plus",
             {"temperature": 0},
         )
         assert params["temperature"] == 0
@@ -652,7 +702,9 @@ class TestBuildParamsAutoDetected:
 
     def test_all_overrides_combined(self):
         params = _build_params(
-            "dashscope_openai", self._provider_cfg, "qwen3.5-plus",
+            "dashscope_openai",
+            self._provider_cfg,
+            "qwen3.5-plus",
             {
                 "temperature": 0,
                 "max_tokens": 4096,
@@ -671,7 +723,9 @@ class TestBuildParamsAutoDetected:
         """DeepSeek thinking 参数对自动检测的 provider 仍应报错"""
         with pytest.raises(ValueError, match="仅适用于 DeepSeek"):
             _build_params(
-                "dashscope_openai", self._provider_cfg, "qwen3.5-plus",
+                "dashscope_openai",
+                self._provider_cfg,
+                "qwen3.5-plus",
                 {"thinking": {"type": "enabled"}},
             )
 
@@ -691,6 +745,7 @@ class TestBuildParamsUnsupportedProvider:
 # ---------------------------------------------------------------------------
 # get_llm — 正常路径
 # ---------------------------------------------------------------------------
+
 
 class TestGetLlmHappyPath:
     """get_llm 正常创建 LLM 实例"""
@@ -789,6 +844,7 @@ class TestGetLlmHappyPath:
 # ---------------------------------------------------------------------------
 # get_llm — 自动检测的 provider（OpenAI 兼容模式）
 # ---------------------------------------------------------------------------
+
 
 class TestGetLlmAutoDetected:
     """get_llm 完整流程 — 自动检测的 provider（如 dashscope_openai）"""
@@ -934,7 +990,9 @@ class TestGetLlmProfileDefaults:
 
     @patch("src.services.llm_factory._import_class")
     @patch("src.services.llm_factory.get_config")
-    def test_node_override_wins_over_profile_default(self, mock_get_config, mock_import):
+    def test_node_override_wins_over_profile_default(
+        self, mock_get_config, mock_import
+    ):
         """节点 override 优先级高于 profile 默认值"""
         mock_get_config.return_value = _make_config(
             profiles={
@@ -1032,6 +1090,7 @@ class TestGetLlmProfileDefaults:
 # get_llm — 配置校验（各种异常路径）
 # ---------------------------------------------------------------------------
 
+
 class TestGetLlmValidation:
     """get_llm 配置缺失 / 引用错误场景"""
 
@@ -1048,7 +1107,9 @@ class TestGetLlmValidation:
     @patch("src.services.llm_factory.get_config")
     def test_missing_llm_providers(self, mock_get_config):
         store = {
-            "llm_profiles": {"qwen_max": {"provider": "dashscope", "model": "qwen-max"}},
+            "llm_profiles": {
+                "qwen_max": {"provider": "dashscope", "model": "qwen-max"}
+            },
             "llm_providers": None,
         }
         mock_cfg = MagicMock()
@@ -1129,6 +1190,7 @@ class TestGetLlmValidation:
 # extract_overrides 测试
 # ---------------------------------------------------------------------------
 
+
 class TestExtractOverrides:
     """测试 extract_overrides 从节点配置中提取允许的 override"""
 
@@ -1137,7 +1199,12 @@ class TestExtractOverrides:
         assert extract_overrides(config) == {"temperature": 0}
 
     def test_extracts_all_allowed(self):
-        config = {"llm_profile": "qwen_max", "temperature": 0.3, "max_tokens": 2000, "timeout": 30}
+        config = {
+            "llm_profile": "qwen_max",
+            "temperature": 0.3,
+            "max_tokens": 2000,
+            "timeout": 30,
+        }
         result = extract_overrides(config)
         assert result == {"temperature": 0.3, "max_tokens": 2000, "timeout": 30}
 
@@ -1183,6 +1250,7 @@ class TestExtractOverrides:
 # extract_llm_content 测试
 # ---------------------------------------------------------------------------
 
+
 class TestExtractLlmContent:
     """extract_llm_content 从 LLM 响应中提取干净文本。
 
@@ -1206,7 +1274,10 @@ class TestExtractLlmContent:
     def test_plain_content_unchanged(self):
         """无 think 标签时返回原始内容（不启用 thinking 的常规场景）"""
         response = self._mock_response("SELECT * FROM orders WHERE date = '2024-01'")
-        assert extract_llm_content(response) == "SELECT * FROM orders WHERE date = '2024-01'"
+        assert (
+            extract_llm_content(response)
+            == "SELECT * FROM orders WHERE date = '2024-01'"
+        )
 
     def test_json_content_unchanged(self):
         """JSON 内容无 think 标签时原样返回"""
@@ -1234,7 +1305,9 @@ class TestExtractLlmContent:
 
     def test_strips_multiple_think_blocks(self):
         """剥离多个 think 块"""
-        content = "<think>第一段推理</think>\n中间内容\n<think>第二段推理</think>\n最终答案"
+        content = (
+            "<think>第一段推理</think>\n中间内容\n<think>第二段推理</think>\n最终答案"
+        )
         response = self._mock_response(content)
         result = extract_llm_content(response)
         assert "中间内容" in result
@@ -1281,8 +1354,44 @@ class TestExtractLlmContent:
     def test_think_block_before_json_parseable(self):
         """剥离 think 块后，残余内容可直接被 json.loads() 解析"""
         import json
+
         content = '<think>分析：用户查询月销售额</think>\n{"rewritten_query": "月销售额", "parse_result": {}}'
         response = self._mock_response(content)
         result = extract_llm_content(response)
         parsed = json.loads(result)
         assert parsed["rewritten_query"] == "月销售额"
+
+
+class TestMaxRetriesOverride:
+    """doc 6.2 §7.5.1：max_retries 显式支持与校验（白名单/非负/顶层透传/原生拒绝）。"""
+
+    def test_openai_compatible_top_level_param(self):
+        params = _build_params(
+            "dashscope_openai",
+            {"api_key": "sk-xxx", "base_url": "https://x"},
+            "qwen3.8-max",
+            {"max_retries": 0},
+        )
+        assert params["max_retries"] == 0  # 顶层构造参数，非 model_kwargs/extra_body
+        assert (
+            "model_kwargs" not in params
+            and "extra_body" not in params
+            or (params.get("extra_body") in (None, {}))
+        )
+
+    @pytest.mark.parametrize("bad", [-1, None, True, "0", 1.5], ids=type)
+    def test_invalid_values_rejected(self, bad):
+        with pytest.raises(ValueError, match="max_retries"):
+            _build_params("openai", {"api_key": "sk-xxx"}, "m", {"max_retries": bad})
+
+    def test_native_dashscope_rejected(self):
+        with pytest.raises(ValueError, match="DashScope"):
+            _build_params(
+                "dashscope", {"api_key": "sk-xxx"}, "qwen-max", {"max_retries": 0}
+            )
+
+    def test_absent_param_keeps_current_behavior(self):
+        params = _build_params(
+            "openai", {"api_key": "sk-xxx"}, "m", {"temperature": 0.1}
+        )
+        assert "max_retries" not in params  # 未传的其他调用方行为不变

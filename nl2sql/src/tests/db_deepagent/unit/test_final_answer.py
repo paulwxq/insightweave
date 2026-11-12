@@ -181,3 +181,33 @@ class TestChecks:
         assert payload["error"]["error_type"] == "final_answer_already_submitted"
         assert payload["error"]["retryable"] is False
         assert "db_final_answers" not in updates  # 未接受时不写正式答案
+
+
+class TestNonblankAnswerRule:
+    """doc 6.2 §7.2.1：正文非空白规则在提交参数层生效（工具与 Runner 同一结构）。"""
+
+    @pytest.mark.parametrize("blank", ["", "   ", "\n\t \n", "　"])
+    def test_blank_answer_rejected_before_record(self, node, db_agent_context, blank):
+        """空串/空格/换行/全角空格：参数校验拒绝，不写 FinalAnswerRecord。"""
+        updates, msg = invoke_tool_node(
+            node,
+            [("submit_final_answer", _args(answer=blank), "tc-sub")],
+            db_agent_context,
+            extra_state=_extra_state(),
+        )
+        assert msg.content.startswith("invalid_argument:")
+        assert "answer" in msg.content  # 错误定位在 answer 字段
+        assert "db_final_answers" not in updates
+
+    def test_nonblank_answer_preserved_verbatim(self, node, db_agent_context):
+        """正常正文原样保留（不 strip 重写首尾格式）。"""
+        text = "  答案前后留空格保留  "
+        updates, msg = invoke_tool_node(
+            node,
+            [("submit_final_answer", _args(answer=text), "tc-sub")],
+            db_agent_context,
+            extra_state=_extra_state(),
+        )
+        assert msg.content == "已接收最终答案"
+        record = updates["db_final_answers"][db_agent_context.run_id]
+        assert record["answer"]["answer"] == text

@@ -1835,7 +1835,7 @@ pool = ConnectionPool(conninfo, min_size=..., max_size=...,
 - **`qa` 的 `status` 字段直接保存 Runner 判定的真实运行状态**（与 `DbAgentResult.status` 同一七值枚举），不另设 qa 专用枚举、不为凑枚举改写状态：SQL 成功后预算耗尽（满足 a、状态 `budget_exhausted`）、查询成功但空结果（`no_data`）、待澄清（`needs_clarification`）均按真实状态入 `qa`；`persistence_error` 按 §14.3 P3 规则归档本身失败、不写 `qa`。预算耗尽但无成功真实执行的请求不满足 a → `run_errors`。
 - `qa` 的 evidence 摘要保留 `reused_from` 来源标记（§14.2 `EvidenceItem`）。
 
-**最终答案兜底的归档契约 v2（待实施变更）**：以下是 [doc 6.2 §7.4](../6.2_db_deepagent最终答案兜底问题与补齐建议.md) 定义的目标契约，当前业务代码尚未实施，不将旧审核结论当作运行时已生效证明。
+**最终答案兜底的归档契约 v2（已实施，2026-11-12）**：以下是 [doc 6.2 §7.4](../6.2_db_deepagent最终答案兜底问题与补齐建议.md) 定义的契约，已由 `Runner._archive_run()` 落地（`ARCHIVE_SCHEMA_VERSION=2` 写入与 `QaArchive.read_delivery_answer()` 读取），经 doc 6.2 实施审核闭环与离线回归验证；详见 [实施收尾记录](../reviews/doc62_implementation_closeout.md)。读取兼容边界（浅投影不做内容校验）、仓库外消费者未核查等限制继续有效。
 
 | 字段 | 旧记录（v1） | 新记录（v2，QA／run_errors） |
 | --- | --- | --- |

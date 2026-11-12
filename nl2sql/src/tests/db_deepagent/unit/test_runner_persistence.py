@@ -7,6 +7,7 @@ FakeAgent／FakeStore 注入 P0–P4 各阶段异常；状态优先级、primary
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import psycopg
@@ -157,13 +158,16 @@ class TestFailureInjection:
         )
 
     def test_p1_runtime_reads_diagnostic_only(self, assembly_services):
-        """P1 runtime 异常：P2 只为诊断读取，不读取最终答案。"""
+        """P1 runtime 异常：P2 只为诊断读取，不读取最终答案；兜底说明非空。"""
         store = FakeStore()
         agent = FakeAgent(_state())
         agent.invoke_side_effect = RuntimeError("model boom")
         result = _runner(assembly_services, agent, store, _state()).run("问", "s1")
         assert result.status == "failed"
-        assert result.answer == ""
+        # doc 6.2：已开始调用的空答案运行生成服务端兜底（不读原提交记录）
+        assert result.answer.startswith("系统兜底说明：")
+        assert "未取得可确认的查询或分析结果" in result.answer
+        assert any("服务端兜底" in w for w in result.warnings)
         assert not result.findings
         assert any(
             e.phase == "P1" and e.kind == "runtime" and e.primary for e in result.errors
@@ -272,7 +276,7 @@ class TestArchiveConditions:
         """SQL 成功后模型调用失败：状态 failed 但按条件 a 进 qa（§13.3）。
 
         修复前 P1 runtime 异常使整个 values 被替换为 None，已执行账本
-        被丢弃、请求误入 run_errors。
+        被丢弃、请求误入 run_errors。doc 6.2：空答案断言改为非空系统兜底。
         """
 
         class SqlThenModelFail(FakeAgent):
@@ -280,7 +284,9 @@ class TestArchiveConditions:
 
             def invoke(self, inputs, config=None, context=None):
                 if context is not None:
-                    self.state_values = _remap_run_id(self.state_values, context.run_id)
+                    self.state_values = _remap_run_id(
+                        self.state_values, context.run_id, context.request_id
+                    )
                 raise RuntimeError("model boom after sql")
 
         store = FakeStore()
@@ -289,12 +295,21 @@ class TestArchiveConditions:
             "问", "s1", request_id="req-sql-ok-model-fail"
         )
         assert result.status == "failed"
-        assert result.answer == ""  # 不读取最终答案（评估开关关闭）
+        assert result.answer.startswith("系统兜底说明：")  # 服务端兜底非空
+        assert "已记录 1 行结果" in result.answer  # 可靠行数来自本轮账本
+        assert any("服务端兜底" in w for w in result.warnings)
         assert any(e.evidence_id == "E-run00001" for e in result.evidence)
         qa_records = [v for key, v in store.items.items() if key[0][1] == "qa"]
         assert qa_records, "已执行 SQL 的轮次应进 qa 而非 run_errors"
         assert qa_records[0]["status"] == "failed"  # 保留真实状态
         assert qa_records[0]["evidence"], "执行轨迹须进入归档"
+        # 归档契约 v2（doc 6.2 §7.4）：原 answer 为空提交视图、交付内容另存
+        assert qa_records[0]["archive_schema_version"] == 2
+        assert qa_records[0]["answer"] == {}  # 无提交记录 → 缺失约定值
+        assert qa_records[0]["answer_source"] == "system_fallback"
+        assert (
+            qa_records[0]["delivery_answer"]["answer"] == result.answer
+        ), "归档交付正文与实时返回一致"
         assert not any(key[0][1] == "run_errors" for key in store.items)
 
     def test_condition_b_reuse_only_archives_qa(self, assembly_services):
@@ -884,3 +899,622 @@ class TestModelRefusalThroughMainGraph:
             "ModelRefusalError" in f.message for f in result.errors
         ), "普通文本拒答不得触发 ModelRefusalError"
         assert any(f.kind == "no_final_answer" for f in result.errors)
+
+
+# ============================================================================
+# doc 6.2 §7：最终答案兜底——完整收尾、运行归属、一次归一、行数映射与归档 v2
+# ============================================================================
+
+
+def _qa_records(store):
+    return [v for key, v in store.items.items() if key[0][1] == "qa"]
+
+
+def _err_records(store):
+    return [v for key, v in store.items.items() if key[0][1] == "run_errors"]
+
+
+class SqlOkAgent(FakeAgent):
+    """invoke 成功并按上下文重映射；随后可对答案记录做受控篡改（归属用例）。"""
+
+    def __init__(self, state, answer_mutate=None):
+        super().__init__(state)
+        self._answer_mutate = answer_mutate
+
+    def invoke(self, inputs, config=None, context=None):
+        self.invoke_calls.append(
+            {"inputs": inputs, "config": config, "context": context}
+        )
+        if context is not None:
+            self.state_values = _remap_run_id(
+                self.state_values, context.run_id, context.request_id
+            )
+            if self._answer_mutate is not None:
+                answers = self.state_values.setdefault("db_final_answers", {})
+                record = answers.get(context.run_id)
+                if record is not None:
+                    self._answer_mutate(record)
+        return {"messages": self.state_values.get("messages", [])}
+
+
+class TestFallbackFinalization:
+    """doc 6.2 §7.8：完整 Runner 收尾（评估→兜底→P3→返回）与归档 v2。"""
+
+    ILLEGAL_PAYLOADS = {
+        "answer_none": {
+            "status": "completed",
+            "answer": None,
+            "findings": [],
+            "metric_definitions": [],
+            "limitations": [],
+            "open_questions": [],
+        },
+        "answer_empty_str": {
+            "status": "completed",
+            "answer": "",
+            "findings": [],
+            "metric_definitions": [],
+            "limitations": [],
+            "open_questions": [],
+        },
+        "answer_blank": {
+            "status": "completed",
+            "answer": " \n\t ",
+            "findings": [],
+            "metric_definitions": [],
+            "limitations": [],
+            "open_questions": [],
+        },
+        "answer_list": {
+            "status": "completed",
+            "answer": ["不是字符串"],
+            "findings": [],
+            "metric_definitions": [],
+            "limitations": [],
+            "open_questions": [],
+        },
+        "findings_str": {
+            "status": "completed",
+            "answer": "正文",
+            "findings": "不是列表",
+            "metric_definitions": [],
+            "limitations": [],
+            "open_questions": [],
+        },
+        "findings_nondict_items": {
+            "status": "completed",
+            "answer": "正文",
+            "findings": [{"text": "x", "evidence_ids": ["E-run00001"]}, "混入字符串"],
+            "metric_definitions": [],
+            "limitations": [],
+            "open_questions": [],
+        },
+    }
+
+    @pytest.mark.parametrize("variant", sorted(ILLEGAL_PAYLOADS))
+    @pytest.mark.parametrize("reused", [False, True], ids=["real-exec", "pure-reuse"])
+    def test_illegal_payload_full_tail(self, assembly_services, variant, reused):
+        """非法 payload 经完整收尾：failed + 系统兜底，无额外 P3 runtime。
+
+        纯沿用不满足条件 b → run_errors；真实执行按条件 a → qa；原 answer
+        值按约定精确保留；delivery_answer 与实时返回一致。
+        """
+        payload = self.ILLEGAL_PAYLOADS[variant]
+        state = _state(answer=payload, executions=[_exec(reused=reused)])
+        store = FakeStore()
+        result = _runner(assembly_services, SqlOkAgent(state), store, state).run(
+            "问", "s1", request_id="req-illegal"
+        )
+        assert result.status == "failed"  # 不得保留 completed
+        assert result.answer.startswith("系统兜底说明：")
+        assert any("服务端兜底" in w for w in result.warnings)
+        assert not result.findings
+        # 不新增 P3 runtime / 归档异常
+        assert all(e.phase != "P3" for e in result.errors)
+        assert any(e.kind == "no_final_answer" and e.primary for e in result.errors)
+        # 分流：真实执行 → qa；纯沿用 → run_errors
+        if reused:
+            assert not _qa_records(store) and _err_records(store)
+            record = _err_records(store)[0]
+        else:
+            assert _qa_records(store) and not _err_records(store)
+            record = _qa_records(store)[0]
+        # 原值按类型精确保留（answer 键存在 → 原样；不作 {} 替换）
+        assert record["answer"] == payload
+        assert record["answer_source"] == "system_fallback"
+        assert record["archive_schema_version"] == 2
+        assert record["delivery_answer"]["answer"] == result.answer
+        assert record["delivery_answer"]["findings"] == []
+
+    def test_blank_completed_never_completed_plus_fallback(self, assembly_services):
+        """空白 completed：判 failed + 兜底，绝不出现 completed + system_fallback。"""
+        payload = dict(self.ILLEGAL_PAYLOADS["answer_blank"])
+        payload["findings"] = [{"text": "发现", "evidence_ids": ["E-run00001"]}]
+        state = _state(answer=payload)
+        store = FakeStore()
+        result = _runner(assembly_services, SqlOkAgent(state), store, state).run(
+            "问", "s1", request_id="req-blank"
+        )
+        assert result.status == "failed"
+        assert result.answer.startswith("系统兜底说明：")
+
+    def test_normal_answer_not_overridden_with_v2_fields(self, assembly_services):
+        """正常有效答案：不覆盖；qa 记录 v2 字段齐备，原 answer 保留模型提交。"""
+        store = FakeStore()
+        result, _ = _run_ok(assembly_services, store, _state())
+        assert result.status == "completed"
+        assert result.answer == ANSWER["answer"] == result.answer.strip()
+        assert not any("服务端兜底" in w for w in result.warnings)
+        qa = _qa_records(store)[0]
+        assert qa["archive_schema_version"] == 2
+        assert qa["answer_source"] == "model"
+        assert qa["answer"] == ANSWER  # 原模型提交 payload 原样
+        assert qa["delivery_answer"]["answer"] == ANSWER["answer"]
+        assert qa["delivery_answer"]["status"] == "completed"
+
+    def test_no_submission_with_evidence_falls_back(self, assembly_services):
+        """已开始调用但未提交 + 有真实执行：failed + 兜底，仍按条件 a 进 qa。"""
+        state = _state(answer=None)
+        store = FakeStore()
+        result = _runner(assembly_services, SqlOkAgent(state), store, state).run(
+            "问", "s1", request_id="req-nosub"
+        )
+        assert result.status == "failed"
+        assert result.answer.startswith("系统兜底说明：")
+        assert _qa_records(store)
+
+    def test_started_without_evidence_fallback_no_result_claim(self, assembly_services):
+        """已开始调用但无证据：failed + 兜底说明未取得结果，不声称查询成功。"""
+        state = _state(answer=None, executions=[])
+        store = FakeStore()
+        result = _runner(assembly_services, SqlOkAgent(state), store, state).run(
+            "问", "s1", request_id="req-noev"
+        )
+        assert result.status == "failed"
+        assert "未取得可确认的查询或分析结果" in result.answer
+        assert "查询成功" not in result.answer
+
+    def test_pre_rejection_keeps_empty_answer_no_fallback(self, assembly_services):
+        """前置拒绝（request_id 冲突）：维持原空答案行为，无兜底与兜底 warning。"""
+        store = FakeStore()
+        state = _state()
+        runner = _runner(assembly_services, SqlOkAgent(state), store, state)
+        first = runner.run("问", "s1", request_id="req-dup")
+        assert first.status == "completed"
+        second = runner.run("问", "s1", request_id="req-dup")
+        assert second.status == "failed"
+        assert second.answer == ""  # 未调用 Agent：不生成兜底
+        assert not any("服务端兜底" in w for w in second.warnings)
+        assert any("已存在本地运行记录" in e.message for e in second.errors)
+
+
+class TestOwnershipChecks:
+    """doc 6.2 §7.2.1：外层 run_id/request_id 严格归属（字典键属于本轮）。"""
+
+    @pytest.mark.parametrize(
+        "mutate",
+        [
+            pytest.param(
+                lambda r: r.__setitem__("run_id", "run-other"), id="run-id-mismatch"
+            ),
+            pytest.param(
+                lambda r: r.__setitem__("request_id", "req-other"),
+                id="request-id-mismatch",
+            ),
+            pytest.param(lambda r: r.pop("run_id"), id="run-id-missing"),
+            pytest.param(lambda r: r.pop("request_id"), id="request-id-missing"),
+        ],
+    )
+    @pytest.mark.parametrize("reused", [False, True], ids=["real-exec", "pure-reuse"])
+    def test_mismatch_is_invalid_submission(self, assembly_services, mutate, reused):
+        state = _state(answer=ANSWER, executions=[_exec(reused=reused)])
+        store = FakeStore()
+        result = _runner(
+            assembly_services, SqlOkAgent(state, answer_mutate=mutate), store, state
+        ).run("问", "s1", request_id="req-own")
+        assert result.status == "failed"
+        assert result.answer.startswith("系统兜底说明：")
+        assert any(e.kind == "no_final_answer" and e.primary for e in result.errors)
+        assert all(e.phase != "P3" for e in result.errors)
+        if reused:
+            assert _err_records(store) and not _qa_records(store)
+            record = _err_records(store)[0]
+        else:
+            assert _qa_records(store) and not _err_records(store)
+            record = _qa_records(store)[0]
+        # 原 payload（含被篡改的标识）保留审计，不因归属不符改写
+        assert record["answer"] == ANSWER
+        assert record["answer_source"] == "system_fallback"
+
+    def test_valid_identifiers_positive_control(self, assembly_services):
+        """正向对照：正常工具写入的标识一致记录仍有效（completed）。"""
+        store = FakeStore()
+        result, _ = _run_ok(assembly_services, store, _state())
+        assert result.status == "completed"
+
+
+class TestSingleNormalization:
+    """doc 6.2 §7.3 注 9：收尾入口只归一一次；归属不符不解析正文。"""
+
+    def test_valid_submission_single_validate(self, assembly_services, monkeypatch):
+        from src.modules.db_deepagent import schemas as schemas_mod
+
+        calls = {"n": 0}
+        original = schemas_mod.DbAgentFinalAnswer.model_validate
+
+        def counting(payload):
+            calls["n"] += 1
+            return original(payload)
+
+        monkeypatch.setattr(schemas_mod.DbAgentFinalAnswer, "model_validate", counting)
+        store = FakeStore()
+        result, _ = _run_ok(assembly_services, store, _state())
+        assert result.status == "completed"
+        assert calls["n"] == 1  # Runner 本次收尾恰好一次 Pydantic 解析
+
+    def test_ownership_failure_skips_payload_parsing(
+        self, assembly_services, monkeypatch
+    ):
+        from src.modules.db_deepagent import schemas as schemas_mod
+
+        calls = {"n": 0}
+        original = schemas_mod.DbAgentFinalAnswer.model_validate
+
+        def counting(payload):
+            calls["n"] += 1
+            return original(payload)
+
+        monkeypatch.setattr(schemas_mod.DbAgentFinalAnswer, "model_validate", counting)
+        state = _state(answer=ANSWER)
+        store = FakeStore()
+        result = _runner(
+            assembly_services,
+            SqlOkAgent(
+                state, answer_mutate=lambda r: r.__setitem__("run_id", "run-other")
+            ),
+            store,
+            state,
+        ).run("问", "s1", request_id="req-own2")
+        assert result.status == "failed"
+        assert calls["n"] == 0  # 归属不符：不解析正文
+
+
+class TestKnownRowCountsAndTemplate:
+    """doc 6.2 §7.2.2/§7.2.3：可靠行数映射与简版兜底模板。"""
+
+    @staticmethod
+    def _counts_map(records_by_eid):
+        """构造 db_executions 记录并直接调用映射函数。"""
+        from src.modules.db_deepagent.runner import DbAgentRunner
+
+        values = {
+            "db_executions": [
+                {"run_id": "run-k", "purpose": "query", "evidence_id": eid, **rest}
+                for eid, rest in records_by_eid.items()
+            ],
+            "db_analyses": [],
+        }
+        return DbAgentRunner._known_saved_row_counts(values, "run-k")
+
+    def test_known_zero_is_zero(self):
+        counts = self._counts_map({"E1": {"saved_row_count": 0}})
+        assert counts == {"E1": 0}
+
+    @pytest.mark.parametrize(
+        "raw",
+        [None, True, False, -1, "5", 5.0],
+        ids=["none", "true", "false", "neg", "str", "float"],
+    )
+    def test_illegal_or_missing_is_unknown(self, raw):
+        rest = {} if raw == "MISSING" else {"saved_row_count": raw}
+        counts = self._counts_map({"E1": rest})
+        assert counts == {"E1": None}
+
+    def test_missing_key_is_unknown(self):
+        counts = self._counts_map({"E1": {}})
+        assert counts == {"E1": None}
+
+    def test_conflicting_duplicates_unknown(self):
+        values = {
+            "db_executions": [
+                {
+                    "run_id": "run-k",
+                    "purpose": "query",
+                    "evidence_id": "E1",
+                    "saved_row_count": 3,
+                },
+                {
+                    "run_id": "run-k",
+                    "purpose": "query",
+                    "evidence_id": "E1",
+                    "saved_row_count": 4,
+                },
+            ],
+            "db_analyses": [],
+        }
+        from src.modules.db_deepagent.runner import DbAgentRunner
+
+        assert DbAgentRunner._known_saved_row_counts(values, "run-k") == {"E1": None}
+
+    def test_other_run_and_probe_excluded(self):
+        values = {
+            "db_executions": [
+                {
+                    "run_id": "run-other",
+                    "purpose": "query",
+                    "evidence_id": "E-other",
+                    "saved_row_count": 7,
+                },
+                {
+                    "run_id": "run-k",
+                    "purpose": "probe",
+                    "evidence_id": "E-probe",
+                    "saved_row_count": 7,
+                },
+            ],
+            "db_analyses": [
+                {"run_id": "run-k", "evidence_id": "A-1", "saved_row_count": 2},
+            ],
+        }
+        from src.modules.db_deepagent.runner import DbAgentRunner
+
+        counts = DbAgentRunner._known_saved_row_counts(values, "run-k")
+        assert counts == {"A-1": 2}  # 探针与他轮记录不进入映射
+
+    def test_template_omits_unknown_count_and_ids(self):
+        from src.modules.db_deepagent.runner import DbAgentRunner
+        from src.modules.db_deepagent.schemas import EvidenceItem
+
+        ev = EvidenceItem(
+            evidence_id="E-internal01",
+            kind="sql_query",
+            tool_call_id="t",
+            source="orders",
+            sql="SELECT 1",
+            result_ref="res_x",
+            row_count=0,  # 兼容投影零（真实未知）
+            preview_truncated=False,
+            source_truncated=False,
+        )
+        text = DbAgentRunner._build_fallback_answer(
+            "failed", [ev], {"E-internal01": None}
+        )
+        assert not re.search(r"已记录 \d+ 行", text)  # 未知行数整句省略
+        assert "未知" not in text
+        assert "E-internal01" not in text  # 不展示内部证据编号
+        assert "账本" not in text
+
+    def test_template_known_counts_and_boundaries(self):
+        from src.modules.db_deepagent.runner import DbAgentRunner
+        from src.modules.db_deepagent.schemas import EvidenceItem
+
+        origin = {
+            "evidence_id": "E-old",
+            "thread_id": "",
+            "request_id": "",
+            "run_id": "run-old",
+            "datasource_id": "orders",
+            "user_text": None,
+        }
+
+        def _ev(eid, kind="sql_query", reused=False, truncated=False):
+            return EvidenceItem(
+                evidence_id=eid,
+                kind=kind,
+                tool_call_id="t",
+                source="orders",
+                sql="SELECT 1" if kind == "sql_query" else None,
+                result_ref="res_x",
+                input_result_refs=[] if kind == "sql_query" else ["res_y"],
+                operation=None if kind == "sql_query" else {"name": "aggregate"},
+                row_count=0,
+                preview_truncated=False,
+                source_truncated=truncated,
+                reused_from=dict(origin) if reused else None,
+            )
+
+        evs = [
+            _ev("E1"),
+            _ev("E2", kind="result_analysis", reused=True),
+            _ev("E3", truncated=True),
+        ] + [
+            _ev(f"Ex{i}") for i in range(4, 8)
+        ]  # 共 7 条 → 逐项 5 条 + “另有 2 份”
+        counts = {"E1": 0, "E2": 12, "E3": None}
+        text = DbAgentRunner._build_fallback_answer("budget_exhausted", evs, counts)
+        assert "已达到运行次数或时间限制" in text
+        assert "该查询没有返回记录" in text  # M1：查询零行专用文案
+        assert "该分析没有输出记录" not in text  # E1 是查询，不是分析
+        assert "已记录 0 行" not in text  # 零行不再写“已记录 0 行”
+        assert "已记录 12 行结果" in text
+        assert "结果 2：" in text and "来自历史记录" in text  # 沿用说明
+        assert "结果仅包含部分数据" in text  # 截断说明
+        assert "另有 2 份结果记录" in text
+        assert "完整答案尚未生成" in text
+        # 未提及行数的 E3 不出现“已记录 … 行”，也不写“未知”
+        assert not re.search(
+            r"已记录 \d+ 行",
+            text.replace("已记录 12 行结果", ""),
+        )
+
+    def test_analysis_zero_row_copy(self):
+        """M1：分析零行写“该分析没有输出记录。”，与查询零行区分。"""
+        from src.modules.db_deepagent.runner import DbAgentRunner
+        from src.modules.db_deepagent.schemas import EvidenceItem
+
+        ev = EvidenceItem(
+            evidence_id="A-zero",
+            kind="result_analysis",
+            tool_call_id="t",
+            source="orders",
+            sql=None,
+            result_ref="res_y",
+            input_result_refs=["res_x"],
+            operation={"name": "aggregate"},
+            row_count=0,
+            preview_truncated=False,
+            source_truncated=False,
+        )
+        text = DbAgentRunner._build_fallback_answer("failed", [ev], {"A-zero": 0})
+        assert "该分析没有输出记录" in text
+        assert "该查询没有返回记录" not in text
+
+    def test_run_with_missing_row_count_keeps_evidence_compatible(
+        self, assembly_services
+    ):
+        """账本缺 saved_row_count：EvidenceItem.row_count 兼容为 0，模板省略行数句。"""
+        exec_rec = _exec()
+        exec_rec.pop("saved_row_count")
+        state = _state(answer=None, executions=[exec_rec])
+        store = FakeStore()
+        result = _runner(assembly_services, SqlOkAgent(state), store, state).run(
+            "问", "s1", request_id="req-nocount"
+        )
+        assert result.status == "failed"
+        assert result.evidence[0].row_count == 0  # 外部字段兼容投影
+        assert not re.search(r"已记录 \d+ 行", result.answer)  # 不把兼容零当真实零
+
+
+class TestArchiveV2Read:
+    """doc 6.2 §7.4：read_delivery_answer 版本路由与 v1 status 改名。"""
+
+    def test_v1_status_renamed_to_submitted_status(self):
+        record = {
+            "status": "failed",
+            "answer": {"status": "completed", "answer": "旧答案"},
+        }
+        view = QaArchive.read_delivery_answer(record)
+        assert "status" not in view
+        assert view["submitted_status"] == "completed"
+        assert view["answer"] == "旧答案"
+        assert record["answer"]["status"] == "completed"  # 原档不改写
+
+    def test_v1_missing_status_not_fabricated(self):
+        view = QaArchive.read_delivery_answer({"answer": {"answer": "x"}})
+        assert "submitted_status" not in view and "status" not in view
+
+    def test_v1_conflicting_submitted_status_uses_original(self):
+        view = QaArchive.read_delivery_answer(
+            {"answer": {"status": "partial", "submitted_status": "fake"}}
+        )
+        assert view["submitted_status"] == "partial"
+
+    def test_v1_illegal_answer_returns_empty_view(self):
+        assert QaArchive.read_delivery_answer({"answer": "corrupt"}) == {}
+        assert QaArchive.read_delivery_answer({}) == {}
+
+    def test_v2_returns_delivery_copy(self):
+        record = {
+            "archive_schema_version": 2,
+            "status": "failed",
+            "delivery_answer": {"status": "failed", "answer": "兜底"},
+        }
+        view = QaArchive.read_delivery_answer(record)
+        assert view["status"] == "failed" and view["answer"] == "兜底"
+        view["answer"] = "mutated"
+        assert record["delivery_answer"]["answer"] == "兜底"  # 浅拷贝隔离
+
+    @pytest.mark.parametrize(
+        "record",
+        [
+            pytest.param({"archive_schema_version": 2}, id="missing-delivery"),
+            pytest.param(
+                {"archive_schema_version": 2, "delivery_answer": "x"}, id="non-dict"
+            ),
+            pytest.param({"archive_schema_version": 3}, id="unknown-version"),
+            pytest.param({"archive_schema_version": True}, id="bool-version"),
+            pytest.param({"archive_schema_version": "2"}, id="str-version"),
+        ],
+    )
+    def test_contract_violations_raise(self, record):
+        with pytest.raises(ValueError):
+            QaArchive.read_delivery_answer(record)
+
+    def test_written_v2_records_roundtrip(self, assembly_services):
+        """Runner 写出的 v2 qa 记录可直接经 read_delivery_answer 读回交付内容。"""
+        store = FakeStore()
+        result, _ = _run_ok(assembly_services, store, _state())
+        qa = _qa_records(store)[0]
+        view = QaArchive.read_delivery_answer(qa)
+        assert view["answer"] == result.answer
+        # 跨版本统计读顶层 status（两版本均为 Runner 状态）
+        assert qa["status"] == "completed"
+
+
+def _raw_state(raw_answer, executions=None, omit_answer_key=False):
+    """构造外层记录合法（run_id/request_id 重映射后一致）、answer 原值任意的状态。
+
+    与 _state() 不同：raw_answer 允许任意类型（None/空串/列表/False/0），
+    记录始终存在；omit_answer_key=True 时构造缺失 answer 键的对照。
+    """
+    record = {"run_id": "run-x", "request_id": "req-x"}
+    if not omit_answer_key:
+        record["answer"] = raw_answer
+    return {
+        "messages": [],
+        "db_executions": (executions if executions is not None else [_exec()]),
+        "db_analyses": [],
+        "db_validations": {},
+        "db_final_answers": {"run-x": record},
+    }
+
+
+class TestRawPayloadPreservation:
+    """doc 6.2 §7.4：FinalAnswerRecord.answer 原值为非法类型时的完整收尾。
+
+    R3：此前矩阵只覆盖字典内字段非法；这里直接对原始 payload 类型（含
+    假值）与缺失 answer 键做对照，验证“键存在按原值保留、缺失才写 {}”。
+    """
+
+    RAW_VARIANTS = {
+        "payload_str": "不是字典的正文",
+        "payload_list": ["不是字典"],
+        "payload_none": None,
+        "payload_empty_str": "",
+        "payload_empty_list": [],
+        "payload_false": False,
+        "payload_zero": 0,
+        "findings_dict": {
+            "status": "completed",
+            "answer": "正文",
+            "findings": {"text": "x"},
+            "metric_definitions": [],
+            "limitations": [],
+            "open_questions": [],
+        },
+    }
+
+    @pytest.mark.parametrize("variant", sorted(RAW_VARIANTS))
+    @pytest.mark.parametrize("reused", [False, True], ids=["real-exec", "pure-reuse"])
+    def test_raw_illegal_payload_full_tail(self, assembly_services, variant, reused):
+        raw = self.RAW_VARIANTS[variant]
+        state = _raw_state(raw, executions=[_exec(reused=reused)])
+        store = FakeStore()
+        result = _runner(assembly_services, SqlOkAgent(state), store, state).run(
+            "问", "s1", request_id="req-raw"
+        )
+        assert result.status == "failed"
+        assert result.answer.startswith("系统兜底说明：")
+        assert not result.findings
+        assert all(e.phase != "P3" for e in result.errors)  # 不新增 P3 runtime
+        assert any(e.kind == "no_final_answer" and e.primary for e in result.errors)
+        record = _err_records(store)[0] if reused else _qa_records(store)[0]
+        assert (bool(_qa_records(store))) is (not reused)  # 分流不因兜底改变
+        # 原值按类型与值精确保留：先精确类型再值（False==0 之类不放过，R2-02）
+        assert type(record["answer"]) is type(raw)
+        assert record["answer"] == raw
+        assert record["answer_source"] == "system_fallback"
+        assert record["delivery_answer"]["answer"] == result.answer
+
+    def test_missing_answer_key_archives_empty_dict(self, assembly_services):
+        """answer 键缺失（外层记录在）→ 归档按缺失约定值 {}。"""
+        state = _raw_state(None, omit_answer_key=True)
+        store = FakeStore()
+        result = _runner(assembly_services, SqlOkAgent(state), store, state).run(
+            "问", "s1", request_id="req-nokey"
+        )
+        assert result.status == "failed"
+        assert result.answer.startswith("系统兜底说明：")
+        qa = _qa_records(store)[0]  # 真实执行按条件 a 进 qa
+        assert qa["answer"] == {}
+        assert qa["answer_source"] == "system_fallback"
