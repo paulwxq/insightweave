@@ -366,14 +366,45 @@ class TestResultToolOffload:
             ],
             captured_raw=captured_raw,
         )
+        from src.tests.db_deepagent.conftest import make_task_record, make_task_state
+
+        task_state = make_task_state(
+            [make_task_record("run-test", "T1", 1, content="查询")]
+        )
         u1, _v = invoke_tool_node(
-            node, [("validate_sql", {"sql": _WIDE_SQL}, "e2e-v")], db_agent_context
+            node,
+            [
+                (
+                    "validate_sql",
+                    {
+                        "sql": _WIDE_SQL,
+                        "sub_task_id": "T1",
+                        "sub_task_revision": 1,
+                    },
+                    "e2e-v",
+                )
+            ],
+            db_agent_context,
+            extra_state=dict(task_state),
         )
         updates, msg = invoke_tool_node(
             node,
-            [("execute_sql", {"sql": _WIDE_SQL}, "e2e-x")],
+            [
+                (
+                    "execute_sql",
+                    {
+                        "sql": _WIDE_SQL,
+                        "sub_task_id": "T1",
+                        "sub_task_revision": 1,
+                    },
+                    "e2e-x",
+                )
+            ],
             db_agent_context,
-            extra_state={"db_validations": u1["db_validations"]},
+            extra_state={
+                "db_validations": u1["db_validations"],
+                **task_state,
+            },
         )
         assert "large_tool_results" in msg.content  # >80000 已转存替换
         assert msg.tool_call_id == "e2e-x"
@@ -724,9 +755,19 @@ class _ResultChainModel(ScriptedChatModel):
                     content="",
                     tool_calls=[
                         {
-                            "name": "validate_sql",
-                            "args": {"sql": self.sql},
-                            "id": "call-validate",
+                            "name": "record_sub_tasks",
+                            "args": {
+                                "expected_plan_version": 0,
+                                "operations": [
+                                    {
+                                        "op": "add",
+                                        "sub_task_id": "T1",
+                                        "content": "查询全部订单",
+                                        "dependencies": [],
+                                    }
+                                ],
+                            },
+                            "id": "call-register",
                             "type": "tool_call",
                         }
                     ],
@@ -734,6 +775,45 @@ class _ResultChainModel(ScriptedChatModel):
             )
         latest = tool_msgs[-1]
         content = latest.content if isinstance(latest.content, str) else ""
+        if latest.name == "record_sub_tasks":
+            payload = json.loads(content)
+            assert payload["status"] == "ok", payload
+            object.__setattr__(self, "_plan_version", payload["data"]["plan_version"])
+            if getattr(self, "_task_completed", False):
+                return self._wrap(
+                    AIMessage(
+                        content="",
+                        tool_calls=[
+                            {
+                                "name": "read_file",
+                                "args": {
+                                    "file_path": self._offload_path,
+                                    "offset": self.marker_offset,
+                                    "limit": self.marker_limit,
+                                },
+                                "id": "call-read",
+                                "type": "tool_call",
+                            }
+                        ],
+                    )
+                )
+            return self._wrap(
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "validate_sql",
+                            "args": {
+                                "sql": self.sql,
+                                "sub_task_id": "T1",
+                                "sub_task_revision": 1,
+                            },
+                            "id": "call-validate",
+                            "type": "tool_call",
+                        }
+                    ],
+                )
+            )
         if latest.name == "validate_sql":
             payload = json.loads(content)
             assert payload["status"] == "ok", payload
@@ -743,7 +823,11 @@ class _ResultChainModel(ScriptedChatModel):
                     tool_calls=[
                         {
                             "name": "execute_sql",
-                            "args": {"sql": self.sql},
+                            "args": {
+                                "sql": self.sql,
+                                "sub_task_id": "T1",
+                                "sub_task_revision": 1,
+                            },
                             "id": "call-execute",
                             "type": "tool_call",
                         }
@@ -760,18 +844,27 @@ class _ResultChainModel(ScriptedChatModel):
             if evidence is None:
                 return self._wrap(AIMessage(content="预览未见 evidence_id"))
             object.__setattr__(self, "_evidence_id", evidence.group(1))
+            object.__setattr__(self, "_offload_path", match.group(0).rstrip(".,)"))
+            object.__setattr__(self, "_task_completed", True)
+            # doc 6.3：登记任务成果（completed + 选定证据）
             return self._wrap(
                 AIMessage(
                     content="",
                     tool_calls=[
                         {
-                            "name": "read_file",
+                            "name": "record_sub_tasks",
                             "args": {
-                                "file_path": match.group(0).rstrip(".,)"),
-                                "offset": self.marker_offset,
-                                "limit": self.marker_limit,
+                                "expected_plan_version": 1,
+                                "operations": [
+                                    {
+                                        "op": "status",
+                                        "sub_task_id": "T1",
+                                        "status": "completed",
+                                        "evidence_ids": [evidence.group(1)],
+                                    }
+                                ],
                             },
-                            "id": "call-read",
+                            "id": "call-finish",
                             "type": "tool_call",
                         }
                     ],
@@ -812,6 +905,10 @@ class _ResultChainModel(ScriptedChatModel):
                                 "findings": [
                                     {
                                         "text": finding_text,
+                                        "finding_id": "F-1",
+                                        "task_refs": [
+                                            {"sub_task_id": "T1", "revision": 1}
+                                        ],
                                         "evidence_ids": [evidence_id],
                                     }
                                 ],
@@ -967,7 +1064,7 @@ class TestProductionGraphOffload:
         from src.modules.db_deepagent.agent import stage_expected_tool_names
 
         assert set(bound) == stage_expected_tool_names(services.config)
-        assert len(bound) == 15
+        assert len(bound) == 16
 
 
 class TestProductionGraphResultChain:
@@ -1010,16 +1107,45 @@ class TestProductionGraphResultChain:
                 make_execute_sql_tool(assembly_services),
             ]
         )
+        from src.tests.db_deepagent.conftest import make_task_record, make_task_state
+
+        pre_task = make_task_state(
+            [make_task_record("run-graph9", "T1", 1, content="查询全部订单")]
+        )
         _uv, _mv = invoke_tool_node(
             bare,
-            [("validate_sql", {"sql": _WIDE_SQL}, "pre-v")],
+            [
+                (
+                    "validate_sql",
+                    {
+                        "sql": _WIDE_SQL,
+                        "sub_task_id": "T1",
+                        "sub_task_revision": 1,
+                    },
+                    "pre-v",
+                )
+            ],
             db_agent_context_of("run-graph9"),
+            extra_state=dict(pre_task),
         )
         _ux, mx = invoke_tool_node(
             bare,
-            [("execute_sql", {"sql": _WIDE_SQL}, "pre-x")],
+            [
+                (
+                    "execute_sql",
+                    {
+                        "sql": _WIDE_SQL,
+                        "sub_task_id": "T1",
+                        "sub_task_revision": 1,
+                    },
+                    "pre-x",
+                )
+            ],
             db_agent_context_of("run-graph9"),
-            extra_state={"db_validations": _uv["db_validations"]},
+            extra_state={
+                "db_validations": _uv["db_validations"],
+                **pre_task,
+            },
         )
         raw = mx.content
         assert len(raw) > 80000  # 越过 SDK 转存阈值
@@ -1055,6 +1181,9 @@ class TestProductionGraphResultChain:
             user_texts=("读取后半部分数据并提交最终答案",),
             carried_evidence=(),
             deadline_monotonic=float("inf"),
+            # R1-06：与预计算共用同一会话租约（Runner 侧真实运行时由
+            # Runner 注入；离线图用例显式提供）
+            session_guard_lease=getattr(db_agent_context_of, "_lease", None),
         )
         config = {
             "configurable": {"thread_id": thread_id},
@@ -1087,8 +1216,10 @@ class TestProductionGraphResultChain:
             for call in (m.tool_calls or [])
         ]
         assert tool_call_names == [
+            "record_sub_tasks",
             "validate_sql",
             "execute_sql",
+            "record_sub_tasks",
             "read_file",
             "submit_final_answer",
         ]
@@ -1167,11 +1298,25 @@ class TestProductionGraphResultChain:
 
 
 def db_agent_context_of(run_id: str):
-    """图用例的固定上下文（预计算裸执行与图运行共用 run_id 布局）。"""
+    """图用例的固定上下文（预计算裸执行与图运行共用 run_id 布局）。
+
+    R1-06：附带进程内会话守卫租约（服务侧 lease 校验；每会话独立、
+    不跨用例泄漏——同会话重复取用时先释放旧租约）。
+    """
     from datetime import UTC, datetime
 
     from src.modules.db_deepagent.context import DbAgentContext
+    from src.modules.db_deepagent.persistence.session_guard import (
+        acquire_memory_lease,
+        release_memory_lease,
+    )
 
+    old = getattr(db_agent_context_of, "_lease", None)
+    if old is not None:
+        release_memory_lease(old)
+    lease = acquire_memory_lease("t-graph9")
+    assert lease is not None, "测试会话锁被占用"
+    db_agent_context_of._lease = lease
     return DbAgentContext(
         session_id="t-graph9",
         thread_id="th-graph9",
@@ -1184,6 +1329,7 @@ def db_agent_context_of(run_id: str):
         user_texts=("读取后半部分数据并提交最终答案",),
         carried_evidence=(),
         deadline_monotonic=float("inf"),
+        session_guard_lease=lease,
     )
 
 

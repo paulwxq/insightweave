@@ -1,13 +1,20 @@
-"""清理（docs/v4/5 §13.5 + doc 7 §2 折入 + docs/3.1 R2/R3）
+"""清理（docs/v4/5 §13.5 + doc 7 §2 折入 + docs/3.1 R2/R3；doc 6.3 §6.5/§8.2）
 
 线程级判定：当前线程／待恢复保护，effective_at = max(last_active_at,
 retired_at, 最新 checkpoint 时间)；会话归属 parse_thread_id 精确复核；
 advisory lock 会话级互斥（拿不到跳过该会话，拿到后重新核对资格）；
 独立短连接逐线程显式事务删除（§13.5 清理连接与事务）。
 
-结果目录（R2）与会话循环解耦：全局按目录年龄删除，不读会话归属、
-不看引用、不取会话锁；快照表不存在时跳过实删。快照行（R3）按
-last_referenced_at + archive_retention_days 全局删除。
+doc 6.3 §6.5：全局 R2/R3 已收口——结果目录与 PG result_snapshots 按资源
+所属 session 分组，与该会话的线程/归档/运行快照清理共用同一把会话锁；
+仅候选枚举允许在锁外，取得锁后重新读取归属、年龄和保留闭包，直至实际
+删除结束才释放；取锁失败或锁后端异常跳过并报告，不再有循环外的无锁全
+局兜底删除。保留闭包以仍在保留期的 QA/run_errors、轮换携带引用为根，
+递归保护直接沿用来源、分析/占位符输入涉及的运行快照与结果文件；保护
+不刷新 created_at、不延长沿用有效期；孤儿快照可清理。
+
+memory 持久化模式：清理须与 Runner 同进程共享 guard；跨进程共享结果根
+的并发清理在本层拒绝，不宣称进程内锁提供跨进程保护。
 """
 
 from __future__ import annotations
@@ -18,10 +25,15 @@ import shutil
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from src.modules.db_deepagent.config import DbAgentConfig
-from src.modules.db_deepagent.persistence.archive import QaArchive
+from src.modules.db_deepagent.errors import DbAgentConfigError
+from src.modules.db_deepagent.persistence.archive import (
+    QaArchive,
+    RUN_SNAPSHOT_SCHEMA_VERSION,
+    refs_of_record,
+)
 from src.modules.db_deepagent.persistence.checkpoint import (
     SessionAdvisoryLock,
     parse_thread_id,
@@ -32,6 +44,17 @@ from src.utils.logger import get_module_logger
 logger = get_module_logger("nl2sql.db_deepagent.persistence.maintenance")
 
 _RESULT_REF_RE = re.compile(r"^res_[0-9a-f]{32}$")
+
+
+class OrphanDeletionOrderError(Exception):
+    """孤儿快照删除排序无法覆盖整个删除集（R6/M2 局部防御）。
+
+    仅由 ``_order_orphan_deletions`` 在检测到删除集内存在未满足的来源依赖
+    （例如环）时抛出，代表「无法给出消费者先于来源的完整顺序」。调用方
+    ``_cleanup_session_resources`` 以窄捕获受控处理：记录原因、跳过本会话
+    本轮全部孤儿运行快照实删，不继续使用部分排序结果，也不让异常穿透维护
+    流程。这是局部错误类型，不改动共享 errors.py 的异常分层。
+    """
 
 
 @dataclass
@@ -198,16 +221,28 @@ class MaintenanceService:
         *,
         apply: bool,
         before: datetime | None = None,
+        memory_in_process: bool = False,
     ) -> CleanupReport:
-        """§13.5 + docs/3.1：会话内线程/归档/Web 清理，循环外 R2/R3 全局清理。
+        """§13.5 + docs/3.1 + doc 6.3 §6.5：会话内线程/归档/Web/R2/R3 清理。
 
-        清理会话＝sessions 记录 ∪ 结果目录 ∪ 归档中发现的所有会话，统一走
-        同一套 advisory lock 流程（sessions 缺失不代表没有运行：首次请求
-        尚未到 P3、或此前 P3 写入失败都可能出现）；取锁失败跳过该会话的
-        线程/归档/Web 清理。结果目录由循环外的 R2 全局步骤处理，不取会话锁。
-        before 规范化为 aware UTC 且只收紧不放宽（晚于当前时刻按当前时刻）。
+        清理会话＝sessions 记录 ∪ 结果目录 ∪ 归档 ∪ 运行快照 ∪ PG 快照
+        中发现的所有会话，统一走同一套会话锁流程（sessions 缺失不代表没有
+        运行）；取锁失败跳过该会话的全部清理。R2/R3 按资源所属 session
+        分组在同锁内执行（锁内重读归属/年龄/闭包，至删除结束才释放），
+        没有循环外的无锁全局删除。before 规范化为 aware UTC 且只收紧不
+        放宽（晚于当前时刻按当前时刻）。
+
+        memory 持久化模式不支持跨进程共享结果根的并发清理：默认拒绝；
+        与 Runner 同进程的调用方显式传 memory_in_process=True 并共享
+        进程内 guard 后方可执行（本方法内结果清理按会话取进程内锁）。
         """
         report = CleanupReport(dry_run=not apply)
+        if self._cfg.persistence.mode == "memory" and not memory_in_process:
+            raise DbAgentConfigError(
+                "memory 持久化模式的结果清理必须与 Runner 同进程执行"
+                "（memory_in_process=True 并共享进程内 session guard）；"
+                "多进程共享结果根的并发写/清理不受支持"
+            )
         now = datetime.now(timezone.utc)
         reference_now = _as_utc(before) or now
         if reference_now > now:
@@ -219,6 +254,14 @@ class MaintenanceService:
             days=self._cfg.thread.archive_retention_days
         )
         result_retention = timedelta(days=self._cfg.thread.result_retention_days)
+        if self._cfg.persistence.mode == "memory":
+            return self._cleanup_memory_mode(
+                apply=apply,
+                reference_now=reference_now,
+                archive_before=archive_before,
+                result_retention=result_retention,
+                report=report,
+            )
         conninfo = make_platform_conninfo(self._cfg.platform_db)
         import psycopg
         from psycopg.rows import dict_row
@@ -258,12 +301,18 @@ class MaintenanceService:
                         {"reason": "web_turns 枚举失败", "detail": type(exc).__name__}
                     )
             # 全部发现的会话统一取锁清理（无“不取锁直清”分支）；checkpoint
-            # 兜底覆盖“首请求无结果 + P3 写入失败只留 checkpoint”的会话
+            # 兜底覆盖“首请求无结果 + P3 写入失败只留 checkpoint”的会话。
+            # doc 6.3 §6.5：R2/R3 的资源（结果目录/PG 快照/运行快照）同样按
+            # 会话分组，进入同一把会话锁。
+            snapshot_sessions = self._archive.list_run_snapshot_sessions()
+            pg_snapshot_sessions = self._pg_snapshot_sessions(conn)
             all_sessions = sorted(
                 set(known_sessions)
                 | set(result_metas)
                 | archive_sessions
                 | checkpoint_sessions
+                | snapshot_sessions
+                | pg_snapshot_sessions
                 | web_session_keys
                 | web_turn_sessions
             )
@@ -283,11 +332,24 @@ class MaintenanceService:
                     self._cleanup_session(
                         conn, session_id, cutoff=cutoff, apply=apply, report=report
                     )
-                    # 2) 归档（第 5 点）：同锁内按保留期清理
+                    # 2) 归档（第 5 点）：同锁内按保留期清理——先删过期归档，
+                    #    保留闭包以仍在保留期的条目为根（§8.2）
                     report.archives.extend(
                         self._archive.purge_archives(
                             session_id=session_id, before=archive_before, apply=apply
                         )
+                    )
+                    # 3) R2/R3/运行快照（doc 6.3 §6.5）：同锁内重读归属、年龄
+                    #    与保留闭包后受控删除
+                    self._cleanup_session_resources(
+                        session_id,
+                        result_metas=result_metas,
+                        result_retention=result_retention,
+                        archive_before=archive_before,
+                        now=reference_now,
+                        apply=apply,
+                        report=report,
+                        conn=conn,
                     )
                     # 4) Web 命名空间（doc 2 §4.4）：web_turns 保留清理、元数据
                     #    校正与疑似创建残留报告，同一会话锁内执行
@@ -303,21 +365,662 @@ class MaintenanceService:
                         )
                 finally:
                     lock.release()
-            # R2/R3：会话循环之外的全局步骤（不取会话锁）
-            self._cleanup_result_dirs_global(
-                retention=result_retention,
-                now=reference_now,
-                apply=apply,
-                report=report,
-                conn=conn,
-            )
-            self._cleanup_snapshots(
-                before=archive_before,
-                apply=apply,
-                report=report,
-                conn=conn,
-            )
         return report
+
+    # ------------------------------------------------------------ memory 模式（R1-04）
+
+    def _cleanup_memory_mode(
+        self,
+        *,
+        apply: bool,
+        reference_now: datetime,
+        archive_before: datetime,
+        result_retention: timedelta,
+        report: CleanupReport,
+    ) -> CleanupReport:
+        """memory 持久化清理（R1-04）：与 Runner 共用进程内会话 guard，
+        不连接 PG、不执行 checkpoint/PG 快照清理。
+
+        会话发现＝sessions/归档/运行快照/结果目录；每会话经
+        acquire_memory_lease 非阻塞取锁（取不到→跳过该会话全部清理，
+        即运行/沿用窗口内的资源不被并发删除）；锁内重读归属与年龄后
+        执行归档保留清理与 R2 结果目录清理。
+        """
+        from src.modules.db_deepagent.persistence.session_guard import (
+            acquire_memory_lease,
+            release_memory_lease,
+        )
+
+        result_metas = self._scan_result_metas()
+        sessions = sorted(
+            set(self._list_sessions())
+            | set(result_metas)
+            | self._archive.list_archive_sessions()
+            | self._archive.list_run_snapshot_sessions()
+        )
+        for session_id in sessions:
+            if not session_id:
+                # 坏元数据目录归属未知：只报告，不按 mtime 强删（§6.5）
+                report.skipped.append(
+                    {"session_id": "", "reason": "结果目录元数据不可读（跳过）"}
+                )
+                continue
+            lease = acquire_memory_lease(session_id)
+            if lease is None:
+                report.skipped.append(
+                    {
+                        "session_id": session_id,
+                        "reason": "会话运行中（memory guard），跳过该会话全部清理",
+                    }
+                )
+                continue
+            try:
+                report.archives.extend(
+                    self._archive.purge_archives(
+                        session_id=session_id, before=archive_before, apply=apply
+                    )
+                )
+                # 锁内重读归属/年龄（不用锁外枚举快照代替）
+                fresh_metas = self._scan_result_metas()
+                self._cleanup_session_resources(
+                    session_id,
+                    result_metas=fresh_metas,
+                    result_retention=result_retention,
+                    archive_before=archive_before,
+                    now=reference_now,
+                    apply=apply,
+                    report=report,
+                    conn=None,
+                )
+            finally:
+                release_memory_lease(lease)
+        return report
+
+    # ------------------------------------------------------------ R2/R3（doc 6.3 §6.5）
+
+    def _pg_snapshot_sessions(self, conn) -> set[str]:
+        """PG result_snapshots 中出现的会话（会话发现补全）。表不可用返回空。"""
+        if self._snapshot_table_ready(conn) is not True:
+            return set()
+        try:
+            rows = conn.execute(
+                "SELECT DISTINCT session_id FROM result_snapshots"
+            ).fetchall()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("result_snapshots 会话枚举失败: %s", exc)
+            return set()
+        return {row["session_id"] for row in rows if row.get("session_id")}
+
+    def _carried_result_refs(self, session_id: str) -> set[str]:
+        """轮换携带证据引用的结果文件（§8.2 保留根之一）。"""
+        session = self._archive.get_session(session_id) or {}
+        refs: set[str] = set()
+        for item in session.get("carried_evidence") or []:
+            record = (item or {}).get("record") or {}
+            ref = record.get("result_ref") or record.get("output_result_ref")
+            if isinstance(ref, str) and ref:
+                refs.add(ref)
+        return refs
+
+    def _retained_snapshot_roots(
+        self, session_id: str, archive_before: datetime
+    ) -> tuple[set[str], set[str], list[dict[str, Any]]]:
+        """仍在保留期的 QA/run_errors 提供的保护根（R1-05）。
+
+        返回 (root_refs, root_snapshot_keys, problems)：根同时包含公开
+        evidence 的 result_ref 与记录保存的 snapshot_ref（完整运行身份键）。
+        过期归档不是保护根；读取异常记录为 problems（保守保护）。
+        """
+        import json as _json
+
+        refs: set[str] = set()
+        snapshot_keys: set[str] = set()
+        problems: list[dict[str, Any]] = []
+        for item in self._archive._iter_archive_items(session_id):  # noqa: SLF001
+            value = getattr(item, "value", None) or {}
+            created = _as_utc(getattr(item, "created_at", None))
+            if created is None or created < archive_before:
+                continue  # 已过期归档不是保护根；时间不可判的保守跳过
+            try:
+                for evidence in value.get("evidence") or []:
+                    refs |= refs_of_record(dict(evidence))
+                snap_ref = value.get("snapshot_ref")
+                if isinstance(snap_ref, Mapping):
+                    snapshot_keys.add(
+                        _json.dumps(
+                            [
+                                snap_ref.get("thread_id") or "",
+                                snap_ref.get("run_id") or "",
+                            ],
+                            separators=(",", ":"),
+                        )
+                    )
+            except Exception as exc:  # noqa: BLE001（保护根读取失败报告）
+                problems.append(
+                    {
+                        "session_id": session_id,
+                        "reason": f"保护根读取失败: {type(exc).__name__}",
+                    }
+                )
+        return refs, snapshot_keys, problems
+
+    def _protected_closure(
+        self,
+        session_id: str,
+        root_refs: set[str],
+        root_snapshot_keys: set[str],
+        *,
+        edge_out: dict[str, Any] | None = None,
+    ) -> tuple[set[str], set[str], list[dict[str, Any]]]:
+        """按根集合计算递归保留闭包（§8.2；R1-05 / R2-03 完整血缘核验）。
+
+        图节点＝result_ref（结果文件）与快照键；边＝快照→其全部记录引用
+        （refs_of_record，含结构化输入与沿用来源自身的 result_ref），以及
+        result_ref→引用它的快照，另加全部 direct_reuse_from / input_result_refs
+        的完整来源身份边。根＝仍在保留期的 QA/run_errors 展开的引用与快照 +
+        轮换携带引用。BFS 至不动点；不可达快照为孤儿。
+
+        R2-03：协议/作用域/保护根存在性、全部 direct/input 来源存在性、重复
+        冲突与环均须核验；任何问题都作为 problems 返回，调用方据此跳过该会话
+        的**全部**实删，不降级为不完整闭包继续删除。
+
+        R3-05：**图合法性检查与保护标记分离**。阶段 1 只校验/建图，不向
+        protected 写入；阶段 2 的保护集合只从最终 QA/run_errors/携带根出发，
+        沿必要的来源关系扩展。全图扫描或资源相同本身不创造新的保留根，
+        因此无保留根的过期证据链可回收。
+
+        R4-03：传入 edge_out 时额外暴露阶段 1 已核验的来源图（按快照键），
+        供 _cleanup_session_resources 规划依赖一致的孤儿快照删除集合。
+        返回 (protected_refs, orphan_snapshot_keys, problems)。
+        """
+        import json as _json
+
+        from src.modules.db_deepagent.services.reuse_qualification import (
+            TASK_LEDGER_PROTOCOL_VERSION,
+            SourceUnqualified,
+            evidence_edges,
+        )
+
+        def _problem(reason: str, **extra: Any) -> None:
+            problems.append({"session_id": session_id, "reason": reason, **extra})
+
+        snapshots = self._archive.list_run_snapshots(session_id)
+        snapshot_by_key: dict[str, dict[str, Any]] = {}
+        snapshot_refs: dict[str, set[str]] = {}
+        ref_to_snapshots: dict[str, set[str]] = {}
+        ref_to_producers: dict[str, list[tuple[str, str, str, str]]] = {}
+        problems: list[dict[str, Any]] = []
+        evidence_index: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+        record_refs: dict[tuple[str, str, str, str], set[str]] = {}
+        source_edges: dict[
+            tuple[str, str, str, str], list[tuple[str, str, str, str]]
+        ] = {}
+
+        # ---- 阶段 1：合法性检查（只读，不产生任何保留根） ----
+        for snapshot in snapshots:
+            thread = snapshot.get("thread_id") or ""
+            run = snapshot.get("run_id") or ""
+            key = _json.dumps([thread, run], separators=(",", ":"))
+            snapshot_by_key[key] = snapshot
+            version = snapshot.get("run_snapshot_schema_version")
+            if type(version) is not int or version != RUN_SNAPSHOT_SCHEMA_VERSION:
+                _problem(f"未知运行快照协议版本: {version!r}", run_snapshot=run)
+            protocol = snapshot.get("ledger_protocol_version")
+            if type(protocol) is not int or protocol != TASK_LEDGER_PROTOCOL_VERSION:
+                _problem(f"未知账本协议版本: {protocol!r}", run_snapshot=run)
+            if (
+                snapshot.get("session_id") != session_id
+                or (snapshot.get("thread_id") or "") != thread
+                or (snapshot.get("run_id") or "") != run
+            ):
+                _problem("快照内部作用域与寻址不符", run_snapshot=run)
+            refs: set[str] = set()
+            for record in [
+                *(snapshot.get("executions") or []),
+                *(snapshot.get("analyses") or []),
+            ]:
+                record = dict(record)
+                own_refs = refs_of_record(record)
+                refs |= own_refs
+                ident = (
+                    session_id,
+                    thread,
+                    run,
+                    record.get("evidence_id") or "",
+                )
+                if ident in evidence_index and evidence_index[ident] != record:
+                    _problem(
+                        f"快照证据 {ident[3]} 存在不同事实的重复记录",
+                        run_snapshot=run,
+                    )
+                evidence_index[ident] = record
+                record_refs[ident] = own_refs
+                produced = record.get("result_ref") or record.get("output_result_ref")
+                if isinstance(produced, str) and produced:
+                    ref_to_producers.setdefault(produced, []).append(ident)
+            snapshot_refs[key] = refs
+            for ref in refs:
+                ref_to_snapshots.setdefault(ref, set()).add(key)
+
+        for key in sorted(root_snapshot_keys):
+            if key not in snapshot_by_key:
+                _problem("保护根快照缺失（缺源）", run_snapshot=key)
+
+        for ident, record in evidence_index.items():
+            try:
+                edges = evidence_edges(record, session_id=session_id)
+            except SourceUnqualified as exc:
+                _problem(
+                    f"证据 {ident[3]} 血缘解析失败：{exc.reason}",
+                    run_snapshot=ident[2],
+                )
+                source_edges[ident] = []
+                continue
+            resolved: list[tuple[str, str, str, str]] = []
+            for edge in edges:
+                ref = edge["evidence_ref"]
+                r_session = ref.get("session_id")
+                r_thread = ref.get("thread_id")
+                r_run = ref.get("run_id")
+                r_eid = ref.get("evidence_id")
+                if r_session != session_id or not all(
+                    isinstance(x, str) and x for x in (r_thread, r_run, r_eid)
+                ):
+                    _problem("来源引用身份不完整或跨会话", run_snapshot=ident[2])
+                    continue
+                source_ident = (r_session, r_thread, r_run, r_eid)
+                if source_ident not in evidence_index:
+                    _problem(
+                        f"来源证据 {r_run}:{r_eid} 缺失（缺源）",
+                        run_snapshot=ident[2],
+                    )
+                    continue
+                resolved.append(source_ident)
+            source_edges[ident] = resolved
+
+        # 环检测（只报告，不标记保护）
+        visiting: set[tuple[str, str, str, str]] = set()
+        visited: set[tuple[str, str, str, str]] = set()
+
+        def _cycle_walk(ident: tuple[str, str, str, str]) -> None:
+            if ident in visiting:
+                _problem("证据来源链成环", run_snapshot=ident[2])
+                return
+            if ident in visited:
+                return
+            visiting.add(ident)
+            for nxt in source_edges.get(ident, ()):
+                _cycle_walk(nxt)
+            visiting.discard(ident)
+            visited.add(ident)
+
+        for ident in evidence_index:
+            _cycle_walk(ident)
+
+        # ---- 阶段 2：保护标记只从最终保留根出发扩展 ----
+        protected_refs: set[str] = set(root_refs)
+        protected_snapshots: set[str] = set(root_snapshot_keys)
+        worklist_refs = list(protected_refs)
+        worklist_snaps = list(protected_snapshots)
+        while worklist_refs or worklist_snaps:
+            while worklist_refs:
+                ref = worklist_refs.pop()
+                for snap_key in ref_to_snapshots.get(ref, ()):
+                    if snap_key not in protected_snapshots:
+                        protected_snapshots.add(snap_key)
+                        worklist_snaps.append(snap_key)
+                # 产出该受保护结果的记录，其来源记录的结果文件也需保留
+                for ident in ref_to_producers.get(ref, ()):
+                    for src in source_edges.get(ident, ()):
+                        for src_ref in record_refs.get(src, ()):
+                            if src_ref not in protected_refs:
+                                protected_refs.add(src_ref)
+                                worklist_refs.append(src_ref)
+            while worklist_snaps:
+                snap_key = worklist_snaps.pop()
+                for ref in snapshot_refs.get(snap_key, ()):
+                    if ref not in protected_refs:
+                        protected_refs.add(ref)
+                        worklist_refs.append(ref)
+        orphans = set(snapshot_by_key) - protected_snapshots
+        # R4-03：把阶段 1 已核验的来源身份边折叠成「快照 → 来源快照」图，
+        # 供删除规划复用同一份图（不另写一套血缘解析）。仅暴露跨快照边；
+        # 同一快照内记录互引随整份快照一起删，不构成删除依赖。
+        if edge_out is not None:
+
+            def _snap_key(ident: tuple[str, str, str, str]) -> str:
+                return _json.dumps([ident[1], ident[2]], separators=(",", ":"))
+
+            snapshot_deps: dict[str, set[str]] = {}
+            for ident, sources in source_edges.items():
+                from_key = _snap_key(ident)
+                bucket = snapshot_deps.setdefault(from_key, set())
+                for source in sources:
+                    source_key = _snap_key(source)
+                    if source_key != from_key:
+                        bucket.add(source_key)
+            edge_out["snapshot_deps"] = snapshot_deps
+            edge_out["snapshot_by_key"] = snapshot_by_key
+        return protected_refs, orphans, problems
+
+    @staticmethod
+    def _plan_orphan_snapshot_deletions(
+        orphan_keys: set[str],
+        archive_before: datetime,
+        snapshot_deps: dict[str, set[str]],
+        snapshot_by_key: dict[str, dict[str, Any]],
+    ) -> tuple[set[str], set[str]]:
+        """R4-03：在现有来源图上规划依赖一致的孤儿运行快照删除集合。
+
+        - 仅「到期」（sealed_at < archive_before）的孤儿进入候选；不刷新
+          created_at、不延长业务沿用有效期。
+        - 若本轮保留的快照仍引用某个到期来源，则延迟删除该来源；被延迟的
+          来源成为新的保留节点，其上游来源同样延迟，递归收敛到不动点。
+        - 保证「本轮保留的快照不会指向本轮刚删除的来源」；相关孤儿全部
+          到期时一起回收。
+        返回 (deletion_set, deferred)。
+        """
+        expired: set[str] = set()
+        for key in orphan_keys:
+            snap = snapshot_by_key.get(key)
+            sealed = (
+                _as_utc(snap.get("sealed_at")) if isinstance(snap, Mapping) else None
+            )
+            if sealed is not None and sealed < archive_before:
+                expired.add(key)
+        deletion_set = set(expired)
+        # retained 包含所有本轮保留的快照（受保护 + 未到期/被延迟的孤儿）。
+        retained = set(snapshot_by_key) - deletion_set
+        changed = True
+        while changed:
+            changed = False
+            for kept_key in list(retained):
+                for source_key in snapshot_deps.get(kept_key, ()):
+                    if source_key in deletion_set:
+                        deletion_set.discard(source_key)
+                        retained.add(source_key)
+                        changed = True
+        deferred = expired - deletion_set
+        return deletion_set, deferred
+
+    @staticmethod
+    def _order_orphan_deletions(
+        deletion_set: set[str],
+        snapshot_deps: dict[str, set[str]],
+    ) -> list[str]:
+        """R5-01：返回「消费者先于来源」的孤儿快照删除顺序（稳定拓扑排序）。
+
+        snapshot_deps[consumer] 是 consumer 引用的来源快照键集合。对每条
+        consumer→source 边，consumer 必须排在 source 之前：这样某个 consumer
+        删除失败/需保留而中止时，它的来源祖先在顺序上尚未被处理，不会被误删
+        而制造缺源。共享来源只有在其全部 consumer 都处理完后才进入顺序。
+        图已在 _protected_closure 阶段 1 校验为无环（有环会保守停止、不进入
+        删除）。R6/M2：正常支持路径下排序应能覆盖整个删除集；若因未来调用
+        路径变化出现无法覆盖的情况，明确抛出 OrphanDeletionOrderError，不
+        返回按名称拼接、含未满足依赖节点的部分顺序（避免把确定性顺序误当
+        成满足依赖的顺序）。
+        """
+        within = set(deletion_set)
+        # 作为来源时，仍需先删除的 consumer 集合；为空才轮到该来源。
+        pending: dict[str, set[str]] = {key: set() for key in within}
+        for consumer in within:
+            for source in snapshot_deps.get(consumer, ()):
+                if source in within and source != consumer:
+                    pending[source].add(consumer)
+        ready = sorted(key for key in within if not pending[key])
+        ordered: list[str] = []
+        done: set[str] = set()
+        queued: set[str] = set(ready)
+        while ready:
+            key = ready.pop(0)
+            queued.discard(key)
+            ordered.append(key)
+            done.add(key)
+            for source in sorted(snapshot_deps.get(key, ())):
+                if source in within and source != key:
+                    pending[source].discard(key)
+                    if (
+                        not pending[source]
+                        and source not in done
+                        and source not in queued
+                    ):
+                        ready.append(source)
+                        ready.sort()
+                        queued.add(source)
+        # R6/M2：无法覆盖整个删除集时明确失败，不返回带未满足依赖节点的
+        # 部分顺序。阶段 1 已对成环保守停止，正常支持路径不应到达此处；
+        # 这是针对未来调用路径变化的局部防御，由调用方受控处理。
+        if len(ordered) != len(within):
+            unresolved = sorted(within - done)
+            raise OrphanDeletionOrderError(
+                f"删除顺序仅覆盖 {len(ordered)}/{len(within)} 个快照，"
+                f"未满足来源依赖: {unresolved}"
+            )
+        return ordered
+
+    def _cleanup_session_resources(
+        self,
+        session_id: str,
+        *,
+        result_metas: dict[str, list[tuple[str, dict[str, Any]]]],
+        result_retention: timedelta,
+        archive_before: datetime,
+        now: datetime,
+        apply: bool,
+        report: CleanupReport,
+        conn,
+    ) -> None:
+        """同锁内的 R2（结果目录）/R3（PG 快照）/孤儿运行快照清理（§6.5/§8.2）。
+
+        R1-05：锁内重新扫描该会话结果目录（不信任锁外枚举的 meta）；
+        保护不刷新 TTL；坏元数据目录（归属不可确定/created_at 不可解析）
+        只报告，不按 mtime 强删。
+        """
+        fresh_metas = self._scan_result_metas()
+        session_metas = fresh_metas.get(session_id, [])
+        bad_metas = [
+            path_name
+            for path_name, meta in session_metas
+            if _as_utc(meta.get("created_at")) is None
+        ]
+        for path_name in bad_metas:
+            report.skipped.append(
+                {
+                    "session_id": session_id,
+                    "result_ref": path_name,
+                    "reason": "结果元数据时间不可解析（跳过，不按 mtime 强删）",
+                }
+            )
+        # R1-05：保护根＝仍在保留期 QA/run_errors 的公开引用 + snapshot_ref
+        # + 轮换携带引用；图遍历闭包（ref↔快照双向边）
+        root_refs, root_snapshots, closure_problems = self._retained_snapshot_roots(
+            session_id, archive_before
+        )
+        root_refs |= self._carried_result_refs(session_id)
+        graph_out: dict[str, Any] = {}
+        protected, orphan_snapshot_keys, graph_problems = self._protected_closure(
+            session_id, root_refs, root_snapshots, edge_out=graph_out
+        )
+        all_problems = [*closure_problems, *graph_problems]
+        for problem in all_problems:
+            report.skipped.append(problem)
+        if all_problems:
+            # R2-03：保护根或闭包核验出现任何问题，立即保守停止——跳过该
+            # 会话后续结果目录、PG 结果快照与孤儿运行快照的全部实删，
+            # 不用不完整闭包降级删除。
+            report.skipped.append(
+                {
+                    "session_id": session_id,
+                    "reason": (
+                        "保护根/闭包核验失败：跳过该会话全部结果目录、PG "
+                        "结果快照与孤儿运行快照删除"
+                    ),
+                }
+            )
+            return
+        # R2：本会话的结果目录（锁内重读的归属与年龄）
+        for path_name, meta in session_metas:
+            path = Path(self._cfg.workspace.root) / "results" / path_name
+            if not path.is_dir():
+                continue
+            created = _as_utc(meta.get("created_at"))
+            if created is None or (now - created) < result_retention:
+                continue
+            if path_name in protected:
+                continue  # 保留闭包内（QA/携带/快照引用）；不刷新 TTL
+            if not apply:
+                report.result_dirs.append(path_name + " (dry-run)")
+                continue
+            try:
+                shutil.rmtree(path)
+                report.result_dirs.append(path_name)
+            except OSError as exc:
+                report.errors.append(
+                    {
+                        "session_id": session_id,
+                        "result_ref": path_name,
+                        "error": f"{type(exc).__name__}: {exc}",
+                    }
+                )
+        # R3：本会话的 PG result_snapshots（排除受保护 refs）；memory
+        # 分支 conn=None 跳过（无 PG 资源）。R1-16：保护集为空时省略
+        # NOT IN 子句——NOT IN (NULL) 三值逻辑会永假，孤儿快照无法回收。
+        if conn is not None and self._snapshot_table_ready(conn) is True:
+            exclusion = (
+                " AND result_ref NOT IN (" + ", ".join(["%s"] * len(protected)) + ")"
+                if protected
+                else ""
+            )
+            params: tuple = (session_id, archive_before, *protected)
+            if apply:
+                cur = conn.execute(
+                    "DELETE FROM result_snapshots WHERE session_id = %s "
+                    f"AND last_referenced_at < %s{exclusion}",
+                    params,
+                )
+                report.snapshot_deleted += int(cur.rowcount or 0)
+            else:
+                row = conn.execute(
+                    "SELECT count(*) AS n FROM result_snapshots "
+                    f"WHERE session_id = %s AND last_referenced_at < %s{exclusion}",
+                    params,
+                ).fetchone()
+                report.snapshot_deleted += int(row["n"] if row else 0)
+        # 孤儿运行快照（R4-03 依赖一致删除集合）：不再逐快照按各自年龄
+        # 删除而在跨周期中制造悬空引用。先按现有来源图规划删除集，保证本轮
+        # 保留的快照不会指向本轮刚删除的来源；被保留快照引用的到期来源延迟
+        # 删除，相关孤儿全部到期后一起回收。
+        deletion_set, deferred = self._plan_orphan_snapshot_deletions(
+            orphan_snapshot_keys,
+            archive_before,
+            graph_out.get("snapshot_deps", {}),
+            graph_out.get("snapshot_by_key", {}),
+        )
+        import json as _json
+
+        live = self._archive.list_run_snapshots(session_id)  # 锁内重读
+        live_by_key = {
+            _json.dumps(
+                [s.get("thread_id") or "", s.get("run_id") or ""],
+                separators=(",", ":"),
+            ): s
+            for s in live
+        }
+        # R5-01：删除集合按「消费者先于来源」的依赖顺序执行，不再按键名
+        # sorted(deletion_set)。任何一次删除失败，或锁内复核发现消费者仍需
+        # 保留/状态未知时，立即停止该会话本轮剩余孤儿快照删除并记录原因：
+        # 其来源祖先在依赖顺序上尚未处理，不会被误删而制造缺源；后端恢复
+        # 后下一轮可继续回收。三种结果严格区分：已确认节点不存在（等同已删、
+        # 安全继续）、节点仍存在但不应删除（停止）、删除失败/状态未知（停止，
+        # 绝不当作删除成功）。这允许暂时延迟独立分支回收，不新增事务框架。
+        # R6/M2：排序失败是局部、确定的拒绝信号——窄捕获该专用异常，记录
+        # 清晰原因并跳过本会话本轮全部孤儿运行快照实删；不使用部分排序结果，
+        # 不让异常穿透维护流程，不撤销本方法此前已完成的结果目录 / PG 快照
+        # 清理，也不为整个维护过程新增事务。正常支持路径下不会触发。
+        try:
+            deletion_order = self._order_orphan_deletions(
+                deletion_set, graph_out.get("snapshot_deps", {})
+            )
+        except OrphanDeletionOrderError as exc:
+            report.skipped.append(
+                {
+                    "session_id": session_id,
+                    "reason": (
+                        f"孤儿快照删除排序失败：跳过该会话本轮全部孤儿运行"
+                        f"快照删除（不使用部分顺序，等待下次重试）: {exc}"
+                    ),
+                }
+            )
+            deletion_order = []
+        abort_reason: str | None = None
+        for key in deletion_order:
+            thread_id, run_id = _json.loads(key)
+            snapshot = live_by_key.get(key)
+            if snapshot is None:
+                # 已确认节点不存在（锁内整份重读列表无此键）——等同已删除，
+                # 不会产生悬空引用，继续处理其来源。
+                continue
+            sealed = (
+                _as_utc(snapshot.get("sealed_at"))
+                if isinstance(snapshot, Mapping)
+                else None
+            )
+            if sealed is None or sealed >= archive_before:
+                # 节点仍存在但不应删除，或 sealed_at 未知/坏元数据：保守停止，
+                # 不删其来源祖先（消费者先于来源的顺序保证祖先尚未处理）。
+                abort_reason = f"锁内复核发现孤儿快照 {run_id} 仍需保留或状态未知"
+                break
+            if not apply:
+                report.skipped.append(
+                    {
+                        "session_id": session_id,
+                        "run_snapshot": run_id,
+                        "reason": "孤儿快照待清理 (dry-run)",
+                    }
+                )
+                continue
+            # 删除失败/状态未知：绝不当作删除成功，停止本轮剩余删除。
+            try:
+                self._archive.delete_run_snapshot(session_id, thread_id, run_id)
+                report.skipped.append(
+                    {
+                        "session_id": session_id,
+                        "run_snapshot": run_id,
+                        "reason": "孤儿快照已清理",
+                    }
+                )
+            except Exception as exc:  # noqa: BLE001
+                report.skipped.append(
+                    {
+                        "session_id": session_id,
+                        "run_snapshot": run_id,
+                        "reason": f"孤儿快照清理失败: {type(exc).__name__}",
+                    }
+                )
+                abort_reason = f"孤儿快照 {run_id} 删除失败（{type(exc).__name__}）"
+                break
+        if abort_reason is not None:
+            report.skipped.append(
+                {
+                    "session_id": session_id,
+                    "reason": (
+                        f"{abort_reason}：停止该会话本轮剩余孤儿快照删除，"
+                        "等待下次重试（保证本轮保留快照不指向本轮刚删来源）"
+                    ),
+                }
+            )
+        for key in sorted(deferred):
+            _, run_id = _json.loads(key)
+            report.skipped.append(
+                {
+                    "session_id": session_id,
+                    "run_snapshot": run_id,
+                    "reason": (
+                        "孤儿快照延迟清理（本轮保留的快照仍引用该来源，"
+                        "避免制造悬空引用）"
+                    ),
+                }
+            )
 
     # ------------------------------------------------------------ Web 命名空间
 
@@ -643,74 +1346,6 @@ class MaintenanceService:
         except OSError:
             return now
         return min(mtime, now)
-
-    def _cleanup_result_dirs_global(
-        self,
-        *,
-        retention: timedelta,
-        now: datetime,
-        apply: bool,
-        report: CleanupReport,
-        conn,
-    ) -> None:
-        """R2：全局按目录时间删除，不读会话归属、不看引用、不取会话锁。"""
-        root = Path(self._cfg.workspace.root) / "results"
-        if not root.is_dir():
-            return
-        if self._snapshot_table_ready(conn) is not True:
-            report.skipped.append(
-                {
-                    "result_ref": "*",
-                    "reason": "快照表不存在或无法确认，跳过 R2 实删",
-                }
-            )
-            return
-        for path in sorted(root.iterdir()):
-            if not path.is_dir() or not _RESULT_REF_RE.match(path.name):
-                continue
-            if (now - self._result_dir_age(path, now)) < retention:
-                continue
-            if not apply:
-                report.result_dirs.append(path.name + " (dry-run)")
-                continue
-            try:
-                shutil.rmtree(path)
-                report.result_dirs.append(path.name)
-            except OSError as exc:
-                report.errors.append(
-                    {"result_ref": path.name, "error": f"{type(exc).__name__}: {exc}"}
-                )
-
-    def _cleanup_snapshots(
-        self,
-        *,
-        before: datetime,
-        apply: bool,
-        report: CleanupReport,
-        conn,
-    ) -> None:
-        """R3：按 last_referenced_at 清理快照行。"""
-        if self._snapshot_table_ready(conn) is not True:
-            report.skipped.append(
-                {
-                    "snapshot": "*",
-                    "reason": "快照表不存在或无法确认，跳过 R3 清理",
-                }
-            )
-            return
-        if apply:
-            cur = conn.execute(
-                "DELETE FROM result_snapshots WHERE last_referenced_at < %s",
-                (before,),
-            )
-            report.snapshot_deleted = int(cur.rowcount or 0)
-        else:
-            row = conn.execute(
-                "SELECT count(*) AS n FROM result_snapshots "
-                "WHERE last_referenced_at < %s",
-                (before,),
-            ).fetchone()
-            report.snapshot_deleted = int(row["n"] if row else 0)
 
     def _list_sessions(self) -> list[str]:
         out: list[str] = []

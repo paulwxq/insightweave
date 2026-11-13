@@ -56,6 +56,8 @@ class FinalAnswerGateMiddleware(AgentMiddleware[DbDeepAgentState, DbAgentContext
         reminders = record.get("final_answer_reminders", 0)
         if reminders >= self._cfg.final_answer_reminders:
             return None  # 不再干预，运行自然结束，Runner 按“未提交”处理
+        # doc 6.3 §7.5：提醒带上待处理任务摘要（有限次数，不形成无限修正）
+        pending_summary = self._pending_task_summary(state, run_id)
         logger.info(
             "[request_id=%s run_id=%s] 模型未调用工具且未提交，发送提醒（第 %d 次）",
             ctx.request_id,
@@ -80,9 +82,36 @@ class FinalAnswerGateMiddleware(AgentMiddleware[DbDeepAgentState, DbAgentContext
                     content=(
                         "请调用 submit_final_answer 单独提交最终答案，"
                         "并引用已有 evidence_id。"
+                        + (
+                            f"待处理任务：{pending_summary}。"
+                            if pending_summary
+                            else ""
+                        )
                     ),
                     additional_kwargs={"dbda_kind": "final_answer_reminder"},
                 )
             ],
             "jump_to": "model",
         }
+
+    @staticmethod
+    def _pending_task_summary(state, run_id: str) -> str:
+        """待处理/未覆盖任务摘要（doc 6.3 §7.5：提醒带具体任务）。"""
+        try:
+            from src.modules.db_deepagent.services.task_ledger import (
+                current_task_view,
+            )
+
+            tasks = current_task_view(
+                state.get("db_sub_tasks") or {}, run_id, include_voided=False
+            )
+        except Exception:  # noqa: BLE001（账本损坏时退化为普通提醒）
+            return ""
+        pending = sorted(
+            f"{tid}@{rec.get('revision')}({rec.get('status')})"
+            for tid, rec in tasks.items()
+            if rec.get("status") in ("pending", "in_progress")
+        )
+        if not pending:
+            return ""
+        return "、".join(pending[:10])

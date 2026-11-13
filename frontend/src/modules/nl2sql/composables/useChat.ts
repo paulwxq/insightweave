@@ -49,6 +49,29 @@ export interface CurrentTurn {
 
 export type ReadinessState = 'idle' | 'checking' | 'ready' | 'blocked' | 'error'
 
+/** 把刚保存的当前轮收成历史卡片。不安全终态不带回 SQL 和结果引用。
+ *  模块级纯函数，便于对三态与安全投影做可执行行为测试（doc 6.3 §8.3）。 */
+export function snapshotTurn(question: string, result: WebQueryResult): WebTurn {
+  const unsafe =
+    result.error_code === 'knowledge_changed' || result.error_code === 'dependency_unavailable'
+  return {
+    question,
+    answer: result.answer,
+    saved_at: new Date().toISOString(),
+    elapsed_ms: result.stats.elapsed_ms,
+    evidence: unsafe
+      ? []
+      : result.evidence.map((item) => ({
+          sql: item.sql,
+          result_ref: item.result_ref,
+          row_count: item.row_count,
+          source_truncated: item.source_truncated,
+        })),
+    // 与服务端 WebStore 保存的同一合并列表保持一致（doc 6.3 §8.3）
+    open_questions: unsafe ? [] : [...result.open_questions],
+  }
+}
+
 export function useNl2sqlChat(router: Router) {
   const page = nl2sqlPageGuard.openInstance()
   function stillHere(): boolean {
@@ -463,26 +486,6 @@ export function useNl2sqlChat(router: Router) {
       if (flowCurrent() && canSubmit.value) await ask(question)
     } finally {
       if (flowCurrent()) creatingSession.value = false
-    }
-  }
-
-  /** 把刚保存的当前轮收成历史卡片。不安全终态不带回 SQL 和结果引用。 */
-  function snapshotTurn(question: string, result: WebQueryResult): WebTurn {
-    const unsafe =
-      result.error_code === 'knowledge_changed' || result.error_code === 'dependency_unavailable'
-    return {
-      question,
-      answer: result.answer,
-      saved_at: new Date().toISOString(),
-      elapsed_ms: result.stats.elapsed_ms,
-      evidence: unsafe
-        ? []
-        : result.evidence.map((item) => ({
-            sql: item.sql,
-            result_ref: item.result_ref,
-            row_count: item.row_count,
-            source_truncated: item.source_truncated,
-          })),
     }
   }
 

@@ -43,10 +43,63 @@ def _save_prior(
     )
 
 
-def _ledger() -> LedgerView:
-    return LedgerView(
-        {"db_time_evidence": [SEP], "db_dim_evidence": [], "db_validations": {}}
+def _ledger(prior_meta=None) -> LedgerView:
+    state = {
+        "db_time_evidence": [SEP],
+        "db_dim_evidence": [],
+        "db_validations": {},
+        **_task_ledger_state(),
+    }
+    if prior_meta is not None:
+        state["db_executions"] = [_prior_exec_record(prior_meta)]
+    return LedgerView(state)
+
+
+def _prior_exec_record(meta, evidence_id="E-prior"):
+    """T1 的前序执行记录（占位符来源血缘）。"""
+    return {
+        "evidence_id": evidence_id,
+        "tool_call_id": "tc-prior",
+        "run_id": "run-test",
+        "request_id": "req-test",
+        "purpose": "query",
+        "datasource_id": meta.datasource_id,
+        "sql_template": "SELECT customer_id ...",
+        "executed_sql": "SELECT customer_id ...",
+        "executed_sql_sha256": meta.executed_sql_sha256,
+        "result_ref": meta.result_ref,
+        "columns": meta.columns,
+        "saved_row_count": meta.saved_row_count,
+        "source_truncated": False,
+        "elapsed_ms": 5,
+        "warnings": [],
+        "sub_task_id": "T1",
+        "sub_task_revision": 1,
+        "input_result_refs": [],
+    }
+
+
+def _task_ledger_state():
+    """T1@1 completed（成果 E-prior）+ T2@1 pending（依赖 T1@1）。"""
+    from src.tests.db_deepagent.conftest import make_task_record, make_task_state
+
+    t1 = make_task_record(
+        "run-test",
+        "T1",
+        1,
+        status="completed",
+        evidence_ids=["E-prior"],
+        content="取得客户编号",
     )
+    t2 = make_task_record(
+        "run-test",
+        "T2",
+        1,
+        status="pending",
+        content="按客户过滤订单",
+        dependencies=[{"sub_task_id": "T1", "revision": 1}],
+    )
+    return make_task_state([t1, t2])
 
 
 def _ph_sql(ref: str, column: str = "customer_id") -> str:
@@ -70,7 +123,11 @@ class TestHappyPath:
     ):
         pipeline, *_ = pipeline_stack
         outcome, record, _ = pipeline.validate(
-            _ph_sql(prior.result_ref), db_agent_context, _ledger()
+            _ph_sql(prior.result_ref),
+            db_agent_context,
+            _ledger(prior),
+            sub_task_id="T2",
+            sub_task_revision=1,
         )
         assert outcome.valid, outcome.errors
         assert record["placeholder_refs"] == [prior.result_ref]
@@ -86,7 +143,11 @@ class TestHappyPath:
     ):
         pipeline, db, *_ = pipeline_stack
         _, record, _ = pipeline.validate(
-            _ph_sql(prior.result_ref), db_agent_context, _ledger()
+            _ph_sql(prior.result_ref),
+            db_agent_context,
+            _ledger(prior),
+            sub_task_id="T2",
+            sub_task_revision=1,
         )
         outcome, _ = pipeline.execute(
             _ph_sql(prior.result_ref),
@@ -96,8 +157,12 @@ class TestHappyPath:
                     "db_time_evidence": [SEP],
                     "db_dim_evidence": [],
                     "db_validations": {record["key"]: record},
+                    "db_executions": [_prior_exec_record(prior)],
+                    **_task_ledger_state(),
                 }
             ),
+            sub_task_id="T2",
+            sub_task_revision=1,
         )
         assert outcome.ok, outcome.error_type
         executed = db.executed[-1][0]
@@ -110,7 +175,11 @@ class TestHappyPath:
         """授权文本保留占位符原文；展开文本只在执行时出现。"""
         pipeline, _db, _results, *_ = pipeline_stack
         _, record, _ = pipeline.validate(
-            _ph_sql(prior.result_ref), db_agent_context, _ledger()
+            _ph_sql(prior.result_ref),
+            db_agent_context,
+            _ledger(prior),
+            sub_task_id="T2",
+            sub_task_revision=1,
         )
         assert "{{result:" in record["normalized_sql"]
 
@@ -120,7 +189,9 @@ class TestSubcodes:
         """ref 非法 → placeholder_malformed。"""
         pipeline, *_ = pipeline_stack
         sql = _ph_sql("res_not_a_ref").replace("res_not_a_ref", "bad_ref")
-        outcome, record, _ = pipeline.validate(sql, db_agent_context, _ledger())
+        outcome, record, _ = pipeline.validate(
+            sql, db_agent_context, _ledger(), sub_task_id="T2", sub_task_revision=1
+        )
         assert not outcome.valid
         assert "placeholder_malformed" in outcome.error_codes
         assert record is None
@@ -128,14 +199,18 @@ class TestSubcodes:
     def test_handwritten_sentinel_rejected(self, pipeline_stack, db_agent_context):
         pipeline, *_ = pipeline_stack
         sql = "SELECT id FROM public.orders WHERE customer_id IN (__dbda_ph_0__)"
-        outcome, *_ = pipeline.validate(sql, db_agent_context, _ledger())
+        outcome, *_ = pipeline.validate(
+            sql, db_agent_context, _ledger(), sub_task_id="T2", sub_task_revision=1
+        )
         assert "placeholder_malformed" in (outcome.error_codes or [])
 
     def test_position_invalid(self, pipeline_stack, db_agent_context, prior):
         """占位符在 = 右侧 → placeholder_position_invalid。"""
         pipeline, *_ = pipeline_stack
         sql = _ph_sql(prior.result_ref).replace("customer_id IN", "customer_id =")
-        outcome, *_ = pipeline.validate(sql, db_agent_context, _ledger())
+        outcome, *_ = pipeline.validate(
+            sql, db_agent_context, _ledger(), sub_task_id="T2", sub_task_revision=1
+        )
         assert "placeholder_position_invalid" in (outcome.error_codes or [])
 
     def test_datasource_mismatch(self, pipeline_stack, db_agent_context):
@@ -143,7 +218,11 @@ class TestSubcodes:
         other = replace(db_agent_context, datasource_id="pg:other")
         prior = _save_prior(results, other, [("C001",)], datasource_id="pg:other")
         outcome, *_ = pipeline.validate(
-            _ph_sql(prior.result_ref), db_agent_context, _ledger()
+            _ph_sql(prior.result_ref),
+            db_agent_context,
+            _ledger(prior),
+            sub_task_id="T2",
+            sub_task_revision=1,
         )
         assert "placeholder_datasource_mismatch" in (outcome.error_codes or [])
 
@@ -153,7 +232,11 @@ class TestSubcodes:
             results, db_agent_context, [("C001",)], source_truncated=True
         )
         outcome, *_ = pipeline.validate(
-            _ph_sql(prior.result_ref), db_agent_context, _ledger()
+            _ph_sql(prior.result_ref),
+            db_agent_context,
+            _ledger(prior),
+            sub_task_id="T2",
+            sub_task_revision=1,
         )
         assert "placeholder_source_truncated" in (outcome.error_codes or [])
 
@@ -161,7 +244,11 @@ class TestSubcodes:
         pipeline, _db, results, *_ = pipeline_stack
         prior = _save_prior(results, db_agent_context, [])
         outcome, *_ = pipeline.validate(
-            _ph_sql(prior.result_ref), db_agent_context, _ledger()
+            _ph_sql(prior.result_ref),
+            db_agent_context,
+            _ledger(prior),
+            sub_task_id="T2",
+            sub_task_revision=1,
         )
         assert "placeholder_empty" in (outcome.error_codes or [])
 

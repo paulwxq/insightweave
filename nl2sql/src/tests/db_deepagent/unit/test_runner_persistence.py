@@ -28,10 +28,18 @@ pytestmark = pytest.mark.unit
 ANSWER = {
     "status": "completed",
     "answer": "9 月订单 100 单",
-    "findings": [{"text": "订单数", "evidence_ids": ["E-run00001"]}],
+    "findings": [
+        {
+            "text": "订单数",
+            "finding_id": "F-1",
+            "task_refs": [{"sub_task_id": "T1", "revision": 1}],
+            "evidence_ids": ["E-run00001"],
+        }
+    ],
     "metric_definitions": [],
     "limitations": [],
     "open_questions": [],
+    "unresolved_task_refs": [],
 }
 
 
@@ -52,6 +60,9 @@ def _exec(evidence_id="E-run00001", run_id="run-x", reused=False):
         "source_truncated": False,
         "elapsed_ms": 9,
         "warnings": [],
+        "sub_task_id": "T1",
+        "sub_task_revision": 1,
+        "input_result_refs": [],
         **(
             {
                 "reused_from": {
@@ -70,9 +81,33 @@ def _exec(evidence_id="E-run00001", run_id="run-x", reused=False):
     }
 
 
-def _state(answer=ANSWER, executions=None, run_id="run-x"):
+def _task_ledger(
+    run_id="run-x",
+    *,
+    status="completed",
+    evidence_ids=("E-run00001",),
+    sub_task_id="T1",
+    extra_task=None,
+):
+    """doc 6.3：合法提交所需的最小任务账本（T1@1 completed 选定成果）。"""
+    from src.tests.db_deepagent.conftest import make_task_record, make_task_state
+
+    task = make_task_record(
+        run_id,
+        sub_task_id,
+        1,
+        status=status,
+        evidence_ids=list(evidence_ids),
+        content="统计 9 月订单",
+    )
+    if extra_task is not None:
+        return make_task_state([task, extra_task])
+    return make_task_state([task])
+
+
+def _state(answer=ANSWER, executions=None, run_id="run-x", ledger=True):
     answers = {"run-x": {"run_id": "run-x", "answer": answer}} if answer else {}
-    return {
+    state = {
         "messages": [],
         "db_executions": (
             executions if executions is not None else [_exec(run_id=run_id)]
@@ -81,6 +116,10 @@ def _state(answer=ANSWER, executions=None, run_id="run-x"):
         "db_validations": {},
         "db_final_answers": answers,
     }
+    if ledger:
+        # 无 answer 的失败注入路径也保留账本：状态判定不依赖提交存在
+        state.update(_task_ledger(run_id))
+    return state
 
 
 def _runner(services, agent, store, state):
@@ -110,7 +149,7 @@ class TestHappyPath:
         result, agent = _run_ok(assembly_services, store, _state())
         assert result.status == "completed"
         assert result.thread_id and result.thread_id.startswith("dbda:s1:")
-        assert result.answer == ANSWER["answer"]
+        assert result.answer.startswith(ANSWER["answer"])  # R1-13：附加分项段
         assert [e.evidence_id for e in result.evidence] == ["E-run00001"]
         assert result.archived is True
         assert (
@@ -205,7 +244,9 @@ class TestFailureInjection:
         assert result.status == "persistence_error"
         assert result.archived is False
         assert "未归档" in "".join(result.warnings)
-        assert result.answer == ANSWER["answer"]  # 答案仍在结果中
+        assert result.answer.startswith(
+            ANSWER["answer"]
+        )  # R1-13：附加分项段  # 答案仍在结果中
 
     def test_budget_exhausted_status(self, assembly_services):
         """无执行无答案（FakeAgent 直接返回）→ failed；预算路径由真实图触发。"""
@@ -227,28 +268,66 @@ class TestArchiveConditions:
         """纯下推分析（无 query 执行）满足条件 a → qa（§13.3：query 或 pushdown）。
 
         修复前 evidence 只含 query 执行，纯下推轮次被误归 run_errors。
+        doc 6.3：分析 A- 为任务 T1 的选定成果（含结构化输入血缘）。
         """
         store = FakeStore()
         pushdown = _exec(evidence_id="E-push", run_id="run-x")
         pushdown["purpose"] = "pushdown"
-        state = _state(executions=[pushdown])
-        state["db_analyses"] = [
-            {
-                "evidence_id": "A-1",
-                "tool_call_id": "tc-a",
-                "run_id": "run-x",
-                "request_id": "req-x",
-                "pushdown_execution_id": "E-push",
-                "operation": {"name": "aggregate"},
-                "input_result_refs": ["res_" + "3" * 32],
-                "output_result_ref": "res_" + "2" * 32,
-                "executed_sql": "SELECT ...",
-                "saved_row_count": 1,
-                "source_truncated": False,
-                "warnings": [],
-                "result_generated_at": "2026-10-01T00:00:00+08:00",
-            }
-        ]
+        analysis = {
+            "evidence_id": "A-1",
+            "tool_call_id": "tc-a",
+            "run_id": "run-x",
+            "request_id": "req-x",
+            "pushdown_execution_id": "E-push",
+            "operation": {"name": "aggregate"},
+            "input_result_refs": [
+                # R2-02：结构化输入血缘必须能解析到真实原始记录；此处
+                # 指向同轮的下推执行 E-push（同任务输入），不再引用一个
+                # 状态中不存在的裸 evidence_id。
+                {
+                    "result_ref": "res_" + "1" * 32,
+                    "evidence_ref": {
+                        "session_id": "s1",
+                        "thread_id": "dbda:s1:1",
+                        "run_id": "run-x",
+                        "evidence_id": "E-push",
+                    },
+                    "source_task_ref": {
+                        "session_id": "s1",
+                        "thread_id": "dbda:s1:1",
+                        "run_id": "run-x",
+                        "sub_task_id": "T1",
+                        "revision": 1,
+                    },
+                }
+            ],
+            "output_result_ref": "res_" + "2" * 32,
+            "executed_sql": "SELECT ...",
+            "saved_row_count": 1,
+            "source_truncated": False,
+            "warnings": [],
+            "result_generated_at": "2026-10-01T00:00:00+08:00",
+            "sub_task_id": "T1",
+            "sub_task_revision": 1,
+        }
+        answer = {
+            **ANSWER,
+            "findings": [
+                {
+                    "text": "订单数",
+                    "finding_id": "F-1",
+                    "task_refs": [{"sub_task_id": "T1", "revision": 1}],
+                    "evidence_ids": ["A-1"],
+                }
+            ],
+        }
+        state = _state(
+            answer=answer,
+            executions=[pushdown],
+            ledger=False,
+        )
+        state["db_analyses"] = [analysis]
+        state.update(_task_ledger(evidence_ids=("A-1",)))
         result, _ = _run_ok(assembly_services, store, state)
         assert result.status == "completed"
         assert any(
@@ -1043,13 +1122,15 @@ class TestFallbackFinalization:
         store = FakeStore()
         result, _ = _run_ok(assembly_services, store, _state())
         assert result.status == "completed"
-        assert result.answer == ANSWER["answer"] == result.answer.strip()
+        assert result.answer.startswith(ANSWER["answer"])  # R1-13：附加分项段
+        assert result.answer.strip().endswith("已完成：统计 9 月订单")
         assert not any("服务端兜底" in w for w in result.warnings)
         qa = _qa_records(store)[0]
         assert qa["archive_schema_version"] == 2
         assert qa["answer_source"] == "model"
         assert qa["answer"] == ANSWER  # 原模型提交 payload 原样
-        assert qa["delivery_answer"]["answer"] == ANSWER["answer"]
+        # R1-13：交付正文=模型原文+分项段；原始 payload 原样
+        assert qa["delivery_answer"]["answer"] == result.answer
         assert qa["delivery_answer"]["status"] == "completed"
 
     def test_no_submission_with_evidence_falls_back(self, assembly_services):
@@ -1446,6 +1527,8 @@ def _raw_state(raw_answer, executions=None, omit_answer_key=False):
 
     与 _state() 不同：raw_answer 允许任意类型（None/空串/列表/False/0），
     记录始终存在；omit_answer_key=True 时构造缺失 answer 键的对照。
+    账本合法（T1 completed）：非法原始 payload 属结构归一失败 →
+    no_final_answer（doc 6.3 §7.5：不因无账本误判为门控拒绝）。
     """
     record = {"run_id": "run-x", "request_id": "req-x"}
     if not omit_answer_key:
@@ -1456,6 +1539,7 @@ def _raw_state(raw_answer, executions=None, omit_answer_key=False):
         "db_analyses": [],
         "db_validations": {},
         "db_final_answers": {"run-x": record},
+        **_task_ledger(),
     }
 
 
@@ -1518,3 +1602,170 @@ class TestRawPayloadPreservation:
         qa = _qa_records(store)[0]  # 真实执行按条件 a 进 qa
         assert qa["answer"] == {}
         assert qa["answer_source"] == "system_fallback"
+
+
+class TestTaskGateFallbackIntegration:
+    """doc 6.3 §7.5：资格结论贯穿评估、正文与归档条件 b。"""
+
+    def test_structurally_valid_semantically_rejected(self, assembly_services):
+        """非空结构合法但语义非法（漏覆盖）→ failed+system_fallback；
+        原正文/findings/口径/补充问题不交付，原始 payload 保真。"""
+        store = FakeStore()
+        answer = {
+            **ANSWER,
+            "findings": [],  # 漏覆盖 completed 任务
+        }
+        result, _ = _run_ok(assembly_services, store, _state(answer=answer))
+        assert result.status == "failed"
+        assert result.answer.startswith("系统兜底说明：")
+        assert not result.findings
+        assert any(
+            e.kind == "task_completion_rejected" and e.primary for e in result.errors
+        )
+        qa = _qa_records(store)[0]
+        assert qa["answer_source"] == "system_fallback"
+        # 原始 payload 保真（未因资格为空丢失）
+        assert qa["answer"]["findings"] == []
+        assert qa["answer"]["answer"] == answer["answer"]
+        # 无资格提交的补充问题不进入交付
+        assert qa["delivery_answer"]["findings"] == []
+
+    def test_legitimate_business_failed_keeps_model_source(self, assembly_services):
+        """合法业务 failed（任务登记 failed+unresolved 恰覆盖）→ model 来源。"""
+        from src.tests.db_deepagent.conftest import make_task_record
+
+        task = make_task_record(
+            "run-x",
+            "T1",
+            1,
+            status="failed",
+            reason_code="agent_abandoned",
+            reason="无法推进",
+        )
+        answer = {
+            "status": "failed",
+            "answer": "本轮未能完成查询。",
+            "findings": [],
+            "metric_definitions": [],
+            "limitations": [],
+            "open_questions": [],
+            "unresolved_task_refs": [{"sub_task_id": "T1", "revision": 1}],
+        }
+        state = _state(answer=answer, executions=[], ledger=False)
+        state.update(_task_ledger(status="failed", evidence_ids=[], extra_task=task))
+        store = FakeStore()
+        result, _ = _run_ok(assembly_services, store, state)
+        assert result.status == "failed"
+        # R1-13：合法交付附加确定性分项段；正文以模型原文开头
+        assert result.answer.startswith("本轮未能完成查询。")
+        assert "未完成：业务任务（原因：无法推进）" in result.answer
+        assert "系统兜底说明：" not in result.answer  # 非空合法正文不兜底
+        assert any(e.kind == "no_final_answer" for e in result.errors) is False
+
+    def test_p0_rejection_no_fallback(self, assembly_services, tmp_path):
+        """未调用 Agent 的前置拒绝（请求 ID 冲突）：answer_source=none，
+        不触发系统兜底（§7.5：invoke_started=False 不进兜底）。"""
+        store = FakeStore()
+        runner = _runner(assembly_services, FakeAgent(_state()), store, _state())
+        # 预置同 request_id 本地记录 → P0 锁内拒绝（不执行 Agent）
+        marker = runner._local_record_path("s-p0", "req-p0")
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text("{}", encoding="utf-8")
+        result = runner.run("问", "s-p0", request_id="req-p0")
+        assert result.status == "failed"
+        assert result.answer.startswith("系统兜底说明：") is False
+        qa_or_err = [*_qa_records(store), *_err_records(store)]
+        assert all(r["answer_source"] == "none" for r in qa_or_err)
+
+    def test_pure_reuse_without_qualification_goes_run_errors(self, assembly_services):
+        """纯沿用 + 无资格提交 → 条件 b 为假 → run_errors（真实执行仍可 qa）。"""
+        store = FakeStore()
+        reused = _exec(evidence_id="E-reused1", reused=True)
+        answer = {
+            **ANSWER,
+            "findings": [
+                {
+                    "text": "沿用结果",
+                    "finding_id": "F-1",
+                    "task_refs": [{"sub_task_id": "T1", "revision": 1}],
+                    "evidence_ids": ["E-reused1"],
+                }
+            ],
+        }
+        state = _state(answer=answer, executions=[reused])
+        # 任务未选定沿用证据 → 漏覆盖 → 拒绝
+        state["db_sub_tasks"][[k for k in state["db_sub_tasks"] if '"T1"' in k][0]][
+            "evidence_ids"
+        ] = []
+        result, _ = _run_ok(assembly_services, store, state)
+        assert result.status == "failed"
+        assert not _qa_records(store)
+        assert _err_records(store)
+
+    def test_delivery_open_questions_merged_list(self, assembly_services):
+        """§8.3：交付 open_questions 为合并列表（权威在前），非原提交拷贝。"""
+        from src.tests.db_deepagent.conftest import (
+            make_task_record,
+            make_task_state,
+        )
+
+        t1 = make_task_record(
+            "run-x",
+            "T1",
+            1,
+            status="needs_clarification",
+            reason="口径不明",
+            clarification_question="统计含退款吗？",
+        )
+        t1["clarification_question"] = "统计含退款吗？"
+        answer = {
+            "status": "needs_clarification",
+            "answer": "需要澄清统计口径。",
+            "findings": [],
+            "metric_definitions": [],
+            "limitations": [],
+            "open_questions": ["补充：是否按渠道拆分？", "统计含退款吗？"],
+            "unresolved_task_refs": [{"sub_task_id": "T1", "revision": 1}],
+        }
+        state = _state(answer=answer, executions=[], ledger=False)
+        ledger_state = make_task_state([t1])
+        state.update(ledger_state)
+        store = FakeStore()
+        result, _ = _run_ok(assembly_services, store, state)
+        assert result.status == "needs_clarification"
+        # 权威问题在前；重复补充去重保留首次
+        assert result.open_questions == [
+            "统计含退款吗？",
+            "补充：是否按渠道拆分？",
+        ]
+        # 无真实执行且状态为 needs_clarification（非 completed/partial）
+        # → 条件 b 为假 → run_errors（保存同一交付列表）
+        err = _err_records(store)[0]
+        assert err["delivery_answer"]["open_questions"] == result.open_questions
+        # 原提交列表保真
+        assert err["answer"]["open_questions"] == [
+            "补充：是否按渠道拆分？",
+            "统计含退款吗？",
+        ]
+
+    def test_run_snapshot_sealed_and_referenced(self, assembly_services):
+        """§8.2：QA/run_errors 引用运行快照；快照含全部任务与覆盖结论。"""
+        import json as _json
+
+        store = FakeStore()
+        result, _ = _run_ok(assembly_services, store, _state())
+        assert result.status == "completed"
+        qa = _qa_records(store)[0]
+        ref = qa["snapshot_ref"]
+        assert ref["run_id"] == result.run_id
+        snapshot = None
+        for (ns, key), value in store.items.items():
+            if ns[1] == "run_snapshots":
+                snapshot = value
+        assert snapshot is not None
+        assert snapshot["run_snapshot_schema_version"] == 1
+        assert snapshot["run_status_at_seal"] == "completed"
+        assert [t["sub_task_id"] for t in snapshot["tasks"]] == ["T1"]
+        assert snapshot["coverage"]["accepted"] is True
+        assert snapshot["interrupted_tasks"] == []
+        _json.dumps(snapshot)  # 可 JSON 序列化

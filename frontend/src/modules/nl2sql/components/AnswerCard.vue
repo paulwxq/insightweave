@@ -24,6 +24,7 @@ defineProps<{
     <article class="card">
       <p class="summary" :class="{ caution: unsafe }">{{ answer }}</p>
       <ul v-if="clarify.length > 0" class="clarify">
+        <li class="clarify-title">澄清与补充问题</li>
         <li v-for="(item, index) in clarify" :key="index">{{ item }}</li>
       </ul>
       <EvidenceBlock
@@ -93,5 +94,12 @@ defineProps<{
   color: #5c6f8a;
   font-size: 12px;
   line-height: 1.7;
+}
+
+.clarify-title {
+  list-style: none;
+  margin-left: -18px;
+  font-weight: 700;
+  color: #9a6b32;
 }
 </style>

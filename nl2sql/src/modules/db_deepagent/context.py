@@ -28,3 +28,7 @@ class DbAgentContext:
     user_texts: tuple[str, ...]  # 本线程全部用户原文，最后一项为本轮问题
     carried_evidence: tuple[CarriedEvidence, ...]  # 线程轮换时携带的已确认证据（§13.4）
     deadline_monotonic: float  # 运行时限（time.monotonic 基准）
+    # doc 6.3 §6.5：运行持有的会话互斥凭据（SessionGuardLease；私有，
+    # 不写入模型参数或持久化记录）。None=本运行未持锁（P0 前置拒绝路径）；
+    # 有副作用的服务端入口校验其作用域与存续状态。
+    session_guard_lease: object | None = None

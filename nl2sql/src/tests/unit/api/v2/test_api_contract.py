@@ -286,13 +286,22 @@ class TestTurnsEndpoint:
         assert r.status_code == 200
         items = r.json()["data"]["items"]
         assert [t["question"] for t in items] == ["第一问", "第二问"]
-        # 未附带展示投影的旧写入：证据为空，不把内部字段透出
+        # 未附带展示投影的旧写入：证据为空，不把内部字段透出；
+        # doc 6.3 §8.3：open_questions 保存值透传（缺省 None=未知）
         assert all(
             set(t.keys())
-            == {"question", "answer", "saved_at", "elapsed_ms", "evidence"}
+            == {
+                "question",
+                "answer",
+                "saved_at",
+                "elapsed_ms",
+                "evidence",
+                "open_questions",
+            }
             for t in items
         )
         assert all(t["evidence"] == [] and t["elapsed_ms"] is None for t in items)
+        assert all(t["open_questions"] is None for t in items)
 
     def test_session_not_found(self, web_env, client):
         r = client.get("/api/v2/sessions/s_" + "8" * 32 + "/turns", headers=LOCAL)

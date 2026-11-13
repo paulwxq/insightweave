@@ -277,11 +277,18 @@ _RETRIEVAL_TOOLS = ("search_schema", "inspect_tables", "plan_joins")
 _EVIDENCE_TOOLS = ("resolve_time_range", "probe_dimension_values", "reuse_evidence")
 _SQL_TOOLS = ("validate_sql", "execute_sql")
 _RESULT_TOOLS = ("read_result", "analyze_result")  # 步骤 5 交付
+_TASK_TOOLS = ("record_sub_tasks",)  # doc 6.3
 _SUBMIT_TOOL = "submit_final_answer"
 
-# 步骤 4：9（业务+提交）+ 4（文件）= 13；步骤 5：11 + 4 = 15（§10.6）
+# doc 6.3 §10：10 业务 + 提交 + 4 文件 = 15 → 11+1+4 = 16；todos 后 17。
+# include_result_tools=False 的阶段工具集同样包含任务工具（不能变成绕过入口）。
 STEP4_TOOLS = frozenset(
-    _FILE_TOOLS + _RETRIEVAL_TOOLS + _EVIDENCE_TOOLS + _SQL_TOOLS + (_SUBMIT_TOOL,)
+    _FILE_TOOLS
+    + _RETRIEVAL_TOOLS
+    + _EVIDENCE_TOOLS
+    + _SQL_TOOLS
+    + _TASK_TOOLS
+    + (_SUBMIT_TOOL,)
 )
 FULL_TOOLS = frozenset(set(STEP4_TOOLS) | set(_RESULT_TOOLS))
 
@@ -315,9 +322,22 @@ TOOL_VISIBLE_FIELDS: dict[str, tuple[list[str], list[str]]] = {
         ["table_id", "column", "mode", "value_text", "limit"],
         ["table_id", "column", "mode"],
     ),
-    "reuse_evidence": (["evidence_ids"], ["evidence_ids"]),
-    "validate_sql": (["sql"], ["sql"]),
-    "execute_sql": (["sql"], ["sql"]),
+    "reuse_evidence": (
+        ["evidence_ids", "source_evidence_refs", "sub_task_id", "sub_task_revision"],
+        [],
+    ),
+    "validate_sql": (
+        ["sql", "sub_task_id", "sub_task_revision"],
+        ["sql", "sub_task_id", "sub_task_revision"],
+    ),
+    "execute_sql": (
+        ["sql", "sub_task_id", "sub_task_revision"],
+        ["sql", "sub_task_id", "sub_task_revision"],
+    ),
+    "record_sub_tasks": (
+        ["expected_plan_version", "operations"],
+        ["expected_plan_version", "operations"],
+    ),
     _SUBMIT_TOOL: (
         [
             "status",
@@ -326,6 +346,7 @@ TOOL_VISIBLE_FIELDS: dict[str, tuple[list[str], list[str]]] = {
             "metric_definitions",
             "limitations",
             "open_questions",
+            "unresolved_task_refs",
         ],
         ["status", "answer"],
     ),
@@ -334,8 +355,15 @@ TOOL_VISIBLE_FIELDS: dict[str, tuple[list[str], list[str]]] = {
         ["result_ref"],
     ),
     "analyze_result": (
-        ["operation", "inputs", "params", "allow_pushdown"],
-        ["operation", "inputs", "params"],
+        [
+            "operation",
+            "inputs",
+            "params",
+            "allow_pushdown",
+            "sub_task_id",
+            "sub_task_revision",
+        ],
+        ["operation", "inputs", "params", "sub_task_id", "sub_task_revision"],
     ),
 }
 
@@ -611,7 +639,11 @@ def build_db_agent(
             make_execute_sql_tool,
             make_validate_sql_tool,
         )
+        from src.modules.db_deepagent.tools.task_tools import (
+            make_record_sub_tasks_tool,
+        )
 
+        # doc 6.3 §10：阶段工具集同样包含任务工具，不能变成绕过入口
         tools = [
             make_search_schema_tool(services),
             make_inspect_tables_tool(services),
@@ -621,8 +653,9 @@ def build_db_agent(
             make_reuse_evidence_tool(services),
             make_validate_sql_tool(services),
             make_execute_sql_tool(services),
+            make_record_sub_tasks_tool(services),
         ]
-    tools.append(make_submit_final_answer_tool())
+    tools.append(make_submit_final_answer_tool(services))
 
     agent = create_deep_agent(
         model=model,

@@ -26,23 +26,26 @@ pytestmark = pytest.mark.unit
 
 
 class TestToolSetConstants:
-    def test_step4_profile_has_13_tools(self, db_agent_config: DbAgentConfig):
+    def test_step4_profile_has_14_tools(self, db_agent_config: DbAgentConfig):
+        """doc 6.3 §10：阶段集合同样包含任务工具（13 → 14）。"""
         names = stage_expected_tool_names(db_agent_config, include_result_tools=False)
-        assert len(names) == 13
+        assert len(names) == 14
+        assert "record_sub_tasks" in names
         assert "read_result" not in names and "analyze_result" not in names
         assert names == set(STEP4_TOOLS)
 
-    def test_step5_default_15_tools(self, db_agent_config: DbAgentConfig):
-        """步骤 5 默认口径：11（业务+提交）+ 4（文件）= 15（§10.6）。"""
+    def test_step5_default_16_tools(self, db_agent_config: DbAgentConfig):
+        """doc 6.3 §10：11 业务 + 提交 + 4 文件 = 16。"""
         names = stage_expected_tool_names(db_agent_config)
-        assert len(names) == 15
+        assert len(names) == 16
+        assert "record_sub_tasks" in names
         assert {"read_result", "analyze_result"} <= names
 
     def test_todo_list_adds_write_todos(self, db_agent_config: DbAgentConfig):
         cfg = db_agent_config.model_copy(deep=True)
         cfg.features.todo_list = True
         names = stage_expected_tool_names(cfg)
-        assert "write_todos" in names and len(names) == 16
+        assert "write_todos" in names and len(names) == 17
 
     def test_forbidden_tools_absent(self):
         for name in ("write_file", "edit_file", "delete", "execute", "task"):
@@ -53,7 +56,7 @@ class TestAssembly:
     def test_assembly_passes_and_verifies(self, assembly_services):
         handle = build_db_agent(assembly_services, session_id="t-assembly")
         expected = verify_assembly(handle.agent, assembly_services.config)
-        assert len(expected) == 15
+        assert len(expected) == 16
         assert expected == stage_expected_tool_names(assembly_services.config)
         bound = handle.agent.nodes["tools"].bound.tools_by_name
         assert set(bound) == expected

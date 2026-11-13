@@ -181,9 +181,20 @@ def fake_services(
 
 
 @pytest.fixture()
-def db_agent_context() -> DbAgentContext:
-    """固定字段的运行上下文（时钟对齐 §7.5 固定时钟 2026-10-13 12:00+08）"""
-    return DbAgentContext(
+def db_agent_context():
+    """固定字段的运行上下文（时钟对齐 §7.5 固定时钟 2026-10-13 12:00+08）。
+
+    doc 6.3 §6.5：附带进程内会话守卫租约（生产 ctx 由 Runner 构造时注入；
+    teardown 释放，不跨用例泄漏）。
+    """
+    from src.modules.db_deepagent.persistence.session_guard import (
+        acquire_memory_lease,
+        release_memory_lease,
+    )
+
+    lease = acquire_memory_lease("s-test")
+    assert lease is not None, "测试会话锁被前一用例占用"
+    yield DbAgentContext(
         session_id="s-test",
         thread_id="t-test",
         request_id="req-test",
@@ -195,7 +206,9 @@ def db_agent_context() -> DbAgentContext:
         user_texts=("测试问题",),
         carried_evidence=(),
         deadline_monotonic=0.0,
+        session_guard_lease=lease,
     )
+    release_memory_lease(lease)
 
 
 # ============================================================================
@@ -345,6 +358,92 @@ def pipeline_stack(db_agent_config: DbAgentConfig, tmp_path):
     return pipeline, db, results, budget, cfg
 
 
+# ============================================================================
+# 任务账本构造器（doc 6.3 测试共用）
+# ============================================================================
+
+
+def make_task_record(
+    run_id: str,
+    sub_task_id: str,
+    revision: int,
+    *,
+    status: str = "pending",
+    content: str = "业务任务",
+    dependencies: list[dict] | None = None,
+    evidence_ids: list[str] | None = None,
+    reason_code: str | None = None,
+    reason: str | None = None,
+    clarification_question: str | None = None,
+    session_id: str = "s-test",
+    thread_id: str = "t-test",
+    request_id: str = "req-test",
+    extra: dict | None = None,
+) -> dict:
+    """构造 SubTaskRecord 测试副本（键由 make_task_state 统一编码）。"""
+    record: dict = {
+        "session_id": session_id,
+        "thread_id": thread_id,
+        "request_id": request_id,
+        "run_id": run_id,
+        "sub_task_id": sub_task_id,
+        "revision": revision,
+        "content": content,
+        "dependencies": list(dependencies or []),
+        "status": status,
+        "evidence_ids": list(evidence_ids or []),
+        "creation_operation": {
+            "op": "add",
+            "sub_task_id": sub_task_id,
+            "content": content,
+            "dependencies": list(dependencies or []),
+        },
+        "failure_refs": [],
+        "decision_source": "agent",
+        "created_at": "2026-11-13T10:00:00+08:00",
+        "updated_at": "2026-11-13T10:00:00+08:00",
+        "tool_call_id": "tc-task",
+    }
+    if status in ("failed", "needs_clarification"):
+        record["reason_code"] = reason_code
+        record["reason"] = reason
+    if status == "needs_clarification":
+        record["clarification_question"] = clarification_question
+    if extra:
+        record.update(extra)
+    return record
+
+
+def make_task_state(
+    records: list[dict],
+    *,
+    plan_version: int = 1,
+) -> tuple[dict, dict]:
+    """任务记录列表 → (db_sub_tasks, db_task_plans) 状态段。
+
+    run_id 取自首条记录（空列表返回空段）。
+    """
+    from src.modules.db_deepagent.state import task_ledger_key
+
+    sub_tasks = {
+        task_ledger_key(r["run_id"], r["sub_task_id"], r["revision"]): r
+        for r in records
+    }
+    plans: dict = {}
+    if records and plan_version:
+        first = records[0]
+        plans[first["run_id"]] = {
+            "session_id": first["session_id"],
+            "thread_id": first["thread_id"],
+            "request_id": first["request_id"],
+            "run_id": first["run_id"],
+            "plan_version": plan_version,
+            "updated_at": "2026-11-13T10:00:00+08:00",
+            "tool_call_id": "tc-task",
+        }
+    return {"db_sub_tasks": sub_tasks, "db_task_plans": plans}
+
+
 @pytest.fixture()
 def guard_services(pipeline_stack, db_agent_config: DbAgentConfig) -> DbAgentServices:
     """带步骤 3 服务栈的工具容器（embedding/milvus/catalog 未用，置 None）"""
@@ -459,21 +558,62 @@ def _remap_run_id(
 
     request_id 一并改写（doc 6.2 §7.2.1 运行归属校验）：模拟正常提交工具
     用 ctx.run_id/ctx.request_id 写入的记录；不传时保持原值（用于构造归属
-    不符的用例）。
+    不符的用例）。doc 6.3：任务账本键 (run_id, sub_task_id, revision) 与
+    计划键同步重编码。
     """
     import copy
+
+    from src.modules.db_deepagent.state import (
+        parse_task_ledger_key,
+        task_ledger_key,
+    )
 
     values = copy.deepcopy(state)
     for key in ("db_executions", "db_analyses"):
         for record in values.get(key) or []:
             if record.get("run_id") == "run-x":
                 record["run_id"] = run_id
+            # 结构化输入血缘/直接来源中的同轮身份由服务端按实际 run_id 写入；
+            # 占位 run-x 的引用需同步改写，跨 run 历史来源（其他 run_id）
+            # 保持原值（R2-02：完整身份寻址，不猜测归属）。
+            for entry in record.get("input_result_refs") or []:
+                if not isinstance(entry, dict):
+                    continue
+                for sub in ("evidence_ref", "source_task_ref"):
+                    ref = entry.get(sub)
+                    if isinstance(ref, dict) and ref.get("run_id") == "run-x":
+                        ref["run_id"] = run_id
+            direct = record.get("direct_reuse_from")
+            if isinstance(direct, dict):
+                for sub in ("evidence_ref", "source_task_ref"):
+                    ref = direct.get(sub)
+                    if isinstance(ref, dict) and ref.get("run_id") == "run-x":
+                        ref["run_id"] = run_id
     answers = values.get("db_final_answers") or {}
     if "run-x" in answers:
         answers[run_id] = answers.pop("run-x")
         answers[run_id]["run_id"] = run_id
         if request_id is not None:
             answers[run_id]["request_id"] = request_id
+    sub_tasks = values.get("db_sub_tasks") or {}
+    if sub_tasks:
+        remapped = {}
+        for key, record in sub_tasks.items():
+            parsed = parse_task_ledger_key(key)
+            if parsed is not None and parsed[0] == "run-x":
+                record = {**record, "run_id": run_id}
+                if request_id is not None:
+                    record = {**record, "request_id": request_id}
+                key = task_ledger_key(run_id, parsed[1], parsed[2])
+            remapped[key] = record
+        values["db_sub_tasks"] = remapped
+    plans = values.get("db_task_plans") or {}
+    if "run-x" in plans:
+        record = {**plans["run-x"], "run_id": run_id}
+        if request_id is not None:
+            record = {**record, "request_id": request_id}
+        plans[run_id] = record
+        del plans["run-x"]
     return values
 
 

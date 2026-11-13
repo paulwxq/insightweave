@@ -513,7 +513,7 @@ def _render_result(result) -> None:
         for limitation in result.limitations:
             print(f"  - {limitation}")
     if result.open_questions:
-        print("\n待澄清:")
+        print("\n澄清与补充问题:")
         for question in result.open_questions:
             print(f"  - {question}")
     stats = result.stats
@@ -573,6 +573,7 @@ class _Session:
                 store=self.persistence.store,
             )
             self.archive = QaArchive(self.persistence.store)
+            self.services.store = self.persistence.store  # doc 6.3：快照读取
             from src.modules.db_deepagent.runner import DbAgentRunner
 
             # 会话级互斥只在 postgres 持久化下生效；memory 模式无平台库，跳过

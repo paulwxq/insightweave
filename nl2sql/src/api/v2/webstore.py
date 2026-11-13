@@ -142,15 +142,28 @@ def normalize_turn_display(display: Any) -> dict:
 
 
 def public_turn(record: dict) -> dict:
-    """历史接口条目。display 缺失或损坏时退回空投影，不让整页历史失败。"""
+    """历史接口条目。display 缺失或损坏时退回空投影，不让整页历史失败。
+
+    doc 6.3 §8.3：open_questions 原样透传保存值——旧记录缺字段为 None
+    （未知，不显示问题列表，不作为“明确没有问题”的统计事实），新记录
+    明确无问题为 []；非法值（非列表/非字符串元素）按 None 处理。
+    """
     display = normalize_turn_display(record.get("display"))
     saved_at = record.get("saved_at")
+    raw_questions = record.get("open_questions")
+    if isinstance(raw_questions, list) and all(
+        isinstance(q, str) for q in raw_questions
+    ):
+        open_questions: Optional[list[str]] = list(raw_questions)
+    else:
+        open_questions = None
     return {
         "question": record["question"],
         "answer": record["answer"],
         "saved_at": saved_at if isinstance(saved_at, str) else None,
         "elapsed_ms": display["elapsed_ms"],
         "evidence": display["evidence"],
+        "open_questions": open_questions,
     }
 
 
@@ -568,7 +581,11 @@ class WebStore:
         run_id: str,
         status: str,
         display: Optional[dict] = None,
+        open_questions: Optional[list[str]] = None,
     ) -> None:
+        """doc 6.3 §8.3：open_questions 保存合并列表（新记录明确无问题为 []）；
+        旧记录缺字段为 None（未知），不从正文或当下账本重建。安全拒绝分支
+        写安全投影的列表（[]），不把被抑制的原问题写入历史。"""
         saved_at = self._now().isoformat()
         _store_put(
             self._store,
@@ -582,6 +599,7 @@ class WebStore:
                 "status": status,
                 "saved_at": saved_at,
                 "display": normalize_turn_display(display),
+                "open_questions": open_questions,
             },
         )
 

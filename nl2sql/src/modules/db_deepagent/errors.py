@@ -9,6 +9,28 @@
 from __future__ import annotations
 
 
+def persistence_error_types() -> tuple[type[BaseException], ...]:
+    """运行/收尾阶段的持久化后端故障类型（§14.3）。
+
+    doc 6.3 R4-01：来源装配/门控 I/O 的受控异常边界与 P0–P3 共用同一分类，
+    避免把 psycopg/PoolTimeout 故障吞成普通业务门控拒绝。延迟导入使本模块
+    保持零项目内依赖，可供 runner 与 final_answer 共同引用而不产生循环导入。
+    """
+    import psycopg
+    import psycopg_pool
+
+    return (psycopg.Error, psycopg_pool.PoolTimeout, PlatformSchemaError)
+
+
+def is_persistence_error(exc: BaseException) -> bool:
+    """是否为已识别的持久化后端故障（§14.3；R4-01 供来源装配 I/O 边界复用）。
+
+    确定性协议损坏（ValueError → SourceUnqualified）与未知运行错误均不属于
+    此类，分别按受控业务门控拒绝、runtime 规则收敛。
+    """
+    return isinstance(exc, persistence_error_types())
+
+
 class DbAgentError(Exception):
     """db_deepagent 模块异常基类"""
 

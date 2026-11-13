@@ -129,20 +129,64 @@ class TestColumnValues:
 
 
 class TestMaintenance:
-    def test_delete(self, store, db_agent_context):
+    """doc 6.3 §6.5：删除入口收口——须持有效 SessionGuardLease。"""
+
+    @staticmethod
+    def _lease_for(db_agent_context):
+        from src.modules.db_deepagent.persistence.session_guard import (
+            validate_lease,
+        )
+
+        return validate_lease(
+            db_agent_context.session_guard_lease, db_agent_context.session_id
+        )
+
+    def test_delete_without_lease_rejected(self, store, db_agent_context):
         meta = _save(store, db_agent_context, [(1, Decimal("1"), date(2026, 9, 1))])
-        store.delete(meta.result_ref, session_id=db_agent_context.session_id)
+        with pytest.raises(Exception):
+            store.delete(meta.result_ref, session_id=db_agent_context.session_id)
+        # 有凭据可删
+        store.delete(
+            meta.result_ref,
+            session_id=db_agent_context.session_id,
+            lease=self._lease_for(db_agent_context),
+        )
         with pytest.raises(ResultStoreError):
             store.load_meta(meta.result_ref, session_id=db_agent_context.session_id)
 
-    def test_purge_expired(self, store, db_agent_context, tmp_path):
+    def test_delete_wrong_session_lease_rejected(self, store, db_agent_context):
+        from src.modules.db_deepagent.persistence.session_guard import (
+            SessionGuardLease,
+            validate_lease,
+        )
+
+        meta = _save(store, db_agent_context, [(1, Decimal("1"), date(2026, 9, 1))])
+        other = SessionGuardLease(session_id="s-other", backend="memory", token=999999)
+        with pytest.raises(Exception):
+            store.delete(
+                meta.result_ref,
+                session_id=db_agent_context.session_id,
+                lease=other,
+            )
+
+    def test_purge_expired_requires_lease_and_session(
+        self, store, db_agent_context, tmp_path
+    ):
         meta = _save(store, db_agent_context, [(1, Decimal("1"), date(2026, 9, 1))])
         meta_path = tmp_path / "results" / meta.result_ref / "meta.json"
         data = json.loads(meta_path.read_text(encoding="utf-8"))
         data["created_at"] = "2020-01-01T00:00:00+08:00"
         meta_path.write_text(json.dumps(data), encoding="utf-8")
+        # 无 lease/session_ids：不删除任何目录（无全局绕过入口）
+        assert (
+            store.purge_expired(retention_days=7, now=datetime(2026, 10, 13, 12, 0))
+            == 0
+        )
         removed = store.purge_expired(
-            retention_days=7, now=datetime(2026, 10, 13, 12, 0)
+            retention_days=7,
+            now=datetime(2026, 10, 13, 12, 0),
+            lease=self._lease_for(db_agent_context),
+            session_ids=[db_agent_context.session_id],
         )
         assert removed == 1
 

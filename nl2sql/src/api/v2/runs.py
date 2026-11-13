@@ -433,6 +433,9 @@ def _make_finalize_hook(
                     answer=safe_answer,
                     run_id=run_id or "",
                     status=turn_status,
+                    # doc 6.3 §8.3：安全拒绝分支写安全投影的空列表，不把
+                    # 被抑制的原问题单独写入历史
+                    open_questions=[],
                 )
                 rec2 = webstore.read_turn(session_id, request_id)
                 holder["history_saved"] = _readback_state(rec2, request_id)
@@ -465,6 +468,9 @@ def _make_finalize_hook(
                 run_id=run_id or "",
                 status=result.status,
                 display=display_from_result(result),
+                # doc 6.3 §8.3：最终安全投影后的同一合并列表；明确无问题
+                # 为 []，旧记录缺失为 None，不从正文或当下账本重建
+                open_questions=list(result.open_questions or []),
             )
             rec2 = webstore.read_turn(session_id, request_id)
             saved = _readback_state(rec2, request_id)
@@ -879,6 +885,7 @@ def run_agent_query(
             store=persistence.store,
         )
         archive = QaArchive(persistence.store)
+        services.store = persistence.store  # doc 6.3 §6.4：沿用来源快照读取
         # 通用 sessions 绑定核对（doc 2 §4.4：新查询另须核对通用记录）
         generic = archive.get_session(session_id)
         if generic is None:

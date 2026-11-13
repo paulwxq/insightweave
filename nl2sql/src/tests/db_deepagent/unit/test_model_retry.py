@@ -47,6 +47,55 @@ def _status_error(code: int) -> Exception:
     )
 
 
+def _register_add_call():
+    return AIMessage(
+        content="",
+        tool_calls=[
+            {
+                "name": "record_sub_tasks",
+                "args": {
+                    "expected_plan_version": 0,
+                    "operations": [
+                        {
+                            "op": "add",
+                            "sub_task_id": "T1",
+                            "content": "查询订单",
+                            "dependencies": [],
+                        }
+                    ],
+                },
+                "id": "tc-reg1",
+                "type": "tool_call",
+            }
+        ],
+    )
+
+
+def _register_failed_call():
+    return AIMessage(
+        content="",
+        tool_calls=[
+            {
+                "name": "record_sub_tasks",
+                "args": {
+                    "expected_plan_version": 1,
+                    "operations": [
+                        {
+                            "op": "status",
+                            "sub_task_id": "T1",
+                            "status": "failed",
+                            "reason_code": "agent_abandoned",
+                            "reason": "脚本无法推进",
+                        }
+                    ],
+                },
+                "id": "tc-reg2",
+                "type": "tool_call",
+            }
+        ],
+    )
+
+
 class TestWhitelist:
     @pytest.mark.parametrize("code", [408, 409, 429, 500, 502, 503, 504], ids=str)
     def test_retryable_status_codes(self, code):
@@ -376,12 +425,16 @@ class TestAssemblyRetry:
                         "metric_definitions": [],
                         "limitations": [],
                         "open_questions": [],
+                        "unresolved_task_refs": [{"sub_task_id": "T1", "revision": 1}],
                     },
                     "id": "tc-sub",
                     "type": "tool_call",
                 }
             ],
         )
+
+    _register_add_call = staticmethod(_register_add_call)
+    _register_failed_call = staticmethod(_register_failed_call)
 
     def test_same_step_retry_recovers_within_agent(
         self, assembly_services, monkeypatch
@@ -404,6 +457,8 @@ class TestAssemblyRetry:
             monkeypatch,
             [
                 APIConnectionError(request=httpx.Request("POST", "http://x")),
+                self._register_add_call(),
+                self._register_failed_call(),
                 self._submit_call(),
             ],
         )
@@ -451,13 +506,13 @@ class TestAssemblyRetry:
         )
         answers = (state.values or {}).get("db_final_answers") or {}
         assert run_id in answers, "重试后模型在同一步完成有效提交"
-        assert model.attempts == 2  # 首次失败 + 同一步重试成功
+        assert model.attempts == 4  # 首步失败+同一步重试成功，再加登记×2+提交
         counters = budget.counters(run_id)
-        # 预算按模型步骤计：模型实际调用 2 次（attempts==2，首次失败+同一步
-        # 重试成功），但 model_call 仅预占 1 次——提交后 FinalAnswerGate 在
-        # 下一模型步骤预占前即结束运行，重试不新增步骤额度。
-        assert counters.get("model_call", 0) == 1
-        assert counters.get("tool_call", 0) == 1
+        # 预算按模型步骤计：实际尝试 4 次（1 次失败重试 + 登记两步 + 提交），
+        # model_call 只按步骤计 3 次；提交后 FinalAnswerGate 在下一模型步骤
+        # 预占前即结束运行，重试不新增步骤额度。
+        assert counters.get("model_call", 0) == 3
+        assert counters.get("tool_call", 0) == 3
 
     def test_disabled_no_retry_raises(self, assembly_services, monkeypatch):
         """关闭重试：同一失败原样抛出（不装配项目层包装器）。"""
@@ -783,6 +838,7 @@ class TestSummaryReentryCombo:
                         "metric_definitions": [],
                         "limitations": [],
                         "open_questions": [],
+                        "unresolved_task_refs": [{"sub_task_id": "T1", "revision": 1}],
                     },
                     "id": "tc-sub",
                     "type": "tool_call",
@@ -792,14 +848,21 @@ class TestSummaryReentryCombo:
         handle, services, model = self._build(
             assembly_services,
             monkeypatch,
-            [conn, self._ctx_err(), submit],
+            [
+                conn,
+                self._ctx_err(),
+                _register_add_call(),
+                _register_failed_call(),
+                submit,
+            ],
         )
         ctx = self._mk_ctx("run_combo_ok", services)
         self._invoke(handle, ctx)
         state = handle.agent.get_state({"configurable": {"thread_id": ctx.thread_id}})
         assert ctx.run_id in (state.values.get("db_final_answers") or {})
-        assert model.attempts == 3  # 1(429) + 1(超限) + 1(恢复后提交)
-        assert services.budget.counters(ctx.run_id).get("model_call") == 1
+        # 1(429) + 1(超限) + 恢复后登记×2 + 提交；恢复与重试共享同一逻辑步骤
+        assert model.attempts == 5
+        assert services.budget.counters(ctx.run_id).get("model_call") == 3
 
     def test_six_http_with_real_sdk_mocktransport(self, assembly_services, monkeypatch):
         """真实 OpenAI SDK + MockTransport：主模型 HTTP 次数与额度一致（≤3）。
@@ -1129,22 +1192,94 @@ class TestRetryNoSqlReexecution:
                     raise item
                 return ChatResult(generations=[ChatGeneration(message=item)])
 
+        import hashlib as _hashlib
+
+        from src.tests.db_deepagent.conftest import FakeExecDb
+
         cfg = assembly_services.config.model_copy(deep=True)
         cfg.workspace.root = str(tmp_path)
+        # 空结果库：no_data 需全部主成果为未截断零行（doc 6.3 §7.4）
+        zero_db = FakeExecDb(rows=[])
+        zero_db.datasource_id = assembly_services.business_db.datasource_id
         services = type(assembly_services)(
-            **{**assembly_services.__dict__, "config": cfg}
+            **{
+                **assembly_services.__dict__,
+                "config": cfg,
+                "business_db": zero_db,
+                "pipeline": type(assembly_services.pipeline)(
+                    config=cfg,
+                    validator=type(assembly_services.validator)(
+                        cfg.validation,
+                        zero_db,
+                        explain_timeout_s=cfg.business_db.explain_timeout_seconds,
+                    ),
+                    guard=type(assembly_services.guard)(
+                        cfg.validation.guard, zero_db, assembly_services.probe
+                    ),
+                    db=zero_db,
+                    results=assembly_services.results,
+                    budget=assembly_services.budget,
+                ),
+            }
         )
+        # doc 6.3 §11 五步最短脚本：登记→校验→执行→终态→提交
+        evidence_id = "E-" + _hashlib.sha256(b"tc-exe:query").hexdigest()[:8]
         model = ScriptedFlowModel(
             responses=[
-                self._tool_call("validate_sql", {"sql": self.SQL}, "tc-val"),
-                self._tool_call("execute_sql", {"sql": self.SQL}, "tc-exe"),
+                self._tool_call(
+                    "record_sub_tasks",
+                    {
+                        "expected_plan_version": 0,
+                        "operations": [
+                            {
+                                "op": "add",
+                                "sub_task_id": "T1",
+                                "content": "查询订单",
+                                "dependencies": [],
+                            }
+                        ],
+                    },
+                    "tc-reg",
+                ),
+                self._tool_call(
+                    "validate_sql",
+                    {"sql": self.SQL, "sub_task_id": "T1", "sub_task_revision": 1},
+                    "tc-val",
+                ),
+                self._tool_call(
+                    "execute_sql",
+                    {"sql": self.SQL, "sub_task_id": "T1", "sub_task_revision": 1},
+                    "tc-exe",
+                ),
+                self._tool_call(
+                    "record_sub_tasks",
+                    {
+                        "expected_plan_version": 1,
+                        "operations": [
+                            {
+                                "op": "status",
+                                "sub_task_id": "T1",
+                                "status": "completed",
+                                "evidence_ids": [evidence_id],
+                            }
+                        ],
+                    },
+                    "tc-fin",
+                ),
                 APIConnectionError(request=httpx.Request("POST", "http://x")),
                 self._tool_call(
                     "submit_final_answer",
                     {
                         "status": "no_data",
                         "answer": "查询完成：没有符合条件的记录。",
-                        "findings": [],
+                        "findings": [
+                            {
+                                "text": "查询无记录",
+                                "finding_id": "F-1",
+                                "task_refs": [{"sub_task_id": "T1", "revision": 1}],
+                                "evidence_ids": [evidence_id],
+                            }
+                        ],
                         "metric_definitions": [],
                         "limitations": [],
                         "open_questions": [],
@@ -1169,12 +1304,12 @@ class TestRetryNoSqlReexecution:
         assert business_db.executed[0][0] == self.SQL
         assert len(result.evidence) == 1, "执行证据不得因重试重复"
         assert result.status == "no_data"
-        assert result.answer == "查询完成：没有符合条件的记录。"
-        # K1：主模型实际尝试 4 次（3 个工具步骤 + 1 次失败重试）
-        assert model.attempts == 4
-        # K2：两种计数口径——预算按模型步骤计 3，观察器按实际尝试计 4
-        assert result.stats.model_calls == 3
-        assert result.stats.total_model_calls == 4
+        assert result.answer.startswith("查询完成：没有符合条件的记录。")
+        # K1：五步脚本 + 1 次失败重试 = 6 次实际尝试（doc 6.3 §11）
+        assert model.attempts == 6
+        # K2：两种计数口径——预算按模型步骤计 5，观察器按实际尝试计 6
+        assert result.stats.model_calls == 5
+        assert result.stats.total_model_calls == 6
         assert result.stats.summary_model_calls == 0
         # 归档：真实执行按条件 a 进 qa，来源为模型提交
         qa = [v for k, v in store.items.items() if k[0][1] == "qa"]

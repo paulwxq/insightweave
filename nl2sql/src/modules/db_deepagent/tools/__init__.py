@@ -1,7 +1,8 @@
-"""业务工具装配（docs/v4/5 §7.1）
+"""业务工具装配（docs/v4/5 §7.1；doc 6.3 §10）
 
 build_business_tools(services) 用闭包注入服务：步骤 2 检索三件套、
-步骤 3 校验执行五件套、步骤 5 结果两件套，共 10 件业务工具。
+步骤 3 校验执行五件套、步骤 5 结果两件套、doc 6.3 任务登记一件，
+共 11 件业务工具。
 """
 
 from __future__ import annotations
@@ -27,10 +28,11 @@ from src.modules.db_deepagent.tools.sql_tools import (
     make_execute_sql_tool,
     make_validate_sql_tool,
 )
+from src.modules.db_deepagent.tools.task_tools import make_record_sub_tasks_tool
 
 
 def build_business_tools(services: DbAgentServices) -> list[BaseTool]:
-    """构造检索 + 校验执行闭环工具集（§7.2–§7.8、§7.12）。"""
+    """构造检索 + 校验执行闭环工具集（§7.2–§7.8、§7.12；doc 6.3 §5）。"""
     return [
         # 检索（步骤 2）
         make_search_schema_tool(services),
@@ -46,6 +48,8 @@ def build_business_tools(services: DbAgentServices) -> list[BaseTool]:
         # 结果读取与分析（步骤 5）
         make_read_result_tool(services),
         make_analyze_result_tool(services),
+        # 业务任务登记（doc 6.3）
+        make_record_sub_tasks_tool(services),
     ]
 
 

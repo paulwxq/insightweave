@@ -29,13 +29,24 @@ QUERY_SQL = (
 
 
 def ledger_with(ev=None, validations=None) -> LedgerView:
+    from src.tests.db_deepagent.conftest import make_task_record, make_task_state
+
+    task = make_task_record("run-test", "T1", 1, status="pending", content="查询订单")
     return LedgerView(
         {
             "db_time_evidence": ev if ev is not None else [SEP],
             "db_dim_evidence": [],
             "db_validations": validations or {},
+            **make_task_state([task]),
         }
     )
+
+
+def _task_state() -> dict:
+    from src.tests.db_deepagent.conftest import make_task_record, make_task_state
+
+    task = make_task_record("run-test", "T1", 1, status="pending", content="查询订单")
+    return make_task_state([task])
 
 
 class TestValidate:
@@ -44,7 +55,12 @@ class TestValidate:
     ):
         pipeline, *_ = pipeline_stack
         outcome, record, update = pipeline.validate(
-            QUERY_SQL, db_agent_context, ledger_with(), tool_call_id="tc1"
+            QUERY_SQL,
+            db_agent_context,
+            ledger_with(),
+            tool_call_id="tc1",
+            sub_task_id="T1",
+            sub_task_revision=1,
         )
         assert outcome.valid, outcome.errors
         assert record is not None
@@ -59,7 +75,11 @@ class TestValidate:
         """时间字面量无证据 → guard 失败，无授权记录。"""
         pipeline, *_ = pipeline_stack
         outcome, record, update = pipeline.validate(
-            QUERY_SQL, db_agent_context, LedgerView({"db_time_evidence": []})
+            QUERY_SQL,
+            db_agent_context,
+            ledger_with(ev=[]),
+            sub_task_id="T1",
+            sub_task_revision=1,
         )
         assert not outcome.valid
         assert outcome.layer == "guard"
@@ -70,12 +90,20 @@ class TestValidate:
     ):
         """同键已有 valid 记录，证据消失后再次校验失败 → 撤销原记录。"""
         pipeline, *_ = pipeline_stack
-        _, record, _ = pipeline.validate(QUERY_SQL, db_agent_context, ledger_with())
+        _, record, _ = pipeline.validate(
+            QUERY_SQL,
+            db_agent_context,
+            ledger_with(),
+            sub_task_id="T1",
+            sub_task_revision=1,
+        )
         assert record is not None
         outcome, record2, update = pipeline.validate(
             QUERY_SQL,
             db_agent_context,
             ledger_with(validations={record["key"]: record}, ev=[]),
+            sub_task_id="T1",
+            sub_task_revision=1,
         )
         assert not outcome.valid
         assert record2 is None
@@ -84,32 +112,58 @@ class TestValidate:
     def test_duplicate_output_columns(self, pipeline_stack, db_agent_context):
         pipeline, *_ = pipeline_stack
         sql = "SELECT id, id FROM public.orders WHERE created_at >= '2026-09-01' AND created_at < '2026-10-01'"
-        outcome, *_ = pipeline.validate(sql, db_agent_context, ledger_with())
+        outcome, *_ = pipeline.validate(
+            sql,
+            db_agent_context,
+            ledger_with(),
+            sub_task_id="T1",
+            sub_task_revision=1,
+        )
         assert not outcome.valid
         assert "duplicate_column_names" in (outcome.error_codes or [])
 
     def test_empty_sql(self, pipeline_stack, db_agent_context):
         pipeline, *_ = pipeline_stack
-        outcome, record, _ = pipeline.validate("  ", db_agent_context, ledger_with())
+        outcome, record, _ = pipeline.validate(
+            "  ",
+            db_agent_context,
+            ledger_with(),
+            sub_task_id="T1",
+            sub_task_revision=1,
+        )
         assert not outcome.valid and record is None
 
 
 class TestExecute:
     def test_not_validated(self, pipeline_stack, db_agent_context):
         pipeline, *_ = pipeline_stack
-        outcome, _ = pipeline.execute(QUERY_SQL, db_agent_context, ledger_with())
+        outcome, _ = pipeline.execute(
+            QUERY_SQL,
+            db_agent_context,
+            ledger_with(),
+            sub_task_id="T1",
+            sub_task_revision=1,
+        )
         assert not outcome.ok
         assert outcome.error_type == "not_validated"
 
     def test_execute_after_validate(self, pipeline_stack, db_agent_context):
         """授权记录来自账本；结果落盘并登记执行记录。"""
         pipeline, db, results, *_ = pipeline_stack
-        _, record, _ = pipeline.validate(QUERY_SQL, db_agent_context, ledger_with())
+        _, record, _ = pipeline.validate(
+            QUERY_SQL,
+            db_agent_context,
+            ledger_with(),
+            sub_task_id="T1",
+            sub_task_revision=1,
+        )
         outcome, update = pipeline.execute(
             QUERY_SQL,
             db_agent_context,
             ledger_with(validations={record["key"]: record}),
             tool_call_id="tc2",
+            sub_task_id="T1",
+            sub_task_revision=1,
         )
         assert outcome.ok, outcome.error_type
         meta = outcome.meta
@@ -130,12 +184,20 @@ class TestExecute:
     ):
         """内部空白变化即新文本（规范化后不同）→ 原授权不可用；首尾空白则等价。"""
         pipeline, *_ = pipeline_stack
-        _, record, _ = pipeline.validate(QUERY_SQL, db_agent_context, ledger_with())
+        _, record, _ = pipeline.validate(
+            QUERY_SQL,
+            db_agent_context,
+            ledger_with(),
+            sub_task_id="T1",
+            sub_task_revision=1,
+        )
         changed = QUERY_SQL.replace("WHERE", " WHERE")
         outcome, _ = pipeline.execute(
             changed,
             db_agent_context,
             ledger_with(validations={record["key"]: record}),
+            sub_task_id="T1",
+            sub_task_revision=1,
         )
         assert outcome.error_type == "not_validated"
 
@@ -150,9 +212,20 @@ class TestExecute:
             BudgetLimits(model_call=10, tool_call=10, db_execute=0),
             deadline_monotonic=_time.monotonic() + 600,
         )
-        _, record, _ = pipeline.validate(QUERY_SQL, db_agent_context, ledger_with())
+        _, record, _ = pipeline.validate(
+            QUERY_SQL,
+            db_agent_context,
+            ledger_with(),
+            sub_task_id="T1",
+            sub_task_revision=1,
+        )
         outcome, _ = pipeline.execute(
-            QUERY_SQL, db_agent_context, ledger_with(), trusted_record=record
+            QUERY_SQL,
+            db_agent_context,
+            ledger_with(),
+            trusted_record=record,
+            sub_task_id="T1",
+            sub_task_revision=1,
         )
         assert not outcome.ok
         assert outcome.error_type == "budget_exhausted"
@@ -190,6 +263,8 @@ class TestValidateAndExecute:
             ledger_with(),
             purpose="pushdown",
             source_metas=[{"guard_evidence": None}],
+            sub_task_id="T1",
+            sub_task_revision=1,
         )
         assert not outcome.valid
         assert "pushdown_evidence_missing" in outcome.error_codes
@@ -278,7 +353,13 @@ class TestScopedTableIdentity:
             "SELECT id, status, amount FROM PUBLIC.orders "
             "WHERE created_at >= '2026-09-01' AND created_at < '2026-10-01'"
         )
-        outcome, record, _ = pipeline.validate(sql, db_agent_context, ledger_with())
+        outcome, record, _ = pipeline.validate(
+            sql,
+            db_agent_context,
+            ledger_with(),
+            sub_task_id="T1",
+            sub_task_revision=1,
+        )
         assert outcome.valid, outcome.errors
         assert record is not None
         assert db.explained  # EXPLAIN 语义层确实发生
@@ -302,9 +383,12 @@ class TestScopedTableIdentity:
                     make_dim_evidence("sales.orders", "status", ["已支付"])
                 ],
                 "db_validations": {},
+                **_task_state(),
             }
         )
-        outcome, record, _ = pipeline.validate(sql, db_agent_context, ledger)
+        outcome, record, _ = pipeline.validate(
+            sql, db_agent_context, ledger, sub_task_id="T1", sub_task_revision=1
+        )
         assert outcome.valid, outcome.errors
         assert record is not None
 
@@ -330,9 +414,12 @@ class TestScopedTableIdentity:
                     make_dim_evidence("public.orders", "status", ["已支付"])
                 ],
                 "db_validations": {},
+                **_task_state(),
             }
         )
-        outcome, record, _ = pipeline.validate(sql, db_agent_context, ledger)
+        outcome, record, _ = pipeline.validate(
+            sql, db_agent_context, ledger, sub_task_id="T1", sub_task_revision=1
+        )
         assert outcome.valid, outcome.errors
         assert record is not None
 
@@ -357,8 +444,11 @@ class TestScopedTableIdentity:
                     make_dim_evidence("public.orders", "status", ["已支付"])
                 ],
                 "db_validations": {},
+                **_task_state(),
             }
         )
-        outcome, record, _ = pipeline.validate(sql, db_agent_context, ledger)
+        outcome, record, _ = pipeline.validate(
+            sql, db_agent_context, ledger, sub_task_id="T1", sub_task_revision=1
+        )
         assert outcome.valid, outcome.errors
         assert record is not None

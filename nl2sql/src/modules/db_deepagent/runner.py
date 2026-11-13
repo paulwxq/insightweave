@@ -23,6 +23,7 @@ from src.modules.db_deepagent.config import (
     compute_validation_fingerprint,
 )
 from src.modules.db_deepagent.context import DbAgentContext
+from src.modules.db_deepagent.errors import is_persistence_error
 from src.modules.db_deepagent.middleware.model_observer import (
     ModelCallObserver,
     ModelObservationSnapshot,
@@ -30,6 +31,7 @@ from src.modules.db_deepagent.middleware.model_observer import (
 from src.modules.db_deepagent.persistence.archive import (
     ARCHIVE_SCHEMA_VERSION,
     QaArchive,
+    RUN_SNAPSHOT_SCHEMA_VERSION,
 )
 from src.modules.db_deepagent.schemas import (
     DbAgentResult,
@@ -40,9 +42,33 @@ from src.modules.db_deepagent.schemas import (
     extract_raw_final_answer_payload,
     normalize_final_answer_record,
 )
+from src.modules.db_deepagent.services.result_facts import (
+    aggregate_known_saved_row_counts,
+    aggregate_proven_untruncated,
+)
 from src.modules.db_deepagent.services.run_budget import (
     BudgetSnapshot,
     limits_from_config,
+)
+from src.modules.db_deepagent.services.sql_pipeline import (
+    LedgerView,
+    TaskAccessError,
+)
+from src.modules.db_deepagent.services.task_completion import (
+    TASK_COMPLETION_RULES_VERSION,
+    CompletionDecision,
+    CompletionSnapshot,
+    GateError,
+    evaluate_submission,
+    merge_delivery_open_questions,
+)
+from src.modules.db_deepagent.services.task_ledger import (
+    SUB_TASK_ID_PATTERN,
+    current_task_view,
+)
+from src.modules.db_deepagent.services.reuse_qualification import (
+    TASK_LEDGER_PROTOCOL_VERSION,
+    SourceUnqualified,
 )
 from src.utils.logger import get_module_logger
 
@@ -54,15 +80,6 @@ _BUDGET_STOP_REASONS = (
     "execute_limit",
     "run_timeout",
 )
-
-
-def _persistence_error_types() -> tuple[type[BaseException], ...]:
-    import psycopg
-    import psycopg_pool
-
-    from src.modules.db_deepagent.errors import PlatformSchemaError
-
-    return (psycopg.Error, psycopg_pool.PoolTimeout, PlatformSchemaError)
 
 
 def _mark_primary(failures: _RunFailures, status: str) -> list[RunFailureRecord]:
@@ -83,6 +100,7 @@ def _mark_primary(failures: _RunFailures, status: str) -> list[RunFailureRecord]
             "result_encoding_error",
             "runtime",
             "tool_set_mismatch",
+            "task_completion_rejected",
             "no_final_answer",
         ),
         "budget_exhausted": ("budget_exhausted",),
@@ -96,10 +114,6 @@ def _mark_primary(failures: _RunFailures, status: str) -> list[RunFailureRecord]
                     record.primary = True
                     return records
     return records
-
-
-def is_persistence_error(exc: BaseException) -> bool:
-    return isinstance(exc, _persistence_error_types())
 
 
 @dataclass
@@ -170,12 +184,14 @@ class DbAgentRunner:
                 f"request_id 非法（允许 [A-Za-z0-9_-]，长度 1–64）: {request_id!r}"
             )
         # 会话级互斥（doc 7 §2.3）：P0 读取前取锁，P3 完成后外层 finally 释放；
-        # memory 持久化模式无 PG，跳过互斥。取锁失败：不写任何元数据（防覆盖
-        # 运行中进程指针），仅返回失败结果与 P4 本地记录。
+        # memory 持久化模式使用进程内会话 guard（doc 6.3 §6.5）。取锁失败：
+        # 不写任何元数据（防覆盖运行中进程指针），仅返回失败结果与 P4 本地记录。
         # session_lock（Web 执行链锁交接，doc 2 §4.4）：外层已持有同一会话
         # 锁并负责释放；沿用可消除“释放-重取”间隙内他请求把在途 pending
         # 误判为遗留而失效会话。非本层获取的锁不在本层释放。
         lock = None
+        guard_lease = None
+        memory_lease = None
         if session_lock is not None:
             lock = session_lock
         elif self._lock_conninfo is not None:
@@ -225,6 +241,46 @@ class DbAgentRunner:
                     rotated=False,
                     question=question,
                 )
+        else:
+            # memory 模式（doc 6.3 §6.5）：进程内会话 guard，Runner 与清理共用
+            from src.modules.db_deepagent.persistence.session_guard import (
+                acquire_memory_lease,
+            )
+
+            memory_lease = acquire_memory_lease(session_id)
+            if memory_lease is None:
+                run_id = "run_" + uuid.uuid4().hex
+                failures = _RunFailures()
+                failures.add(
+                    "session_busy",
+                    "P0",
+                    "会话正在本进程另一运行/清理中（memory guard）",
+                )
+                return self._finalize(
+                    time.monotonic(),
+                    request_id,
+                    run_id,
+                    session_id,
+                    None,
+                    failures,
+                    BudgetSnapshot(),
+                    ModelObservationSnapshot.not_started(request_id, run_id),
+                    values=None,
+                    evidence=[],
+                    warnings=[],
+                    archived=False,
+                    rotated=False,
+                    question=question,
+                )
+        # doc 6.3 §6.5：由已持有的锁构造运行凭据（工具消费同一凭据，不重复取锁）
+        if lock is not None:
+            from src.modules.db_deepagent.persistence.session_guard import (
+                lease_from_advisory_lock,
+            )
+
+            guard_lease = lease_from_advisory_lock(lock, session_id)
+        else:
+            guard_lease = memory_lease
         try:
             return self._run_locked(
                 question,
@@ -234,10 +290,17 @@ class DbAgentRunner:
                 lock,
                 force_rotate,
                 source_id,
+                guard_lease=guard_lease,
             )
         finally:
             if lock is not None and session_lock is None:
                 lock.release()
+            if memory_lease is not None:
+                from src.modules.db_deepagent.persistence.session_guard import (
+                    release_memory_lease,
+                )
+
+                release_memory_lease(memory_lease)
 
     def _run_locked(
         self,
@@ -248,6 +311,7 @@ class DbAgentRunner:
         lock,
         force_rotate: bool = False,
         source_id: str | None = None,
+        guard_lease: object | None = None,
     ) -> DbAgentResult:
         started = time.monotonic()
         request_id = request_id or "req_" + uuid.uuid4().hex[:12]
@@ -311,7 +375,7 @@ class DbAgentRunner:
                     new_seq += 1
                     new_thread = _thread_id_of(session_id, new_seq)
                 carried, handoff_message = self._handoff(
-                    old_values, carried, new_thread
+                    old_values, carried, new_thread, session_id
                 )
                 thread_id_resolved = new_thread
                 thread_seq = new_seq
@@ -370,6 +434,7 @@ class DbAgentRunner:
             user_texts=user_texts,
             carried_evidence=carried,
             deadline_monotonic=time.monotonic() + self._cfg.budget.run_timeout_seconds,
+            session_guard_lease=guard_lease,
         )
 
         # ---------------------------------------------------------------- P1
@@ -541,10 +606,24 @@ class DbAgentRunner:
         old_values: dict[str, Any] | None,
         prev_carried: tuple[Any, ...],
         new_thread: str,
+        session_id: str = "",
     ) -> tuple[tuple[Any, ...], HumanMessage]:
         """§13.4：结构化携带证据 + 交接消息（不回查更早线程）。"""
+
+        def _load_meta(result_ref: str | None, _run_id: str | None):
+            if not result_ref or self._services.results is None or not session_id:
+                return None
+            try:
+                return self._services.results.load_meta(
+                    result_ref, session_id=session_id
+                )
+            except Exception:  # noqa: BLE001（来源补齐失败不阻塞轮换）
+                return None
+
         summary_text = read_summary_for_handoff(old_values or {})
-        carried = _collect_carried(old_values or {}, prev_carried, self._cfg)
+        carried = _collect_carried(
+            old_values or {}, prev_carried, self._cfg, meta_loader=_load_meta
+        )
         parts = ["【会话交接】"]
         if summary_text:
             parts.append(f"上一线程摘要：\n{summary_text}")
@@ -582,7 +661,8 @@ class DbAgentRunner:
         source_binding: str | None = None,
         invoke_started: bool = False,
     ) -> DbAgentResult:
-        # 行数映射一次计算，证据投影与兜底模板复用同一份（doc 6.2 §7.2.2）。
+        # 行数映射一次计算，证据投影与兜底模板复用同一份（doc 6.2 §7.2.2；
+        # doc 6.3 §7.4：与任务门控共用 result_facts 同一映射）。
         known_counts = self._known_saved_row_counts(values, run_id)
         evidence = evidence or (
             self._assemble_evidence(values, run_id, known_row_counts=known_counts)
@@ -601,18 +681,100 @@ class DbAgentRunner:
         normalized_submission = normalize_final_answer_record(
             answer_record, run_id=run_id, request_id=request_id
         )
-        status, findings, answer, warnings = self._evaluate(
-            failures, budget_snapshot, values, normalized_submission, evidence, warnings
+        # doc 6.3 §7.1/§7.5：一次结构归一 + 一次语义判定；eligible_submission
+        # 贯穿评估、正文构建与归档条件 b。
+        # R4-01：最终来源装配/门控 I/O 的受控异常边界。来源快照读取位于
+        # P3 归档异常处理之前，若后端故障穿透将不返回 DbAgentResult、破坏
+        # 6.2 兜底。此处按既有异常分类收敛，不关闭 services.store、不跳过
+        # 必要的来源核验。
+        try:
+            decision = self._task_completion_decision(
+                values,
+                run_id,
+                normalized_submission,
+                known_counts,
+                session_id=session_id,
+                thread_id=thread_id,
+                carried=carried,
+            )
+        except SourceUnqualified as exc:
+            # 确定性协议损坏/坏来源：受控业务门控拒绝（R4-01 要求 5），
+            # 不记为 persistence/runtime，也不让异常穿透。
+            decision = CompletionDecision(
+                accepted=False,
+                expected_status=None,
+                errors=[
+                    GateError(
+                        "stale_task_inputs",
+                        f"最终来源资格核验失败：{exc.reason}",
+                    )
+                ],
+            )
+        except Exception as exc:  # noqa: BLE001
+            # 已识别持久化故障记 persistence（§8.1 最高优先级）；未知运行
+            # 错误按既有 runtime 规则收敛。二者都令提交无交付资格、继续
+            # 走 _evaluate 的系统兜底，保留已取得的 evidence。绝不吞成
+            # 普通 task_ledger_corrupt / task_completion_rejected。
+            kind = "persistence" if is_persistence_error(exc) else "runtime"
+            failures.add(
+                kind,
+                "P3",
+                f"最终来源装配/门控 I/O 失败：{type(exc).__name__}: {exc}",
+            )
+            decision = CompletionDecision(
+                accepted=False,
+                expected_status=None,
+                errors=[
+                    GateError(
+                        "task_completion_rejected",
+                        "来源装配不可用，提交无交付资格",
+                    )
+                ],
+            )
+        eligible_submission = (
+            normalized_submission
+            if normalized_submission is not None and decision.accepted
+            else None
+        )
+        status, findings, answer, delivery_questions, warnings = self._evaluate(
+            failures,
+            budget_snapshot,
+            values,
+            run_id,
+            decision,
+            eligible_submission,
+            evidence,
+            warnings,
+            has_submission=normalized_submission is not None,
         )
         submitted_payload = (
             normalized_submission if normalized_submission is not None else {}
         )
-
+        # 无资格提交的正文/findings/模型自报口径/补充问题均不进入交付
+        # （doc 6.3 §7.5）；合法提交为 model，前置拒绝为 none。
+        if eligible_submission is None:
+            findings = []
         answer_source = "model" if answer.strip() else "none"
-        if invoke_started and not answer.strip():
-            # _evaluate 已把无效正文视为未提交有效答案并完成状态判定；
-            # 尚未调用 Agent 的前置拒绝不走此分支（doc 6.2 §4.1/§7.3）。
+        # doc 6.3 §7.5 兜底谓词：Agent 已调用且没有可合法交付的正文（缺失、
+        # 空白、结构/归属无效或 decision.accepted=False 均在内）。
+        should_fallback = invoke_started and (
+            eligible_submission is None or not answer.strip()
+        )
+        if not should_fallback and eligible_submission is not None:
+            # R1-13：合法交付（model 来源）附加确定性分项段落；原始提交
+            # payload 按原值归档，交付正文实时/归档/历史/CLI 一致。
+            from src.modules.db_deepagent.services.task_completion import (
+                build_delivery_answer_section,
+            )
+
+            section = build_delivery_answer_section(decision)
+            if section:
+                answer = f"{answer}\n\n{section}"
+        if should_fallback:
             answer = self._build_fallback_answer(status, evidence, known_counts)
+            task_section = self._fallback_task_section(decision)
+            if task_section:
+                answer = answer + "\n" + task_section
             answer_source = "system_fallback"
             warnings.append("最终说明由服务端兜底生成，非模型最终提交。")
         errors = _mark_primary(failures, status)
@@ -620,15 +782,17 @@ class DbAgentRunner:
             warnings.append("模型用量统计不完整")
         # 对外交付 payload：不是 FinalAnswerRecord，也不是 DbAgentFinalAnswer；
         # 其 status 为当前（P3 前）Runner 评估状态。
+        # doc 6.3 §8.3：open_questions 为 §7.2 合并列表（权威在前、补充按原
+        # 提交序、strip 后精确去重），不是原提交列表的拷贝。
         delivery_payload = {
             "status": status,
             "answer": answer,
             "findings": [item.model_dump() for item in findings],
             "metric_definitions": list(
-                submitted_payload.get("metric_definitions") or []
+                (eligible_submission or {}).get("metric_definitions") or []
             ),
-            "limitations": list(submitted_payload.get("limitations") or []),
-            "open_questions": list(submitted_payload.get("open_questions") or []),
+            "limitations": list((eligible_submission or {}).get("limitations") or []),
+            "open_questions": delivery_questions,
         }
         stats = RunStats(
             elapsed_ms=int((time.monotonic() - started) * 1000),
@@ -660,6 +824,8 @@ class DbAgentRunner:
                     normalized_submission=normalized_submission,
                     delivery_payload=delivery_payload,
                     answer_source=answer_source,
+                    eligible_submission=eligible_submission,
+                    decision=decision,
                 )
             except Exception as exc:
                 if is_persistence_error(exc):
@@ -698,39 +864,162 @@ class DbAgentRunner:
         self._write_local_record(session_id, request_id, result, failures, rotated)
         return result
 
+    def _task_completion_decision(
+        self,
+        values: dict[str, Any] | None,
+        run_id: str,
+        normalized_submission: dict[str, Any] | None,
+        known_counts: dict[str, int | None],
+        *,
+        session_id: str = "",
+        thread_id: str | None = None,
+        carried: tuple[Any, ...] | None = None,
+    ) -> CompletionDecision:
+        """装配只读快照并执行共享业务规则（doc 6.3 §7.1）。
+
+        无账本可核验（values 缺失）时仍执行任务视图规则——空任务集合将
+        被拒绝；纯规则不读文件，来源缺失作为拒绝依据传入。
+        """
+        try:
+            tasks = current_task_view((values or {}).get("db_sub_tasks") or {}, run_id)
+        except Exception as exc:  # noqa: BLE001（账本损坏 → 门控拒绝）
+            decision = CompletionDecision(
+                accepted=False,
+                expected_status=None,
+                errors=[],
+                plan_version=0,
+            )
+            from src.modules.db_deepagent.services.task_completion import GateError
+
+            decision.errors.append(
+                GateError("task_ledger_corrupt", f"任务账本不可核验: {exc}")
+            )
+            return decision
+        try:
+            view = LedgerView(values or {})
+            plan_version = view.task_plan_version(run_id)
+            executions = view.executions_of_run(run_id)
+            analyses = view.analyses_of_run(run_id)
+        except TaskAccessError as exc:
+            decision = CompletionDecision(
+                accepted=False,
+                expected_status=None,
+                errors=[],
+                plan_version=0,
+            )
+            from src.modules.db_deepagent.services.task_completion import GateError
+
+            decision.errors.append(GateError(exc.error_type, exc.message))
+            return decision
+        # R1-02：沿用登记证据的来源资格核验（与提交工具共享同一规则）
+        from src.modules.db_deepagent.services.reuse_qualification import (
+            unqualified_reuse_evidence,
+        )
+
+        reuse_archive = self._archive if self._services_is_store_wired() else None
+        # R2-01：会话/线程身份由 _finalize 显式传入，不从 state 推断。
+        # 无显式传入（合成/旧测试）时仅从任务记录回退。
+        if not session_id:
+            session_id = next(
+                (r.get("session_id") for r in tasks.values() if r.get("session_id")),
+                "",
+            )
+        resolved_thread = thread_id or next(
+            (r.get("thread_id") for r in tasks.values() if r.get("thread_id")),
+            "",
+        )
+        reuse_failures = (
+            unqualified_reuse_evidence(
+                [*executions, *analyses],
+                session_id=session_id,
+                thread_id=resolved_thread or "",
+                run_id=run_id,
+                state=values or {},
+                archive=reuse_archive,
+                carried=carried or (),
+            )
+            if tasks
+            else {}
+        )
+        from src.modules.db_deepagent.services.task_completion import (
+            all_task_versions,
+        )
+
+        snapshot = CompletionSnapshot(
+            run_id=run_id,
+            tasks=tasks,
+            all_task_records=all_task_versions(values or {}),
+            executions=executions,
+            analyses=analyses,
+            errors=list((values or {}).get("db_tool_errors") or []),
+            known_counts=known_counts,
+            proven_untruncated=aggregate_proven_untruncated(values, run_id),
+            reuse_failures=reuse_failures,
+            plan_version=plan_version,
+        )
+        return evaluate_submission(normalized_submission, snapshot)
+
+    def _services_is_store_wired(self) -> bool:
+        """store 已注入（装配层）时启用快照读取的来源核验。"""
+        return getattr(self._services, "store", None) is not None
+
+    def _fallback_task_section(self, decision: CompletionDecision | None) -> str:
+        """兜底正文的确定性任务摘要（doc 6.3 §7.5；R1-14 分级）。
+
+        completed 声明只在门控校验走到状态映射（expected_status 已计算，
+        即成果/覆盖核验通过）后才作为"已完成"展示；此前（结构错误/门控
+        拒绝）只作"已登记完成（未核验）"。pending/in_progress 一律披露为
+        未完成事项。
+        """
+        if decision is None:
+            return ""
+        # R2-08：逐项核验结论，不能以 expected_status 存在与否代替——
+        # 无提交/预算停止/模型异常时，未核验的 completed 声明一律标注
+        # "未核验"，缺证据/坏来源/部分可信成果都不确认为成功。
+        lines: list[str] = []
+        for summary in decision.outcome_summaries:
+            if summary.status == "completed":
+                if summary.sub_task_id in decision.verified_completed_refs:
+                    lines.append(f"- 已完成：{summary.content}")
+                else:
+                    lines.append(f"- 已登记完成（未核验）：{summary.content}")
+            elif summary.status in ("pending", "in_progress"):
+                lines.append(f"- 未完成：{summary.content}（{summary.status}）")
+            elif summary.status == "failed":
+                reason = summary.reason or "未提供原因"
+                lines.append(f"- 未完成：{summary.content}（原因：{reason}）")
+            elif summary.status == "needs_clarification":
+                question = summary.clarification_question or "需要澄清"
+                lines.append(f"- 待澄清：{summary.content}（问题：{question}）")
+            elif summary.status == "voided":
+                reason = summary.reason or "计划调整"
+                lines.append(f"- 已作废：{summary.content}（原因：{reason}）")
+        for question in decision.authoritative_questions[:5]:
+            lines.append(f"- 需要澄清：{question}")
+        return "\n".join(lines) if lines else ""
+
     def _evaluate(
         self,
         failures: _RunFailures,
         budget_snapshot: BudgetSnapshot,
         values: dict[str, Any] | None,
-        normalized_submission: dict[str, Any] | None,
+        run_id: str,
+        decision: CompletionDecision,
+        eligible_submission: dict[str, Any] | None,
         evidence: list[EvidenceItem],
         warnings: list[str],
-    ) -> tuple[str, list[FindingItem], str, list[str]]:
-        """状态判定（优先级）与 findings 后备核对（§14.3；doc 6.2 §7.2.1）。
+        *,
+        has_submission: bool = False,
+    ) -> tuple[str, list[FindingItem], str, list[str], list[str]]:
+        """状态判定（§8.1 优先级）与业务状态合流（doc 6.3 §7.5）。
 
-        normalized_submission 只能来自本收尾入口对归一函数的一次调用；
-        无效（缺失、归属不符、结构非法、正文空白）时视为未提交有效最终
-        答案，与缺失记录同样走 no_final_answer → failed，不得保留 completed。
+        持久化 → 运行/工具集合 → 预算停止优先于有效提交的业务状态；结构
+        合法但 decision.accepted=False 的提交记 task_completion_rejected →
+        failed；未提交/结构无效仍是 no_final_answer（6.2 语义保留）；不先
+        丢弃一部分 ID 再把剩余答案当作通过。
         """
-        valid_submission = normalized_submission is not None
-        payload = normalized_submission if valid_submission else {}
+        payload = eligible_submission or {}
         findings = [FindingItem(**f) for f in payload.get("findings") or []]
-        valid_ids = {e.evidence_id for e in evidence}
-        if valid_submission:
-            kept: list[FindingItem] = []
-            for finding in findings:
-                remaining = [eid for eid in finding.evidence_ids if eid in valid_ids]
-                dropped = [eid for eid in finding.evidence_ids if eid not in valid_ids]
-                if dropped:
-                    warnings.append(
-                        f"finding 引用的证据不存在，已移除: {', '.join(dropped)}"
-                    )
-                if remaining:
-                    kept.append(FindingItem(text=finding.text, evidence_ids=remaining))
-                else:
-                    warnings.append(f"finding 无有效证据支持：{finding.text[:50]}")
-            findings = kept
         stop_reason = budget_snapshot.stop_reason
         if failures.has("persistence"):
             status = "persistence_error"
@@ -743,49 +1032,42 @@ class DbAgentRunner:
         elif stop_reason in _BUDGET_STOP_REASONS:
             failures.add("budget_exhausted", "P1", f"预算或时限停止：{stop_reason}")
             status = "budget_exhausted"
-        elif not valid_submission:
+        elif eligible_submission is not None and decision.accepted:
+            status = decision.expected_status or payload.get("status", "failed")
+        elif has_submission:
+            # 结构合法但被语义门控拒绝（doc 6.3 §7.5）
+            primary = decision.primary_error
+            failures.add(
+                "task_completion_rejected",
+                "P2",
+                (
+                    f"最终提交被任务门控拒绝（{primary.code}）：{primary.message}"
+                    if primary is not None
+                    else "最终提交被任务门控拒绝"
+                ),
+            )
+            status = "failed"
+        else:
             failures.add(
                 "no_final_answer",
                 "P2",
                 "未提交有效最终答案（缺失、归属不符、结构非法或正文空白）",
             )
             status = "failed"
-        else:
-            status = payload.get("status", "failed")
-            if status == "completed" and not evidence:
-                status = "failed"
-                warnings.append("模型报 completed 但本次无任何成功证据，判为 failed")
-        return status, findings, payload.get("answer", ""), warnings  # type: ignore[return-value]
+        # 交付问题列表（§7.2 固定算法）：权威问题 + 原提交补充（有资格时）
+        delivery_questions = merge_delivery_open_questions(
+            decision.authoritative_questions,
+            list(payload.get("open_questions") or []),
+        )
+        return status, findings, payload.get("answer", ""), delivery_questions, warnings
 
     @staticmethod
     def _known_saved_row_counts(
         values: dict[str, Any] | None,
         run_id: str,
     ) -> dict[str, int | None]:
-        """本轮原始账本的可靠行数映射（doc 6.2 §7.2.2）。
-
-        与 `_assemble_evidence` 同口径（executions 仅 query、analyses 全收、
-        按本轮 run_id）。字段缺失、None、布尔、负数和非法类型均表示未知
-        （None）；明确存在的整数 0 才表示确知零行；同 evidence_id 冲突记
-        录也降为未知。不读取 ResultStore。
-        """
-        counts: dict[str, int | None] = {}
-        for channel in ("db_executions", "db_analyses"):
-            for record in (values or {}).get(channel) or []:
-                if not isinstance(record, dict) or record.get("run_id") != run_id:
-                    continue
-                if channel == "db_executions" and record.get("purpose") != "query":
-                    continue
-                eid = record.get("evidence_id")
-                if not isinstance(eid, str):
-                    continue
-                raw = record.get("saved_row_count")
-                count = raw if type(raw) is int and raw >= 0 else None
-                if eid in counts and counts[eid] != count:
-                    counts[eid] = None  # 重复记录冲突也不能推定为可靠行数。
-                else:
-                    counts[eid] = count
-        return counts
+        """本轮原始账本的可靠行数映射（doc 6.2 §7.2.2；doc 6.3 §7.4 复用共享实现）。"""
+        return aggregate_known_saved_row_counts(values, run_id)
 
     @staticmethod
     def _build_fallback_answer(
@@ -880,7 +1162,16 @@ class DbAgentRunner:
                     source=record.get("datasource_id", ""),
                     sql=record.get("executed_sql"),
                     result_ref=record.get("output_result_ref"),
-                    input_result_refs=list(record.get("input_result_refs") or []),
+                    # doc 6.3 §8.3：私有结构化血缘只留在原始记录/快照，
+                    # 公开投影继续为 list[str]（从条目提取 ref）。
+                    input_result_refs=[
+                        entry
+                        for entry in (
+                            item.get("result_ref") if isinstance(item, dict) else item
+                            for item in (record.get("input_result_refs") or [])
+                        )
+                        if isinstance(entry, str) and entry
+                    ],
                     operation=dict(record.get("operation") or {}),
                     row_count=known_row_counts.get(record["evidence_id"]) or 0,
                     preview_truncated=False,
@@ -911,14 +1202,16 @@ class DbAgentRunner:
         normalized_submission: dict[str, Any] | None,
         delivery_payload: dict[str, Any],
         answer_source: str,
+        eligible_submission: dict[str, Any] | None = None,
+        decision: CompletionDecision | None = None,
     ) -> bool:
-        """§13.3 写入判定：条件 a（成功真实执行）或 b（被接受答案＋有效 E/A 沿用引用）。
+        """§13.3 写入判定：条件 a（成功真实执行）或 b（资格提交＋有效 E/A 沿用引用）。
 
-        doc 6.2 §7.4：资格判断与保存内容分离——条件 b 复用收尾入口已归一
-        的提交视图，原始 payload 只按原值保存（answer 键），不参与 `.get()`
-        或 findings 遍历；交付内容与来源另存 delivery_answer／answer_source
-        （归档契约 v2）。禁止把 delivery_payload 当作 answer_record 传回资格
-        判断：只有沿用结果且无有效提交的失败轮次仍进 run_errors。
+        doc 6.2 §7.4 + doc 6.3 §7.5：资格判断与保存内容分离——条件 b 复用
+        收尾入口的 eligible_submission（结构合法且 decision.accepted），原始
+        payload 只按原值保存（answer 键）；门控拒绝时条件 b 必为假，不能因
+        结构合法或原 payload 自报 completed 就通过。doc 6.3 §8.2：写
+        QA/run_errors 前先封存运行来源快照并保存 snapshot_ref。
         """
         # 条件 a 从本运行执行账本判断（§13.3：query 或 pushdown、非沿用）；
         # evidence 里的 sql_query 只含 purpose="query"，纯下推分析会被漏判
@@ -929,8 +1222,9 @@ class DbAgentRunner:
             for record in ((values or {}).get("db_executions") or [])
         )
         raw_submitted_payload = extract_raw_final_answer_payload(answer_record)
-        valid_submission = normalized_submission is not None
-        eligible_payload = normalized_submission if valid_submission else {}
+        eligible_payload = (
+            eligible_submission if eligible_submission is not None else {}
+        )
         reused_ids = {e.evidence_id for e in evidence if e.reused_from is not None}
         cited_reused = any(
             eid in reused_ids
@@ -938,10 +1232,27 @@ class DbAgentRunner:
             for eid in finding.get("evidence_ids") or []
         )
         condition_b = (
-            valid_submission
+            eligible_submission is not None
             and eligible_payload.get("status") in ("completed", "partial")
             and cited_reused
         )
+        # doc 6.3 §8.2：封存运行来源快照（写 QA/run_errors 前；失败轮次
+        # 同样封存以保留解释依据）。封存异常原样上抛，由 _finalize 的
+        # P3 分类处理（持久化/运行时）。
+        snapshot_ref = self._seal_run_snapshot(
+            session_id,
+            thread_id,
+            run_id,
+            request_id,
+            status,
+            values,
+            decision,
+        )
+        snapshot_field = {
+            "session_id": session_id,
+            "thread_id": thread_id,
+            "run_id": run_id,
+        }
         if has_real_execution or condition_b:
             self._archive.write_qa(
                 session_id,
@@ -957,6 +1268,7 @@ class DbAgentRunner:
                     "answer_source": answer_source,
                     "evidence": [e.model_dump() for e in evidence],
                     "stats": stats.model_dump(),
+                    "snapshot_ref": snapshot_field,
                 },
             )
         else:
@@ -973,11 +1285,113 @@ class DbAgentRunner:
                     "answer": raw_submitted_payload,
                     "delivery_answer": delivery_payload,
                     "answer_source": answer_source,
+                    "snapshot_ref": snapshot_field,
                 },
             )
         # sessions／threads 轨迹落库（doc 7 §2.1；与归档同批）
         self._write_thread_tracks(session_id, thread_id, carried, source_binding)
         return True
+
+    def _seal_run_snapshot(
+        self,
+        session_id: str,
+        thread_id: str | None,
+        run_id: str,
+        request_id: str,
+        run_status: str,
+        values: dict[str, Any] | None,
+        decision: CompletionDecision | None,
+    ) -> dict[str, Any]:
+        """doc 6.3 §8.2：装配并封存完整运行快照（不可变、幂等、冲突报错）。
+
+        保存：服务端 scope、plan_version、全部任务全部 revision、原始
+        executions/analyses（含结构化 input_result_refs、direct_reuse_from）、
+        任务关联 tool_errors、覆盖结果、门控结论与 interrupted_tasks。
+        """
+        tasks_raw = dict((values or {}).get("db_sub_tasks") or {})
+        # R1-02：只封存本 run 的任务（线程中其它 run 的任务留在原线程账本；
+        # 同线程两轮同名任务按完整 run 身份区分，互不串读）
+        run_tasks = [
+            dict(record)
+            for record in tasks_raw.values()
+            if isinstance(record, dict) and record.get("run_id") == run_id
+        ]
+        executions = [
+            dict(r)
+            for r in (values or {}).get("db_executions") or []
+            if r.get("run_id") == run_id
+        ]
+        analyses = [
+            dict(r)
+            for r in (values or {}).get("db_analyses") or []
+            if r.get("run_id") == run_id
+        ]
+        tool_errors = [
+            dict(r)
+            for r in (values or {}).get("db_tool_errors") or []
+            if r.get("run_id") == run_id
+        ]
+        # R2-12：current_task_view 要求**任务记录 mapping**（键为账本键），
+        # 不是 {"db_sub_tasks": ...} 包装；此前包装形状错误导致异常被吞、
+        # interrupted_tasks 恒为空。只传本 run 过滤后的任务 mapping。
+        try:
+            tasks_view = current_task_view(
+                {
+                    k: v
+                    for k, v in tasks_raw.items()
+                    if isinstance(v, dict) and v.get("run_id") == run_id
+                },
+                run_id,
+            )
+        except Exception:  # noqa: BLE001（真实损坏账本照实封存，读取时再拒绝）
+            tasks_view = {}
+        interrupted = sorted(
+            tid
+            for tid, rec in tasks_view.items()
+            if rec.get("status") in ("pending", "in_progress")
+        )
+        record = {
+            "run_snapshot_schema_version": RUN_SNAPSHOT_SCHEMA_VERSION,
+            "ledger_protocol_version": TASK_LEDGER_PROTOCOL_VERSION,
+            "completion_rules_version": TASK_COMPLETION_RULES_VERSION,
+            "session_id": session_id,
+            "thread_id": thread_id,
+            "request_id": request_id,
+            "run_id": run_id,
+            "run_status_at_seal": run_status,
+            "plan_version": (
+                (LedgerView(values or {}).task_plan_version(run_id))
+                if values is not None
+                else 0
+            ),
+            "tasks": run_tasks,
+            "executions": executions,
+            "analyses": analyses,
+            "tool_errors": tool_errors,
+            "coverage": (
+                {
+                    "accepted": decision.accepted,
+                    "expected_status": decision.expected_status,
+                    "coverage_map": decision.coverage_map,
+                    "uncovered_task_refs": decision.uncovered_task_refs,
+                    "pending_task_refs": decision.pending_task_refs,
+                    "errors": [
+                        {
+                            "code": e.code,
+                            "message": e.message,
+                            "task_refs": e.task_refs,
+                        }
+                        for e in decision.errors
+                    ],
+                }
+                if decision is not None
+                else None
+            ),
+            "interrupted_tasks": interrupted,
+            "sealed_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+        }
+        self._archive.write_run_snapshot(session_id, thread_id, run_id, record)
+        return record
 
     def _write_thread_tracks(
         self,
@@ -1089,6 +1503,7 @@ def _collect_carried(
     old_values: dict[str, Any],
     prev_carried: tuple[Any, ...],
     cfg: DbAgentConfig,
+    meta_loader: Any = None,
 ) -> tuple[Any, ...]:
     """使用中的时间／维度证据（授权记录 guard_evidence 口径）＋既有携带
     ＋最近执行／分析记录（链首去重）。
@@ -1155,7 +1570,8 @@ def _collect_carried(
     # 序列即“最后触碰”（最近使用）顺序——覆盖与新增都移到末尾；
     # 上限截断保留最近的 N 条（§13.4 优先保留最近使用的）
     carried = list(carried_map.values())[-cfg.thread.carry_max_evidence :]
-    # 最近执行／分析记录（§7.12.1：链首去重）
+    # 最近执行／分析记录（§7.12.1：链首去重；doc 6.3 §6.4：携带完整来源引用，
+    # thread_id 经 ResultMeta 补齐，供后续 run 以完整身份沿用）
     limit = getattr(cfg.thread, "carry_recent_executions", 3)
     if limit:
         picked: list[Any] = []
@@ -1173,12 +1589,15 @@ def _collect_carried(
                 if root in seen_root:
                     continue
                 seen_root.add(root)
+                # R1-07：origin 一律为记录自身完整身份（含沿用登记产生的新
+                # 记录——run/evidence 属当前记录）；链首 reused_from 仅作
+                # 展示并保留在 record 内，不再顶替直接来源身份。
+                origin = _origin_of_record(record, meta_loader=meta_loader)
                 picked.append(
                     {
                         "kind": kind,
                         "record": record,
-                        "origin": record.get("reused_from")
-                        or _origin_of_record(record),
+                        "origin": origin,
                     }
                 )
                 if len(picked) >= limit:
@@ -1200,9 +1619,33 @@ def _origin_of(record: dict[str, Any], id_key: str) -> dict[str, Any]:
     }
 
 
-def _origin_of_record(record: dict[str, Any]) -> dict[str, Any]:
+def _origin_of_record(
+    record: dict[str, Any], meta_loader: Any = None
+) -> dict[str, Any]:
+    """执行/分析记录的携带来源（doc 6.3 §6.4；R2-10）。
+
+    记录自身的完整可信 scope（thread/run/request/evidence）优先；原结果
+    文件的生成身份与链首 reused_from 只作展示，不用于补造新来源身份。
+    仅当旧记录确实没有 thread_id 时（旧协议）才回退 ResultMeta 补齐，
+    绝不覆盖已有身份。
+    """
     origin = _origin_of(record, "evidence_id")
     origin["user_text"] = None
+    own_thread = record.get("thread_id")
+    if isinstance(own_thread, str) and own_thread:
+        origin["thread_id"] = own_thread
+        return origin
+    if meta_loader is not None:
+        try:
+            meta = meta_loader(
+                record.get("result_ref") or record.get("output_result_ref"),
+                record.get("run_id"),
+            )
+        except Exception:  # noqa: BLE001（来源补齐失败不阻塞轮换）
+            meta = None
+        if meta is not None and getattr(meta, "thread_id", ""):
+            origin["thread_id"] = meta.thread_id
+            origin["request_id"] = getattr(meta, "request_id", origin["request_id"])
     return origin
 
 
@@ -1227,11 +1670,15 @@ def _carried_listing(carried: tuple[Any, ...]) -> str:
                 f"- 执行证据 {record.get('evidence_id')}（原运行 {origin.get('run_id')}，"
                 f"result_ref={record.get('result_ref')}，"
                 f"生成于 {record.get('result_generated_at') or '未知时间'}）"
+                f"来源引用：thread={origin.get('thread_id')}, "
+                f"run={origin.get('run_id')}, evidence={origin.get('evidence_id')}"
             )
         elif kind == "analysis":
             lines.append(
                 f"- 分析证据 {record.get('evidence_id')}（原运行 {origin.get('run_id')}，"
                 f"result_ref={record.get('output_result_ref')}）"
+                f"来源引用：thread={origin.get('thread_id')}, "
+                f"run={origin.get('run_id')}, evidence={origin.get('evidence_id')}"
             )
     return "\n".join(lines)
 

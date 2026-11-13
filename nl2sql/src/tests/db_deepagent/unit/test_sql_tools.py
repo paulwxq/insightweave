@@ -47,18 +47,35 @@ def node(guard_services: DbAgentServices) -> ToolNode:
 
 
 def _ledger_state(validations=None) -> dict:
+    from src.tests.db_deepagent.conftest import make_task_record, make_task_state
+
+    task = make_task_record("run-test", "T1", 1, status="pending", content="查询订单")
     return {
         "db_time_evidence": [SEP],
         "db_dim_evidence": [],
         "db_validations": validations or {},
+        **make_task_state([task]),
     }
+
+
+def _task_only_state() -> dict:
+    from src.tests.db_deepagent.conftest import make_task_record, make_task_state
+
+    task = make_task_record("run-test", "T1", 1, status="pending", content="查询订单")
+    return make_task_state([task])
 
 
 class TestValidateSql:
     def test_ok_envelope_and_authorization(self, node, db_agent_context):
         updates, msg = invoke_tool_node(
             node,
-            [("validate_sql", {"sql": QUERY_SQL}, "tc-v1")],
+            [
+                (
+                    "validate_sql",
+                    {"sql": QUERY_SQL, "sub_task_id": "T1", "sub_task_revision": 1},
+                    "tc-v1",
+                )
+            ],
             db_agent_context,
             extra_state=_ledger_state(),
         )
@@ -73,12 +90,19 @@ class TestValidateSql:
     def test_guard_failure_envelope(self, node, db_agent_context):
         updates, msg = invoke_tool_node(
             node,
-            [("validate_sql", {"sql": QUERY_SQL}, "tc-v2")],
+            [
+                (
+                    "validate_sql",
+                    {"sql": QUERY_SQL, "sub_task_id": "T1", "sub_task_revision": 1},
+                    "tc-v2",
+                )
+            ],
             db_agent_context,
             extra_state={
                 "db_time_evidence": [],
                 "db_dim_evidence": [],
                 "db_validations": {},
+                **_task_only_state(),
             },
         )
         payload = json.loads(msg.content)
@@ -91,12 +115,19 @@ class TestValidateSql:
         """doc 9 §5：校验错误包全字段保留，错误不变成功。"""
         _u, msg = invoke_tool_node(
             node,
-            [("validate_sql", {"sql": QUERY_SQL}, "tc-v2b")],
+            [
+                (
+                    "validate_sql",
+                    {"sql": QUERY_SQL, "sub_task_id": "T1", "sub_task_revision": 1},
+                    "tc-v2b",
+                )
+            ],
             db_agent_context,
             extra_state={
                 "db_time_evidence": [],
                 "db_dim_evidence": [],
                 "db_validations": {},
+                **_task_only_state(),
             },
         )
         payload = _strict_loads(msg.content)
@@ -113,7 +144,18 @@ class TestValidateSql:
         """严格参数：未声明字段由框架拒绝（invalid_argument 文本）。"""
         _u, msg = invoke_tool_node(
             node,
-            [("validate_sql", {"sql": QUERY_SQL, "force": True}, "tc-v3")],
+            [
+                (
+                    "validate_sql",
+                    {
+                        "sql": QUERY_SQL,
+                        "force": True,
+                        "sub_task_id": "T1",
+                        "sub_task_revision": 1,
+                    },
+                    "tc-v3",
+                )
+            ],
             db_agent_context,
         )
         assert msg.content.startswith("invalid_argument")
@@ -124,14 +166,26 @@ class TestExecuteSql:
         """validate → 并入账本 → execute 成功。"""
         updates1, _ = invoke_tool_node(
             node,
-            [("validate_sql", {"sql": QUERY_SQL}, "tc-v1")],
+            [
+                (
+                    "validate_sql",
+                    {"sql": QUERY_SQL, "sub_task_id": "T1", "sub_task_revision": 1},
+                    "tc-v1",
+                )
+            ],
             db_agent_context,
             extra_state=_ledger_state(),
         )
         assert len(updates1["db_validations"]) == 1
         updates2, msg2 = invoke_tool_node(
             node,
-            [("execute_sql", {"sql": QUERY_SQL}, "tc-x1")],
+            [
+                (
+                    "execute_sql",
+                    {"sql": QUERY_SQL, "sub_task_id": "T1", "sub_task_revision": 1},
+                    "tc-x1",
+                )
+            ],
             db_agent_context,
             extra_state=_ledger_state(updates1["db_validations"]),
         )
@@ -147,7 +201,13 @@ class TestExecuteSql:
     def test_not_validated(self, node, db_agent_context):
         _u, msg = invoke_tool_node(
             node,
-            [("execute_sql", {"sql": QUERY_SQL}, "tc-x2")],
+            [
+                (
+                    "execute_sql",
+                    {"sql": QUERY_SQL, "sub_task_id": "T1", "sub_task_revision": 1},
+                    "tc-x2",
+                )
+            ],
             db_agent_context,
             extra_state=_ledger_state(),
         )
@@ -169,13 +229,25 @@ class TestExecuteSql:
         )
         u1, _ = invoke_tool_node(
             node2,
-            [("validate_sql", {"sql": QUERY_SQL}, "tc-v1")],
+            [
+                (
+                    "validate_sql",
+                    {"sql": QUERY_SQL, "sub_task_id": "T1", "sub_task_revision": 1},
+                    "tc-v1",
+                )
+            ],
             db_agent_context,
             extra_state=_ledger_state(),
         )
         _u, msg = invoke_tool_node(
             node2,
-            [("execute_sql", {"sql": QUERY_SQL}, "tc-x3")],
+            [
+                (
+                    "execute_sql",
+                    {"sql": QUERY_SQL, "sub_task_id": "T1", "sub_task_revision": 1},
+                    "tc-x3",
+                )
+            ],
             db_agent_context,
             extra_state=_ledger_state(u1["db_validations"]),
         )
@@ -200,13 +272,25 @@ class TestExecuteSql:
         )
         u1, _ = invoke_tool_node(
             node2,
-            [("validate_sql", {"sql": QUERY_SQL}, "tc-v1")],
+            [
+                (
+                    "validate_sql",
+                    {"sql": QUERY_SQL, "sub_task_id": "T1", "sub_task_revision": 1},
+                    "tc-v1",
+                )
+            ],
             db_agent_context,
             extra_state=_ledger_state(),
         )
         _u, msg = invoke_tool_node(
             node2,
-            [("execute_sql", {"sql": QUERY_SQL}, "tc-x4")],
+            [
+                (
+                    "execute_sql",
+                    {"sql": QUERY_SQL, "sub_task_id": "T1", "sub_task_revision": 1},
+                    "tc-x4",
+                )
+            ],
             db_agent_context,
             extra_state=_ledger_state(u1["db_validations"]),
         )
@@ -234,13 +318,25 @@ class TestExecuteSql:
         )
         u1, _ = invoke_tool_node(
             node2,
-            [("validate_sql", {"sql": QUERY_SQL}, "tc-v1")],
+            [
+                (
+                    "validate_sql",
+                    {"sql": QUERY_SQL, "sub_task_id": "T1", "sub_task_revision": 1},
+                    "tc-v1",
+                )
+            ],
             db_agent_context,
             extra_state=_ledger_state(),
         )
         _u, msg = invoke_tool_node(
             node2,
-            [("execute_sql", {"sql": QUERY_SQL}, "tc-x5")],
+            [
+                (
+                    "execute_sql",
+                    {"sql": QUERY_SQL, "sub_task_id": "T1", "sub_task_revision": 1},
+                    "tc-x5",
+                )
+            ],
             db_agent_context,
             extra_state=_ledger_state(u1["db_validations"]),
         )

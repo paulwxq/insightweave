@@ -103,6 +103,8 @@ class WebTurn(StrictModel):
     """历史轮次。问答文本始终返回；display 投影供再次打开会话时回放表格和 SQL。
 
     旧记录没有 display 时 evidence 为空、elapsed_ms 为空，仍只展示问答。
+    doc 6.3 §8.3：open_questions 为保存的合并列表；旧记录缺失为 None
+    （未知，不作“明确没有问题”），新记录明确无问题为 []。
     """
 
     question: str
@@ -110,6 +112,7 @@ class WebTurn(StrictModel):
     saved_at: Optional[str] = None
     elapsed_ms: Optional[int] = None
     evidence: list[TurnEvidenceView] = Field(default_factory=list)
+    open_questions: Optional[list[str]] = None
 
 
 class PageData(StrictModel):
@@ -228,11 +231,19 @@ class WebEvidenceItem(StrictModel):
 
     @classmethod
     def project(cls, item: EvidenceItem) -> "WebEvidenceItem":
-        reused = (
-            WebEvidenceOrigin(**dict(item.reused_from))
-            if item.reused_from is not None
-            else None
-        )
+        # doc 6.3 §8.3：内部来源结构演进时不因严格解包被拒——显式白名单
+        # 投影，未列入的内部字段（如任务归属）不进入公共协议。
+        reused = None
+        if item.reused_from is not None:
+            origin = dict(item.reused_from)
+            reused = WebEvidenceOrigin(
+                evidence_id=str(origin.get("evidence_id", "")),
+                thread_id=str(origin.get("thread_id", "")),
+                request_id=str(origin.get("request_id", "")),
+                run_id=str(origin.get("run_id", "")),
+                datasource_id=str(origin.get("datasource_id", "")),
+                user_text=origin.get("user_text"),
+            )
         return cls(
             evidence_id=item.evidence_id,
             kind=item.kind,

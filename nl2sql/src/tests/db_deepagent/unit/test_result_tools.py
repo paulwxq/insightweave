@@ -20,7 +20,11 @@ from src.modules.db_deepagent.tools.result_tools import (
     make_read_result_tool,
 )
 
-from src.tests.db_deepagent.conftest import invoke_tool_node
+from src.tests.db_deepagent.conftest import (
+    invoke_tool_node,
+    make_task_record,
+    make_task_state,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -74,6 +78,7 @@ class TestReadResult:
                 )
             ],
             db_agent_context,
+            extra_state={"db_executions": [_input_evidence(meta)], **_task_state()},
         )
         payload = json.loads(msg.content)
         assert payload["status"] == "ok"
@@ -236,6 +241,37 @@ class TestReadResult:
         assert all(collected_flags)
 
 
+def _input_evidence(meta, evidence_id="E-in1"):
+    """T1 的输入执行记录（同任务当前版本）。"""
+    return {
+        "evidence_id": evidence_id,
+        "tool_call_id": "tc-in",
+        "run_id": "run-test",
+        "request_id": "req-test",
+        "purpose": "query",
+        "datasource_id": meta.datasource_id,
+        "sql_template": "SELECT k, x FROM t",
+        "executed_sql": "SELECT k, x FROM t",
+        "executed_sql_sha256": meta.executed_sql_sha256,
+        "result_ref": meta.result_ref,
+        "columns": meta.columns,
+        "saved_row_count": meta.saved_row_count,
+        "source_truncated": False,
+        "elapsed_ms": 4,
+        "warnings": [],
+        "sub_task_id": "T1",
+        "sub_task_revision": 1,
+        "input_result_refs": [],
+    }
+
+
+def _task_state():
+    from src.tests.db_deepagent.conftest import make_task_record, make_task_state
+
+    task = make_task_record("run-test", "T1", 1, status="in_progress", content="分析")
+    return make_task_state([task])
+
+
 class TestAnalyzeResult:
     def test_local_aggregate_registers_analysis(
         self, node, guard_services, db_agent_context
@@ -248,7 +284,11 @@ class TestAnalyzeResult:
                     "analyze_result",
                     {
                         "operation": "aggregate",
-                        "inputs": [meta.result_ref],
+                        "inputs": [
+                            {"result_ref": meta.result_ref, "evidence_id": "E-in1"}
+                        ],
+                        "sub_task_id": "T1",
+                        "sub_task_revision": 1,
                         "params": {
                             "group_by": ["k"],
                             "metrics": [{"column": "x", "func": "sum"}],
@@ -259,13 +299,19 @@ class TestAnalyzeResult:
                 )
             ],
             db_agent_context,
+            extra_state={"db_executions": [_input_evidence(meta)], **_task_state()},
         )
         payload = json.loads(msg.content)
         assert payload["status"] == "ok", payload
         record = updates["db_analyses"][0]
         assert record["evidence_id"].startswith("A-")
         assert record["executed_sql"] is None  # 本地计算不伪造 SQL
-        assert record["input_result_refs"] == [meta.result_ref]
+        assert [r["result_ref"] for r in record["input_result_refs"]] == [
+            meta.result_ref
+        ]
+        assert record["input_result_refs"][0]["evidence_ref"]["evidence_id"] == "E-in1"
+        assert record["input_result_refs"][0]["source_task_ref"]["sub_task_id"] == "T1"
+        assert record["sub_task_id"] == "T1"
         assert record["output_result_ref"]
         assert record["pushdown_execution_id"] is None
         assert payload["data"]["evidence_id"] == record["evidence_id"]
@@ -279,7 +325,11 @@ class TestAnalyzeResult:
                     "analyze_result",
                     {
                         "operation": "aggregate",
-                        "inputs": [meta.result_ref],
+                        "inputs": [
+                            {"result_ref": meta.result_ref, "evidence_id": "E-in1"}
+                        ],
+                        "sub_task_id": "T1",
+                        "sub_task_revision": 1,
                         "params": {"group_by": ["k"]},  # 缺 metrics
                         "allow_pushdown": True,
                     },
@@ -287,6 +337,7 @@ class TestAnalyzeResult:
                 )
             ],
             db_agent_context,
+            extra_state={"db_executions": [_input_evidence(meta)], **_task_state()},
         )
         payload = json.loads(msg.content)
         assert payload["error"]["error_type"] == "invalid_argument"
@@ -302,7 +353,11 @@ class TestAnalyzeResult:
                     "analyze_result",
                     {
                         "operation": "aggregate",
-                        "inputs": ["res_" + "0" * 32],  # 不存在
+                        "inputs": [
+                            {"result_ref": "res_" + "0" * 32, "evidence_id": "E-in1"}
+                        ],
+                        "sub_task_id": "T1",
+                        "sub_task_revision": 1,
                         "params": {
                             "group_by": [],
                             "metrics": [{"column": "x", "func": "sum"}],
@@ -313,11 +368,14 @@ class TestAnalyzeResult:
                 )
             ],
             db_agent_context,
+            extra_state={**_task_state()},
         )
         payload = json.loads(msg.content)
         assert payload["status"] == "error", payload
-        assert payload["error"]["error_type"] == "result_not_found"
-        assert payload["error"]["retryable"] is False
+        # doc 6.3 §6.3：结构化输入先核对 evidence_id 在本轮记录中（先于
+        # 结果文件读取），未知证据 → stale_task_inputs
+        assert payload["error"]["error_type"] == "stale_task_inputs"
+        assert payload["error"]["retryable"] is True
 
     def test_distinct_truncated_flags_persisted(
         self, node, guard_services, db_agent_context
@@ -334,7 +392,11 @@ class TestAnalyzeResult:
                     "analyze_result",
                     {
                         "operation": "distinct_values",
-                        "inputs": [meta.result_ref],
+                        "inputs": [
+                            {"result_ref": meta.result_ref, "evidence_id": "E-in1"}
+                        ],
+                        "sub_task_id": "T1",
+                        "sub_task_revision": 1,
                         "params": {"column": "k", "max_values": 1},
                         "allow_pushdown": True,
                     },
@@ -342,6 +404,7 @@ class TestAnalyzeResult:
                 )
             ],
             db_agent_context,
+            extra_state={"db_executions": [_input_evidence(meta)], **_task_state()},
         )
         payload = json.loads(msg.content)
         assert payload["status"] == "ok", payload
@@ -366,7 +429,11 @@ class TestAnalyzeResult:
                     "analyze_result",
                     {
                         "operation": "aggregate",
-                        "inputs": [meta.result_ref],
+                        "inputs": [
+                            {"result_ref": meta.result_ref, "evidence_id": "E-in1"}
+                        ],
+                        "sub_task_id": "T1",
+                        "sub_task_revision": 1,
                         "params": {
                             "group_by": [],
                             "metrics": [{"column": "x", "func": "sum"}],
@@ -377,6 +444,7 @@ class TestAnalyzeResult:
                 )
             ],
             db_agent_context,
+            extra_state={"db_executions": [_input_evidence(meta)], **_task_state()},
         )
         payload = json.loads(msg.content)
         assert payload["status"] == "ok", payload
@@ -397,7 +465,11 @@ class TestAnalyzeResult:
                     "analyze_result",
                     {
                         "operation": "aggregate",
-                        "inputs": [meta.result_ref],
+                        "inputs": [
+                            {"result_ref": meta.result_ref, "evidence_id": "E-in1"}
+                        ],
+                        "sub_task_id": "T1",
+                        "sub_task_revision": 1,
                         "params": {
                             "group_by": ["k"],
                             "metrics": [{"column": "x", "func": "sum"}],
@@ -408,6 +480,7 @@ class TestAnalyzeResult:
                 )
             ],
             db_agent_context,
+            extra_state={"db_executions": [_input_evidence(meta)], **_task_state()},
         )
         payload = json.loads(msg.content)
         assert payload["status"] == "ok", payload
@@ -447,7 +520,11 @@ class TestAnalyzeResult:
                     "analyze_result",
                     {
                         "operation": "top_n",
-                        "inputs": [meta.result_ref],
+                        "inputs": [
+                            {"result_ref": meta.result_ref, "evidence_id": "E-in1"}
+                        ],
+                        "sub_task_id": "T1",
+                        "sub_task_revision": 1,
                         "params": {
                             "order_by": "rank",
                             "descending": False,
@@ -460,6 +537,7 @@ class TestAnalyzeResult:
                 )
             ],
             db_agent_context,
+            extra_state={"db_executions": [_input_evidence(meta)], **_task_state()},
         )
         payload = _strict_loads(msg.content)  # 旧实现此处 JSONDecodeError
         data = payload["data"]
@@ -486,3 +564,185 @@ class TestAnalyzeResult:
             limit=20,
         )
         assert page.rows[0] == rows[20]  # 预览之外的第 21 行仍可读取
+
+
+class TestAnalyzeWriteAdmission:
+    """doc 6.3 §6.1/§6.3 写入准入：终态目标拒绝、probe 输入拒绝、
+    跨任务输入须声明依赖、同任务旧 revision 拒绝。"""
+
+    def _analyze(self, node, ctx, args, state):
+        return invoke_tool_node(
+            node,
+            [("analyze_result", args, "tc-adm")],
+            ctx,
+            extra_state=state,
+        )
+
+    def test_terminal_target_rejected(self, node, guard_services, db_agent_context):
+        meta = _save_input(guard_services, db_agent_context)
+        task = make_task_record(
+            "run-test",
+            "T1",
+            1,
+            status="completed",
+            evidence_ids=["E-in1"],
+            content="完成",
+        )
+        state = {"db_executions": [_input_evidence(meta)], **make_task_state([task])}
+        _u, msg = self._analyze(
+            node,
+            db_agent_context,
+            {
+                "operation": "aggregate",
+                "inputs": [{"result_ref": meta.result_ref, "evidence_id": "E-in1"}],
+                "sub_task_id": "T1",
+                "sub_task_revision": 1,
+                "params": {
+                    "group_by": ["k"],
+                    "metrics": [{"column": "x", "func": "sum"}],
+                },
+                "allow_pushdown": True,
+            },
+            state,
+        )
+        payload = json.loads(msg.content)
+        assert payload["error"]["error_type"] == "task_not_writable"
+        assert "revise" in payload["error"]["message"]
+
+    def test_probe_input_rejected(self, node, guard_services, db_agent_context):
+        meta = _save_input(guard_services, db_agent_context)
+        probe = {**_input_evidence(meta), "purpose": "probe", "evidence_id": "E-probe1"}
+        task = make_task_record(
+            "run-test", "T1", 1, status="in_progress", content="分析"
+        )
+        state = {"db_executions": [probe], **make_task_state([task])}
+        _u, msg = self._analyze(
+            node,
+            db_agent_context,
+            {
+                "operation": "aggregate",
+                "inputs": [{"result_ref": meta.result_ref, "evidence_id": "E-probe1"}],
+                "sub_task_id": "T1",
+                "sub_task_revision": 1,
+                "params": {
+                    "group_by": ["k"],
+                    "metrics": [{"column": "x", "func": "sum"}],
+                },
+                "allow_pushdown": True,
+            },
+            state,
+        )
+        payload = json.loads(msg.content)
+        # probe 执行不进入可引用索引（evidence_by_id 仅收 query/分析）
+        assert payload["error"]["error_type"] == "stale_task_inputs"
+        assert "不在本轮可引用证据" in payload["error"]["message"]
+
+    def test_cross_task_input_without_dependency_rejected(
+        self, node, guard_services, db_agent_context
+    ):
+        meta = _save_input(guard_services, db_agent_context)
+        owner = _input_evidence(meta)  # 归属 T1（已完成）
+        t1 = make_task_record(
+            "run-test",
+            "T1",
+            1,
+            status="completed",
+            evidence_ids=["E-in1"],
+            content="上游",
+        )
+        t2 = make_task_record(
+            "run-test", "T2", 1, status="in_progress", content="下游（未声明依赖）"
+        )
+        state = {"db_executions": [owner], **make_task_state([t1, t2])}
+        _u, msg = self._analyze(
+            node,
+            db_agent_context,
+            {
+                "operation": "aggregate",
+                "inputs": [{"result_ref": meta.result_ref, "evidence_id": "E-in1"}],
+                "sub_task_id": "T2",
+                "sub_task_revision": 1,
+                "params": {
+                    "group_by": ["k"],
+                    "metrics": [{"column": "x", "func": "sum"}],
+                },
+                "allow_pushdown": True,
+            },
+            state,
+        )
+        payload = json.loads(msg.content)
+        assert payload["error"]["error_type"] == "stale_task_inputs"
+        assert "依赖" in payload["error"]["message"]
+
+    def test_same_task_old_revision_input_rejected(
+        self, node, guard_services, db_agent_context
+    ):
+        meta = _save_input(guard_services, db_agent_context)
+        old_input = {**_input_evidence(meta), "sub_task_revision": 1}
+        t1 = make_task_record(
+            "run-test", "T1", 2, status="in_progress", content="修订后目标"
+        )
+        state = {"db_executions": [old_input], **make_task_state([t1])}
+        _u, msg = self._analyze(
+            node,
+            db_agent_context,
+            {
+                "operation": "aggregate",
+                "inputs": [{"result_ref": meta.result_ref, "evidence_id": "E-in1"}],
+                "sub_task_id": "T1",
+                "sub_task_revision": 2,
+                "params": {
+                    "group_by": ["k"],
+                    "metrics": [{"column": "x", "func": "sum"}],
+                },
+                "allow_pushdown": True,
+            },
+            state,
+        )
+        payload = json.loads(msg.content)
+        assert payload["error"]["error_type"] == "stale_task_inputs"
+        assert "旧 revision" in payload["error"]["message"]
+
+    def test_cross_task_declared_completed_input_allowed(
+        self, node, guard_services, db_agent_context
+    ):
+        meta = _save_input(guard_services, db_agent_context)
+        owner = _input_evidence(meta)
+        t1 = make_task_record(
+            "run-test",
+            "T1",
+            1,
+            status="completed",
+            evidence_ids=["E-in1"],
+            content="上游",
+        )
+        t2 = make_task_record(
+            "run-test",
+            "T2",
+            1,
+            status="in_progress",
+            content="下游",
+            dependencies=[{"sub_task_id": "T1", "revision": 1}],
+        )
+        state = {"db_executions": [owner], **make_task_state([t1, t2])}
+        updates, msg = self._analyze(
+            node,
+            db_agent_context,
+            {
+                "operation": "aggregate",
+                "inputs": [{"result_ref": meta.result_ref, "evidence_id": "E-in1"}],
+                "sub_task_id": "T2",
+                "sub_task_revision": 1,
+                "params": {
+                    "group_by": ["k"],
+                    "metrics": [{"column": "x", "func": "sum"}],
+                },
+                "allow_pushdown": True,
+            },
+            state,
+        )
+        payload = json.loads(msg.content)
+        assert payload["status"] == "ok", payload
+        record = updates["db_analyses"][0]
+        assert record["sub_task_id"] == "T2"
+        assert record["input_result_refs"][0]["source_task_ref"]["sub_task_id"] == "T1"

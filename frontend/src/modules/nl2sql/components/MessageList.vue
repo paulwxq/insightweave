@@ -43,7 +43,8 @@ const bubbles = computed<Bubble[]>(() => {
     savedAt: turn.saved_at ?? null,
     elapsedMs: turn.elapsed_ms ?? null,
     evidence: turn.evidence ?? [],
-    clarify: [],
+    // 保存值原样消费（doc 6.3 §8.3）：null=旧记录未知，不显示问题列表
+    clarify: turn.open_questions ?? [],
     unsafe: false,
     pending: false,
     errorMessage: '',
@@ -68,7 +69,8 @@ const bubbles = computed<Bubble[]>(() => {
             row_count: item.row_count,
             source_truncated: item.source_truncated,
           })),
-    clarify: result?.status === 'needs_clarification' ? result.open_questions : [],
+    // 合并列表非空即展示（澄清与补充问题，不只在 needs_clarification）
+    clarify: unsafe ? [] : [...(result?.open_questions ?? [])],
     unsafe,
     pending: props.submitting,
     errorMessage: current.errorMessage,

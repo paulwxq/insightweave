@@ -33,9 +33,26 @@ agent:
     - 未命中的词不能直接写进条件，也不能改用模糊匹配或替换为相似值；无法
       确认时如实说明或向用户澄清。
 
+    ## 业务任务登记（doc 6.3）
+    - 回答任何问题前先用 record_sub_tasks 登记本轮业务任务（简单问题也
+      登记一项）；任务 = 需要交付的业务问题或必要中间结果，不是工具步骤。
+    - record_sub_tasks 必须单独调用；每次携带返回的当前 plan_version，
+      版本冲突时按返回的任务摘要重新确认后整批重提。
+    - validate_sql／execute_sql／analyze_result 必须携带目标任务的
+      sub_task_id 与 sub_task_revision；下游任务的声明依赖全部 completed
+      后才能校验／执行／分析。
+    - 任务取得成果后用 status=completed 登记选定成果 evidence_ids；不能
+      继续推进时按实际情况登记 failed（工具失败附 failure_refs、主动放弃
+      用 agent_abandoned、上游阻塞用 dependency_blocked+blocked_by）、
+      needs_clarification（附 clarification_question）或 void（计划替换附
+      replacement）。全部任务进入终态后才能提交。
+    - 修改任务内容或依赖用 revise（新版本 pending、成果清空）；终态不能
+      原地恢复。作废的任务 ID 不再复用。
+
     ## SQL 流程
     - 先 validate_sql，通过后用完全相同的文本调用 execute_sql；校验与执行
-      分两步串行调用；SQL 改动后重新校验。
+      分两步串行调用；SQL 改动后重新校验；两步使用同一 sub_task_id/
+      sub_task_revision。
     - 依赖前一步多行结果时，用结果占位符 {{result:<result_ref>:<列名>}}，
       不手抄值。
 
@@ -57,8 +74,14 @@ agent:
     - 空结果、查询失败、数据缺失、业务异常分别表述；空结果不等于数值为 0。
 
     ## 结束
-    - 证据足够时单独调用 submit_final_answer 提交最终答案（同一条消息中
-      不要调用其他工具）。
-    - 每条发现引用 evidence_id；写明口径、限制、未完成事项；只引用
-      execute_sql 返回过的 evidence_id（探针的执行记录不能引用）。
-    - 提交被拒时按错误提示修正后重新提交；不要用普通文本结束回答。
+    - 证据足够、全部任务终态后单独调用 submit_final_answer 提交最终答案
+      （同一条消息中不要调用其他工具）。
+    - 每条发现带 finding_id（F-1、F-2…，提交内唯一）与 task_refs，并引用
+      已选入对应任务成果的 evidence_id；写明口径、限制、未完成事项；只
+      引用 execute_sql／analyze_result／reuse_evidence 返回过的
+      evidence_id（探针的执行记录不能引用）。
+    - unresolved_task_refs 恰列本轮全部 failed／needs_clarification 任务；
+      open_questions 只放非阻塞补充问题，不放阻塞事项。
+    - status 必须与业务判定一致（全部成功且全部主成果为未截断零行时才
+      报 no_data）；被拒时按返回的 expected_status／错误修正提交，不需要
+      重新执行 SQL；不要用普通文本结束回答。

@@ -344,6 +344,8 @@ class ResultMeta:
     derived_from: list[str]
     guard_evidence: GuardEvidenceSnapshot
     format_version: Optional[int] = None  # 缺失＝v1（doc 2 §4.5）
+    # doc 6.3 §6.1：产生该结果的任务身份（probe/过渡记录为 None）
+    source_task: Optional[dict[str, Any]] = None
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -365,6 +367,7 @@ class ResultMeta:
             "derived_from": self.derived_from,
             "guard_evidence": self.guard_evidence,
             "format_version": self.format_version,
+            "source_task": self.source_task,
         }
 
     @classmethod
@@ -388,6 +391,7 @@ class ResultMeta:
             derived_from=data.get("derived_from", []),
             guard_evidence=data.get("guard_evidence") or {"time": [], "dim": []},
             format_version=data.get("format_version"),
+            source_task=data.get("source_task"),
         )
 
 
@@ -428,6 +432,7 @@ class ResultStore:
         derived_from: Sequence[str],
         guard_evidence: GuardEvidenceSnapshot,
         datasource_id: str | None = None,
+        source_task: dict[str, Any] | None = None,
     ) -> ResultMeta:
         """原子写入 rows.jsonl 与 meta.json，返回 ResultMeta。
 
@@ -472,6 +477,7 @@ class ResultStore:
             derived_from=list(derived_from),
             guard_evidence=guard_evidence,
             format_version=_FORMAT_VERSION,
+            source_task=source_task,
         )
         with tempfile.TemporaryDirectory(dir=self._root, prefix=".tmp-") as tmp:
             tmp_path = Path(tmp)
@@ -678,37 +684,62 @@ class ResultStore:
 
     # ------------------------------------------------------------ 维护
 
-    def delete(self, result_ref: str, *, session_id: str) -> None:
-        """删除一个结果目录（保留期清理用）。"""
+    def delete(self, result_ref: str, *, session_id: str, lease: object = None) -> None:
+        """受控删除一个结果目录（doc 6.3 §6.5：仅清理服务持会话锁后调用）。
+
+        无有效 SessionGuardLease 直接拒绝——不留绕过运行/清理互斥的删除入口。
+        """
+        from src.modules.db_deepagent.persistence.session_guard import validate_lease
+
+        validate_lease(lease, session_id)
         path = self._require_dir(result_ref)
         meta = self._read_meta(path)
         self._require_session(meta, session_id)
         shutil.rmtree(path, ignore_errors=True)
 
-    def purge_expired(self, *, retention_days: int, now: datetime | None = None) -> int:
-        """清理超过保留期的结果目录，返回删除数量。"""
+    def purge_expired(
+        self,
+        *,
+        retention_days: int,
+        now: datetime | None = None,
+        lease: object = None,
+        session_ids: list[str] | None = None,
+    ) -> int:
+        """按会话受控清理超过保留期的结果目录（doc 6.3 §6.5）。
+
+        生产路径必须由清理服务在持会话锁、校验保留闭包后逐会话调用：
+        lease 对应 session_ids 中全部会话有效；不提供任何绕过互斥的全局
+        删除。闭包保护由调用方（MaintenanceService）负责，本方法只按
+        年龄与会话归属删除。
+        """
+        from src.modules.db_deepagent.persistence.session_guard import validate_lease
+
+        if not session_ids:
+            return 0
+        for sid in session_ids:
+            validate_lease(lease, sid)
 
         def _aware(dt: datetime) -> datetime:
             # 朴素时间按本地时区解释（created_at 写入时带时区，此处兜底）
             return dt if dt.tzinfo is not None else dt.astimezone()
 
         now = _aware(now or datetime.now().astimezone())
+        allowed = set(session_ids)
         removed = 0
         for path in self._root.iterdir():
             if not path.is_dir() or not _RESULT_REF_RE.match(path.name):
                 continue
             meta_path = path / "meta.json"
             if not meta_path.exists():
-                shutil.rmtree(path, ignore_errors=True)
-                removed += 1
+                # 坏元数据目录归属不可确定：只报告不强删（doc 6.3 §6.5）
+                logger.warning("结果目录缺少 meta.json，跳过删除: %s", path.name)
                 continue
             try:
-                created = _aware(
-                    datetime.fromisoformat(
-                        json.loads(meta_path.read_text(encoding="utf-8"))["created_at"]
-                    )
-                )
-            except (OSError, ValueError, KeyError, json.JSONDecodeError):
+                meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                created = _aware(datetime.fromisoformat(meta["created_at"]))
+            except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
+                continue
+            if meta.get("session_id") not in allowed:
                 continue
             if (now - created).days >= retention_days:
                 shutil.rmtree(path, ignore_errors=True)

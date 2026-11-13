@@ -346,6 +346,15 @@ class ResultAnalysisService:
         load_bundle: LoadBundle,
         run_pushdown: RunPushdown,
     ) -> AnalysisOutcome:
+        # R2-09：本地分析内部服务入口校验同一会话有效运行 guard；直接
+        # 调用内部服务（不经 Runner/ToolNode）也不能绕行，读取/写入前拒绝。
+        from src.modules.db_deepagent.services.sql_pipeline import (
+            require_session_lease,
+        )
+
+        lease_err, lease_msg = require_session_lease(ctx)
+        if lease_err is not None:
+            raise AnalysisError(lease_err, lease_msg or "缺少有效运行持锁凭据")
         if operation == "describe":
             return self._describe(DescribeParams(**params), input_refs, load_bundle)
         if operation == "compare":

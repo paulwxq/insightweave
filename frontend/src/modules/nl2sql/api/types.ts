@@ -54,6 +54,10 @@ export interface TurnEvidenceView {
 /**
  * 历史轮次。旧记录没有展示投影时 evidence 为空、elapsed_ms 为空，只展示问答。
  * 新建查询写入的轮次带回 SQL 与 result_ref，再次打开会话可回放表格。
+ *
+ * open_questions（doc 6.3 §8.3）：保存的合并问题列表；旧记录缺字段为
+ * null（未知，不显示问题列表，不作为"明确没有问题"的事实），新记录明确
+ * 没有问题为 []。
  */
 export interface WebTurn {
   question: string
@@ -61,6 +65,7 @@ export interface WebTurn {
   saved_at?: string | null
   elapsed_ms?: number | null
   evidence?: TurnEvidenceView[]
+  open_questions?: string[] | null
 }
 
 /** 轮次等通用分页 data：{items, limit, offset, has_more, next_offset}。 */

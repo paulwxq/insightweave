@@ -58,6 +58,9 @@ class DbAgentServices:
     results: Optional[ResultStore] = None
     analysis: Optional[Any] = None  # ResultAnalysisService（步骤 5 交付）
     budget: Optional[RunBudgetLedger] = None
+    # doc 6.3 §6.4：归档 Store（运行快照读取）；装配层在 persistence 构造
+    # 后注入；None 时沿用核验仅可用线程账本（离线单测）。
+    store: Optional[Any] = None
 
     def close(self) -> None:
         """按依赖逆序释放已构造的资源。"""
