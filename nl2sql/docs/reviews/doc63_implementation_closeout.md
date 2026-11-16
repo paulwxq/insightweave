@@ -122,7 +122,7 @@ node --test $(rg --files src/modules/nl2sql -g '*.test.cjs' -g '*.test.ts' | sor
 
 ## 6. 未验证边界（如实保留，不等同实现缺陷）
 
-1. **真实 PG 跨进程锁 / DELETE**：清理验证使用 `InMemoryStore` 的真实 `delete` 与隔离临时目录，文件 `rmtree` 在回归中被 patch 禁止；PG `result_snapshots` 的 DELETE、跨连接 advisory lock 互斥未在真实 PG 上执行。
+1. **真实 PG 跨进程锁 / DELETE**：提交后的补充隔离验收已在用户现有 PostgreSQL 18.1 的专用测试库完成，**7 项通过**，覆盖双向进程锁竞争、引用保护/过期回收、dry-run、真实触发器删除异常后的恢复及缺源停止，见 [真实 PG 验收记录](doc63_postgres_isolation_validation.md)。未运行实际 Runner/model、checkpoint 线程删除、网络断连或强杀进程等完整场景；不将上述通过范围泛化为全部 PG 故障已验收。
 2. **完整真实模型题集与预算余量**：已通过 §5.1 的三次正常真实模型查询，但未跑完整固定题集、真实模型状态重提、紧预算中止或真实模型故障；R4-01 等异常注入为 Store GET 故障，非真实模型耗尽。
 3. **仓库外归档消费者**：未核查外部读取 QA/run_errors/run_snapshots/WebStore 的兼容性。
 4. **全面浏览器人工验收**：用户通过 Vue 手工完成上述三次正常查询并提供结果截图；尚未验证刷新后历史回读、浏览器错误/安全拒绝等完整流程。单测、截图及正常路径不能代替全面验收。
