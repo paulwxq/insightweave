@@ -87,6 +87,8 @@ export function useNl2sqlChat(router: Router) {
   const readinessState = ref<ReadinessState>('idle')
   const readinessData = shallowRef<ReadinessData | null>(null)
   const readinessError = ref('')
+  /** 选源来自顶部沿用而非页面检查结果（doc 21 §5.2）；只表示选择来源。 */
+  const sourceInherited = ref(false)
 
   // ------------------------------------------------------------- 当前会话
   const currentSessionId = ref('')
@@ -185,6 +187,7 @@ export function useNl2sqlChat(router: Router) {
   let readinessToken = 0
 
   async function checkReadiness(sourceId: string) {
+    sourceInherited.value = false
     const token = ++readinessToken
     selectedSourceId.value = sourceId
     readinessState.value = 'checking'
@@ -215,6 +218,20 @@ export function useNl2sqlChat(router: Router) {
     readinessData.value = null
     readinessError.value = ''
     sessionsNotice.value = ''
+    sourceInherited.value = false
+  }
+
+  /**
+   * 顶部沿用（doc 21 §5.2）：复用当前会话数据库，跳过页面 readiness 检查。
+   * 复用 resetReadiness() 作废在途检查并清空旧状态，再把前端输入就绪状态设为
+   * ready，使现有 canCompose 与首次发送创建流程继续工作。不调用 API、
+   * 不创建会话、不伪造 ReadinessData／检查项／检查时间。
+   */
+  function adoptSourceForNewQuery(sourceId: string): void {
+    resetReadiness()
+    selectedSourceId.value = sourceId
+    readinessState.value = 'ready'
+    sourceInherited.value = true
   }
 
   // ------------------------------------------------------------- 会话打开
@@ -599,7 +616,9 @@ export function useNl2sqlChat(router: Router) {
     readinessState,
     readinessData,
     readinessError,
+    sourceInherited,
     checkReadiness,
+    adoptSourceForNewQuery,
     resetReadiness,
     invalidatePendingCreate,
     sessionsNotice,

@@ -1004,3 +1004,90 @@ test('K11-R1-01 边界：切换到其他会话与真正新建仍清空草稿', a
     t.unmount()
   }
 })
+
+// ---------------------------------------------------------------- doc 21 顶部沿用
+
+test('doc21 沿用：adoptSourceForNewQuery 直接就绪，零页面检查调用、不创建会话', async () => {
+  const t = await createMounted()
+  try {
+    const { chat, env } = t
+    chat.adoptSourceForNewQuery(SRC_A)
+    await flush()
+    assert.equal(chat.selectedSourceId.value, SRC_A)
+    assert.equal(chat.readinessState.value, 'ready')
+    assert.equal(chat.readinessData.value, null, '沿用不得伪造 ReadinessData')
+    assert.equal(chat.sourceInherited.value, true)
+    assert.equal(chat.canCompose.value, true, '沿用后必须立即允许输入')
+    assert.equal(env.stubs.calls.getReadiness.length, 0, '沿用分支不得调用页面 readiness 接口')
+    assert.equal(env.stubs.calls.createSession.length, 0)
+    assert.equal(env.stubs.calls.submitQuery.length, 0)
+  } finally {
+    t.unmount()
+  }
+})
+
+test('doc21 沿用后手动改选：清除沿用标记，对新库按现有流程检查', async () => {
+  const t = await createMounted()
+  try {
+    const { chat, env } = t
+    chat.adoptSourceForNewQuery(SRC_A)
+    await flush()
+    await readyOn(env, chat, SRC_B)
+    assert.equal(chat.sourceInherited.value, false, '手动检查开始即清除沿用标记')
+    assert.equal(chat.selectedSourceId.value, SRC_B)
+    assert.equal(chat.readinessState.value, 'ready')
+    assert.deepEqual(env.stubs.calls.getReadiness, [SRC_B], '只对手动选择的新库发起一次检查')
+  } finally {
+    t.unmount()
+  }
+})
+
+test('doc21 旧检查响应晚到：不覆盖沿用数据库，也不写入旧检查结果', async () => {
+  const t = await createMounted()
+  try {
+    const { chat, env } = t
+    const gate = deferred()
+    env.stubs.handlers.getReadiness = () => gate.promise
+    chat.checkReadiness(SRC_B)
+    await flush(2)
+    assert.equal(chat.readinessState.value, 'checking')
+
+    chat.adoptSourceForNewQuery(SRC_A)
+    gate.resolve({ source_id: SRC_B, compatible: true, ready: false, checked_at: 'late', checks: [] })
+    await flush()
+    assert.equal(chat.selectedSourceId.value, SRC_A, '迟到响应不得改回旧库')
+    assert.equal(chat.readinessState.value, 'ready', '迟到响应不得把沿用状态改成 blocked')
+    assert.equal(chat.sourceInherited.value, true)
+    assert.equal(chat.readinessData.value, null, '迟到响应不得写入伪造的检查结果')
+  } finally {
+    t.unmount()
+  }
+})
+
+test('doc21 沿用后首次发送：用沿用库创建一次新会话并在新会话提交', async () => {
+  const t = await createMounted({
+    initial: { name: 'nl2sql-query', params: {}, query: {} },
+  })
+  try {
+    const { chat, env, ops } = t
+    chat.adoptSourceForNewQuery(SRC_A)
+    await flush()
+    chat.questionDraft.value = '统计上个月的销售额'
+    await chat.sendQuestion('统计上个月的销售额')
+    await flush()
+    assert.equal(env.stubs.calls.getReadiness.length, 0, '沿用首次发送仍不触发页面检查')
+    assert.equal(env.stubs.calls.createSession.length, 1, '只创建一次会话')
+    assert.equal(env.stubs.calls.createSession[0], SRC_A, '使用沿用的 Orders 库创建')
+    assert.equal(ops.replace.length, 1)
+    assert.equal(ops.replace[0].name, 'nl2sql-query-session')
+    const sessionId = chat.currentSessionId.value
+    assert.notEqual(sessionId, '')
+    assert.equal(chat.hasCurrentSession(sessionId), true)
+    assert.equal(env.stubs.calls.submitQuery.length, 1)
+    assert.equal(env.stubs.calls.submitQuery[0][0], sessionId, '提交到新会话，不是旧会话')
+    assert.equal(env.stubs.calls.submitQuery[0][2], SRC_A)
+    assert.equal(chat.questionDraft.value, '', '提交成功清空草稿')
+  } finally {
+    t.unmount()
+  }
+})

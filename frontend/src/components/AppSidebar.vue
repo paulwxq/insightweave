@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, inject, ref } from 'vue'
 import { useRoute } from 'vue-router'
+import { notifyNewQueryReset } from '../modules/nl2sql/newQueryReset'
 import { queryBusyKey } from '../modules/nl2sql/queryBusy'
 
 const route = useRoute()
@@ -44,10 +45,26 @@ function toggleQueryMenu() {
   queryManualOpen.value = !queryManualOpen.value
 }
 
+/**
+ * doc 21 §5.3：普通左键、非忙碌且当前已在新建页时，即使 Vue Router 判定重复
+ * 导航，也先同步通知当前页面清空选择与草稿，再继续一次无参数导航。
+ * 修饰键／新标签页等情况只保留现有链接处理，不发送清空通知；不额外 replace。
+ */
 function guardNewQuery(event: MouseEvent, navigate: (event: MouseEvent) => void) {
   if (queryBusy.value) {
     event.preventDefault()
     return
+  }
+  if (
+    !event.defaultPrevented &&
+    (event.button === undefined || event.button === 0) &&
+    !event.metaKey &&
+    !event.ctrlKey &&
+    !event.shiftKey &&
+    !event.altKey &&
+    onNewQueryPage.value
+  ) {
+    notifyNewQueryReset()
   }
   navigate(event)
 }

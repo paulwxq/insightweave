@@ -15,6 +15,7 @@ import ConversationHistoryDialog from '../components/ConversationHistoryDialog.v
 import { useNl2sqlChat } from '../composables/useChat'
 import { formatClock } from '../format'
 import { sessionBackTarget } from '../queryHomeLink'
+import { registerNewQueryReset } from '../newQueryReset'
 import { bindQueryBusy, ownsQueryBusy, queryBusyKey } from '../queryBusy'
 import MessageList from '../components/MessageList.vue'
 import QuestionInput from '../components/QuestionInput.vue'
@@ -45,12 +46,27 @@ onUnmounted(() => busyBinding?.release())
 
 const newConversationMode = computed(() => chat.currentSessionId.value === '')
 const onSessionPage = computed(() => route.name === 'nl2sql-query-session')
+const onNewQueryPage = computed(() => route.name === 'nl2sql-query')
 const backTarget = computed(() => sessionBackTarget(route.query.home))
 const newQueryTo = computed(() => {
   const query: Record<string, string> = {}
   if (typeof route.query.home === 'string') query.home = sessionBackTarget(route.query.home)
+  // doc 21 §5.1：顶部入口在会话页带上已取得的当前会话数据库；未加载会话信息时
+  // 不猜测数据库。新标签页只能得到普通预选地址，不带跳过检查资格。
+  if (onSessionPage.value) {
+    const sourceId = chat.sessionInfo.value?.source_id
+    if (sourceId) query.source_id = sourceId
+  }
   return { path: '/query/new', query }
 })
+
+/** doc 21 §5.1：顶部沿用意图，仅本次站内跳转有效，不写入 URL／历史状态／本地存储。 */
+type SourceInheritance = { sourceId: string; targetFullPath: string }
+let pendingSourceInheritance: SourceInheritance | null = null
+
+function clearPendingSourceInheritance(): void {
+  pendingSourceInheritance = null
+}
 
 const headerTitle = computed(() => {
   if (newConversationMode.value) return '新建查询'
@@ -78,7 +94,11 @@ const sqlCount = computed(() => {
 })
 
 const headerMeta = computed(() => {
-  if (newConversationMode.value) return '选择数据库并完成检查后开始提问'
+  if (newConversationMode.value) {
+    // doc 21 §5.4：沿用可输入时不再要求「完成检查后开始提问」。
+    if (chat.sourceInherited.value) return '已沿用当前数据库，可直接输入问题。'
+    return '选择数据库并完成检查后开始提问'
+  }
   const clock = formatClock(chat.sessionInfo.value?.last_active_at)
   const updated = clock ? `更新于 ${clock}` : '尚未更新'
   return `${updated} · 已生成 ${sqlCount.value} 条 SQL`
@@ -132,7 +152,27 @@ const presetSource = computed(() =>
 watch(
   () => [apiReady.value, route.name, presetSource.value] as const,
   ([ready, name, sourceId], previous) => {
-    if (!ready || name !== 'nl2sql-query') return
+    // doc 21 §5.1：apiReady 未就绪直接等待并保留沿用意图，就绪变化会重新触发本监听。
+    if (!ready) return
+    if (name !== 'nl2sql-query') {
+      // 落到其它路由（含导航失败后仍在会话页）：失配意图不留给后续导航。
+      if (pendingSourceInheritance !== null) clearPendingSourceInheritance()
+      return
+    }
+    // 沿用分支必须在「预选数据库未变化则返回」的去重判断之前识别，
+    // 避免有效意图被提前跳过；匹配时替代原有 checkReadiness 并消费意图。
+    const intent = pendingSourceInheritance
+    if (intent !== null) {
+      if (intent.sourceId === sourceId && intent.targetFullPath === route.fullPath) {
+        clearPendingSourceInheritance()
+        chat.invalidatePendingCreate()
+        chat.releaseUnalignedTakeover()
+        chat.adoptSourceForNewQuery(sourceId)
+        return
+      }
+      // 失配意图清除，不继续留给后续导航，随后按普通流程处理。
+      clearPendingSourceInheritance()
+    }
     const previousSource = previous?.[0] && previous[1] === 'nl2sql-query' ? previous[2] : undefined
     if (previous && sourceId === previousSource) return
     if (previous?.[1] === 'nl2sql-query' && sourceId !== previous[2]) {
@@ -175,9 +215,57 @@ function refreshCurrent() {
   void chat.openSession(sessionId)
 }
 
-function guardNewQuery(event: MouseEvent) {
-  if (busy.value) event.preventDefault()
+/**
+ * doc 21 §5.1：顶部沿用入口只处理普通站内左键点击。修饰键／新标签页／已被阻止
+ * 的点击保留链接默认行为，不设置沿用意图；普通点击阻止链接默认跳转，由本函数
+ * 内的一次 push 完成导航，避免一次点击导航两次。
+ */
+async function createFromCurrentConversation(event: MouseEvent): Promise<void> {
+  if (busy.value) {
+    event.preventDefault()
+    return
+  }
+  if (
+    event.defaultPrevented ||
+    (event.button !== undefined && event.button !== 0) ||
+    event.metaKey ||
+    event.ctrlKey ||
+    event.shiftKey ||
+    event.altKey
+  ) {
+    return
+  }
+  const target = newQueryTo.value
+  const sourceId = chat.sessionInfo.value?.source_id ?? ''
+  const intent: SourceInheritance | null = sourceId
+    ? { sourceId, targetFullPath: realRouter.resolve(target).fullPath }
+    : null
+  pendingSourceInheritance = intent
+  event.preventDefault()
+  try {
+    const failure = await realRouter.push(target)
+    // 导航结果只清理属于本次操作的意图；成功但 apiReady 未就绪时保留意图，
+    // 由 presetSource 监听在就绪后消费，不在 finally 无条件清除。
+    if (failure && pendingSourceInheritance === intent) clearPendingSourceInheritance()
+  } catch {
+    if (pendingSourceInheritance === intent) clearPendingSourceInheritance()
+  }
 }
+
+/** doc 21 §5.3：左侧入口同页重复导航时同步清空选择、草稿与沿用意图。 */
+function resetNewQueryFromSidebar(): void {
+  if (!onNewQueryPage.value || busy.value) return
+  clearPendingSourceInheritance()
+  chat.invalidatePendingCreate()
+  chat.resetCurrentSession()
+  chat.resetReadiness()
+}
+
+const unregisterNewQueryReset = registerNewQueryReset(resetNewQueryFromSidebar)
+onUnmounted(() => {
+  unregisterNewQueryReset()
+  clearPendingSourceInheritance()
+})
 
 function openHistorySession(sessionId: string) {
   if (busy.value) return
@@ -242,9 +330,20 @@ onUnmounted(() => window.clearTimeout(copyTimer))
     <section v-else class="window">
       <header class="window-head">
         <div class="head-side">
+          <RouterLink v-if="onSessionPage" :to="newQueryTo" custom v-slot="{ href }">
+            <a
+              :href="href"
+              class="head-btn head-btn-primary"
+              :aria-disabled="busy || undefined"
+              @click="createFromCurrentConversation"
+            >
+              <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 3.5v9M3.5 8h9" /></svg>
+              新建查询
+            </a>
+          </RouterLink>
           <div class="head-mark">
             <span class="mark-icon" aria-hidden="true">
-              <svg viewBox="0 0 16 16"><path d="M3 3.5h7.2a1.3 1.3 0 0 1 1.3 1.3V9L9.2 7.5H3A1.3 1.3 0 0 1 1.7 6.2V4.8A1.3 1.3 0 0 1 3 3.5Z" /><path d="M6.2 8.2h4.6L13.5 10V6.8" /></svg>
+              <svg viewBox="0 0 15 15"><path d="M2.117 1.289q-.421 .092-.769 .363-.345 .267-.539 .659-.135 .3-.179 .63-.015 .179 0 5.368v4.472q.015 .732 .029 .809 .121 .359 .399 .571 .279 .209 .623 .209 .253 0 .494-.121 .107-.044 .238-.172 .136-.128 .707-.681 .795-.795 .886-.842l.088-.044 8.672-.015 .18-.044q.271-.077 .472-.194 .201-.121 .396-.315 .197-.198 .314-.399 .121-.201 .198-.472l.044-.18 .015-6.749q-.015-.872-.029-1.157-.015-.209-.044-.359-.151-.509-.542-.868-.389-.363-.901-.469-.117-.029-.868-.029h-4.516-4.471q-.78 .014-.897 .029zM12.601 2.52q.33 .043 .465 .344l.044 .106v7.8l-.029 .092q-.135 .267-.377 .359-.059 .014-4.395 .029l-4.317 .015-.169 .029q-.146 .048-.282 .106-.227 .092-.392 .227-.164 .132-.644 .626l-.63 .616 .015-9.899 .044-.106q.062-.136 .179-.231 .121-.099 .249-.121 .128-.022 5.123-.022 4.996 0 5.116 .03zM4.23 3.765q-.15 .044-.279 .164-.128 .121-.172 .271-.058 .209 .03 .422 .091 .208 .285 .315 .077 .043 .213 .043 .194 .015 .761 .03l4.443-.015 .12-.044q.224-.121 .312-.344 .091-.227 .007-.451-.081-.227-.304-.347l-.106-.044-2.626-.015q-2.607 0-2.684 .015zM4.259 6.27q-.194 .029-.344 .194-.15 .164-.165 .377 0 .15 .066 .3 .07 .15 .205 .238l.029 .029q.059 .048 .194 .063 .165 .014 .736 .029h5.04q.571-.015 .736-.029 .135-.015 .194-.063l.029-.029q.227-.15 .264-.395 .036-.249-.106-.465-.143-.22-.411-.249-.12-.03-3.241-.03-3.12 0-3.226 .03zM4.157 8.789q-.107 .048-.206 .139-.095 .088-.135 .172-.037 .081-.044 .125-.007 .044-.007 .15 0 .165 .044 .271 .12 .223 .348 .315 .073 .029 .344 .029h1.754 1.754q.271 0 .359-.036 .092-.041 .179-.129 .092-.091 .143-.201 .055-.113 .055-.249 0-.135-.044-.256-.106-.209-.315-.315l-.091-.044h-3.794q-.286 .014-.344 .029z" /></svg>
             </span>
             自然语言查询
           </div>
@@ -257,15 +356,6 @@ onUnmounted(() => window.clearTimeout(copyTimer))
           <RouterLink class="head-btn query-back" :to="backTarget">
             <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M12.5 8H3.5" /><path d="m7 4.5-3.5 3.5L7 11.5" /></svg>
             返回
-          </RouterLink>
-          <RouterLink
-            :to="newQueryTo"
-            class="head-btn head-btn-primary"
-            :aria-disabled="busy || undefined"
-            @click="guardNewQuery"
-          >
-            <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 3.5v9M3.5 8h9" /></svg>
-            新建查询
           </RouterLink>
           <button
             ref="historyButton"
@@ -310,6 +400,7 @@ onUnmounted(() => window.clearTimeout(copyTimer))
         :readiness-error="chat.readinessError.value"
         :busy="busy"
         :notice="chat.sessionsNotice.value"
+        :source-inherited="chat.sourceInherited.value"
         @select="chat.checkReadiness"
       />
 
@@ -323,12 +414,15 @@ onUnmounted(() => window.clearTimeout(copyTimer))
         <div class="guide-icon" aria-hidden="true">
           <svg viewBox="0 0 32 32"><path d="M8 8.5h12.5a3 3 0 0 1 3 3V18l-3.2-2.2H8a3 3 0 0 1-3-3v-1.3a3 3 0 0 1 3-3Z" /><circle cx="12" cy="13.2" r="1" /><circle cx="16" cy="13.2" r="1" /><circle cx="20" cy="13.2" r="1" /></svg>
         </div>
-        <h2>选择数据库，开始智能查询</h2>
-        <p>选择数据库并完成检查后，用自然语言开始提问。</p>
+        <!-- doc21 §5.4：沿用可输入时不再要求选库与完成检查，普通新建页保留原提示。 -->
+        <h2>{{ chat.sourceInherited.value ? '开始智能查询' : '选择数据库，开始智能查询' }}</h2>
+        <p>
+          {{ chat.sourceInherited.value ? '已沿用当前数据库，可直接输入问题。' : '选择数据库并完成检查后，用自然语言开始提问。' }}
+        </p>
         <div class="guide-steps">
           <span :class="{ current: guideStep === 1 }"><i>1</i>选择数据库</span>
           <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m6 4 4 4-4 4" /></svg>
-          <span :class="{ current: guideStep === 2 }"><i>2</i>自动完成检查</span>
+          <span :class="{ current: guideStep === 2 }"><i>2</i>{{ chat.sourceInherited.value ? '沿用数据库' : '自动完成检查' }}</span>
           <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m6 4 4 4-4 4" /></svg>
           <span :class="{ current: guideStep === 3 }"><i>3</i>输入自然语言问题</span>
         </div>
@@ -405,22 +499,30 @@ onUnmounted(() => window.clearTimeout(copyTimer))
   min-width: 0;
 }
 
+.head-side {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
 .head-mark {
   display: inline-flex;
   align-items: center;
-  gap: 8px;
-  padding: 9px 12px;
-  border-radius: 10px;
-  background: #e3eefb;
-  color: #2e7cd6;
+  gap: 7px;
+  flex-shrink: 0;
+  padding: 7px 10px;
+  border-radius: 8px;
+  background: #eef3f9;
+  color: #66788f;
   font-size: 13px;
-  font-weight: 700;
+  font-weight: 400;
   line-height: 1;
+  white-space: nowrap;
 }
 
 .mark-icon {
-  width: 16px;
-  height: 16px;
+  width: 15px;
+  height: 15px;
   display: grid;
   place-items: center;
 }
@@ -438,8 +540,10 @@ onUnmounted(() => window.clearTimeout(copyTimer))
 }
 
 .mark-icon svg {
-  width: 16px;
-  height: 16px;
+  width: 15px;
+  height: 15px;
+  fill: currentColor;
+  stroke: none;
 }
 
 .head-title {

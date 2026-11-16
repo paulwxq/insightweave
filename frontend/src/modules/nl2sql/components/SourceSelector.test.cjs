@@ -145,15 +145,54 @@ function textOf(root) {
   return parts.join('')
 }
 
+// doc 21 §6.1：普通场景显式提供 sourceInherited: false；沿用场景覆盖为 true。
 function mountSelector(props) {
   const container = { children: [], parentNode: null }
   const app = renderer.createApp({
     setup() {
-      return () => vue.h(compileSourceSelector(), props)
+      return () => vue.h(compileSourceSelector(), { sourceInherited: false, ...props })
     },
   })
   app.mount(container)
   return { container, app, text: textOf(container) }
+}
+
+/** 沿用标记可变的宿主：用于验证标记清除后主文案同步回到普通就绪文案。 */
+function mountSelectorLive(props) {
+  const container = { children: [], parentNode: null }
+  const inherited = vue.ref(props.sourceInherited ?? false)
+  const app = renderer.createApp({
+    setup() {
+      return () =>
+        vue.h(compileSourceSelector(), { ...props, sourceInherited: inherited.value })
+    },
+  })
+  app.mount(container)
+  return {
+    app,
+    get text() {
+      return textOf(container)
+    },
+    setInherited(value) {
+      inherited.value = value
+    },
+  }
+}
+
+function readyProps(overrides = {}) {
+  return {
+    sources: [SOURCE],
+    loading: false,
+    error: '',
+    selectedSourceId: 'db_src_1',
+    readinessState: 'ready',
+    readinessData: null,
+    readinessError: '',
+    busy: false,
+    notice: '',
+    sourceInherited: false,
+    ...overrides,
+  }
 }
 
 const PENDING_NOTICE = '会话创建结果尚未确认，请勿重复发送，可稍后从查询历史查看。'
@@ -235,4 +274,30 @@ test('单独存在：仅有创建提示或仅有列表错误时各自可见，�
   onlyNotice.app.unmount()
   onlyError.app.unmount()
   idle.app.unmount()
+})
+
+test('doc21 §5.4：沿用就绪与普通检查就绪主文案互斥，不叠加', async () => {
+  const inherited = mountSelector(readyProps({ sourceInherited: true }))
+  assert.ok(inherited.text.includes('已沿用当前数据库，可直接输入问题。'), '沿用主文案必须展示')
+  assert.ok(
+    !inherited.text.includes('数据源已就绪，请在下方输入问题。'),
+    '沿用场景不得再展示普通检查就绪主文案',
+  )
+
+  const normal = mountSelector(readyProps({ sourceInherited: false }))
+  assert.ok(normal.text.includes('数据源已就绪，请在下方输入问题。'), '普通检查就绪保留原文案')
+  assert.ok(!normal.text.includes('已沿用当前数据库'), '普通检查就绪不得展示沿用主文案')
+
+  inherited.app.unmount()
+  normal.app.unmount()
+})
+
+test('doc21 §5.4：沿用标记清除后主文案同步回到普通就绪文案', async () => {
+  const live = mountSelectorLive(readyProps({ sourceInherited: true }))
+  assert.ok(live.text.includes('已沿用当前数据库，可直接输入问题。'))
+  live.setInherited(false)
+  await vue.nextTick()
+  assert.ok(live.text.includes('数据源已就绪，请在下方输入问题。'))
+  assert.ok(!live.text.includes('已沿用当前数据库'))
+  live.app.unmount()
 })

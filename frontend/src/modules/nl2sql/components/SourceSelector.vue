@@ -19,6 +19,7 @@ const props = defineProps<{
   readinessError: string
   busy: boolean
   notice: string
+  sourceInherited: boolean
 }>()
 
 const emit = defineEmits<{
@@ -80,7 +81,9 @@ function onSourceLabel(item: DataSourceListItem) {
         <p v-else-if="selectedSourceId === ''">新建查询前先选择数据库并完成检查，再次打开会话不会重复检查。</p>
         <p v-else-if="readinessState === 'checking'">正在检查知识就绪状态…</p>
         <p v-else-if="busy">正在创建会话…</p>
-        <p v-else-if="readinessState === 'ready'">数据源已就绪，请在下方输入问题。</p>
+        <p v-else-if="readinessState === 'ready'">
+          {{ sourceInherited ? '已沿用当前数据库，可直接输入问题。' : '数据源已就绪，请在下方输入问题。' }}
+        </p>
         <p v-else-if="readinessState === 'blocked'">
           <strong>数据源暂未就绪。</strong>
           <span v-for="check in blockedChecks" :key="check.name">{{ check.message || check.error_code }}</span>
