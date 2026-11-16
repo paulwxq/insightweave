@@ -9,7 +9,8 @@ from __future__ import annotations
 
 import hashlib
 import re
-from typing import Any, Literal, Optional
+from datetime import UTC
+from typing import Any, Literal
 
 from langchain.tools import ToolRuntime
 from langchain_core.tools import tool
@@ -70,56 +71,123 @@ def _sql_hint(ev: TimeEvidence) -> str:
 
 
 def make_resolve_time_range_tool(services: DbAgentServices):
-    """构造 resolve_time_range 工具。"""
+    """构造 resolve_time_range 工具（LLM 版，doc 16：主 Agent 只传原文）。"""
 
     class ResolveTimeRangeArgs(RuntimeToolArgs):
         source_text: str = Field(
-            min_length=1, max_length=200, description="用户原文中的时间表达，逐字引用"
+            min_length=1,
+            max_length=200,
+            description="逐字引用用户需要解析的时间表达，例如大前天、截至今天中午12点",
         )
-        kind: Literal["relative", "calendar", "explicit_range", "open_range"]
-        relative: Optional[
-            Literal[
-                "today",
-                "yesterday",
-                "this_week",
-                "last_week",
-                "this_month",
-                "last_month",
-                "this_quarter",
-                "last_quarter",
-                "this_year",
-                "last_year",
-                "last_n_days",
-            ]
-        ] = Field(default=None, description="kind=relative 时必填")
-        n: Optional[int] = Field(
-            default=None, ge=1, le=366, description="last_n_days 的天数"
-        )
-        year: Optional[int] = Field(default=None, description="calendar：年")
-        quarter: Optional[int] = Field(
-            default=None, ge=1, le=4, description="calendar：季度"
-        )
-        month: Optional[int] = Field(
-            default=None, ge=1, le=12, description="calendar：月"
-        )
-        day: Optional[int] = Field(
-            default=None, ge=1, le=31, description="calendar：日"
-        )
-        start_date: Optional[str] = Field(
-            default=None, description="explicit_range 起始日（含），YYYY-MM-DD"
-        )
-        end_date_inclusive: Optional[str] = Field(
-            default=None, description="explicit_range 结束日（含），YYYY-MM-DD"
-        )
-        boundary_date: Optional[str] = Field(
-            default=None, description="open_range 边界日，YYYY-MM-DD"
-        )
-        relation: Optional[Literal["before", "through", "from", "after"]] = Field(
-            default=None, description="open_range 单边方向"
+        context: str | None = Field(
+            default=None,
+            max_length=500,
+            description="可选语境，例如前文明确的年份、日期字段类型或比较关系；不要自行计算日期",
         )
 
     @tool(args_schema=ResolveTimeRangeArgs)
     def resolve_time_range(
+        source_text: str,
+        context: str | None,
+        runtime: ToolRuntime[DbAgentContext, DbDeepAgentState],
+    ):
+        """把用户原文中的时间表达解析为半开区间 [start, end) 并登记时间证据。
+
+        内部由独立 flash 模型结合服务端当前北京时间解释语义；主 Agent 只需
+        逐字引用用户原文，不分类、不填日期参数。SQL 中的时间过滤只能使用
+        本工具返回的非空边界；单边区间恰有一端为 null；应原样采用 sql_hint
+        中的边界字符串。
+        """
+        ctx = runtime.context
+        result = services.time_resolver.resolve(
+            ctx,
+            source_text=source_text,
+            context=context,
+            config=runtime.config,
+        )
+        if not result.ok:
+            retryable = result.error_code != "ambiguous_time_reference"
+            content = error_envelope(
+                result.error_code or "time_parse_invalid_output",
+                result.message,
+                retryable=retryable,
+                hint=result.hint,
+            )
+            return tool_command(content, runtime.tool_call_id or "")
+        ev = result.evidence
+        data = {
+            "time_evidence_id": ev["time_evidence_id"],
+            "grain": ev["grain"],
+            "start": ev["start"],
+            "end": ev["end"],
+            "timezone": ev["timezone"],
+            "interpretation": result.interpretation or "",
+            "sql_hint": _sql_hint(ev),
+        }
+        content = serialize_tool_output({"status": "ok", "data": data, "warnings": []})
+        logger.info(
+            "[request_id=%s run_id=%s] resolve_time_range: %s -> [%s, %s)",
+            ctx.request_id,
+            ctx.run_id,
+            source_text,
+            ev["start"],
+            ev["end"],
+        )
+        return tool_command(
+            content,
+            runtime.tool_call_id or "",
+            updates={"db_time_evidence": [ev]},
+        )
+
+    _attach_validation_handler(resolve_time_range)
+    return resolve_time_range
+
+
+def make_resolve_time_range_tool_old(services: DbAgentServices):
+    """【已退役 2026-11-15】规则词表版工具（doc 16 §2）。
+
+    保留仅供新旧对比：内部直接绑定 TimeResolverOld（不经服务容器，容器已换
+    LLM 版解析器）；不再装配进 Agent。参数 schema 与旧行为完全一致。
+    """
+
+    from src.modules.db_deepagent.services.time_resolver_old import TimeResolverOld
+
+    resolver_old = TimeResolverOld()
+
+    class ResolveTimeRangeOldArgs(RuntimeToolArgs):
+        source_text: str = Field(
+            min_length=1, max_length=200, description="用户原文中的时间表达，逐字引用"
+        )
+        kind: Literal["relative", "calendar", "explicit_range", "open_range"]
+        relative: Literal["today", "yesterday", "this_week", "last_week", "this_month", "last_month", "this_quarter", "last_quarter", "this_year", "last_year", "last_n_days"] | None = Field(default=None, description="kind=relative 时必填")
+        n: int | None = Field(
+            default=None, ge=1, le=366, description="last_n_days 的天数"
+        )
+        year: int | None = Field(default=None, description="calendar：年")
+        quarter: int | None = Field(
+            default=None, ge=1, le=4, description="calendar：季度"
+        )
+        month: int | None = Field(
+            default=None, ge=1, le=12, description="calendar：月"
+        )
+        day: int | None = Field(
+            default=None, ge=1, le=31, description="calendar：日"
+        )
+        start_date: str | None = Field(
+            default=None, description="explicit_range 起始日（含），YYYY-MM-DD"
+        )
+        end_date_inclusive: str | None = Field(
+            default=None, description="explicit_range 结束日（含），YYYY-MM-DD"
+        )
+        boundary_date: str | None = Field(
+            default=None, description="open_range 边界日，YYYY-MM-DD"
+        )
+        relation: Literal["before", "through", "from", "after"] | None = Field(
+            default=None, description="open_range 单边方向"
+        )
+
+    @tool(args_schema=ResolveTimeRangeOldArgs)
+    def resolve_time_range_old(
         source_text: str,
         kind: str,
         relative: str | None,
@@ -134,13 +202,9 @@ def make_resolve_time_range_tool(services: DbAgentServices):
         relation: str | None,
         runtime: ToolRuntime[DbAgentContext, DbDeepAgentState],
     ):
-        """把用户原文中的时间表达解析为半开区间 [start, end) 并登记时间证据。
-
-        SQL 中的时间过滤只能使用本工具返回的非空边界；单边区间恰有一端为 null。
-        source_text 必须逐字取自用户问题，参数与原文的一致性由代码核对。
-        """
+        """【退役】规则词表版时间解析（对比用，勿在新链路调用）。"""
         ctx = runtime.context
-        result = services.time_resolver.resolve(
+        result = resolver_old.resolve(
             ctx,
             source_text=source_text,
             kind=kind,
@@ -173,22 +237,14 @@ def make_resolve_time_range_tool(services: DbAgentServices):
             "sql_hint": _sql_hint(ev),
         }
         content = serialize_tool_output({"status": "ok", "data": data, "warnings": []})
-        logger.info(
-            "[request_id=%s run_id=%s] resolve_time_range: %s -> [%s, %s)",
-            ctx.request_id,
-            ctx.run_id,
-            source_text,
-            ev["start"],
-            ev["end"],
-        )
         return tool_command(
             content,
             runtime.tool_call_id or "",
             updates={"db_time_evidence": [ev]},
         )
 
-    _attach_validation_handler(resolve_time_range)
-    return resolve_time_range
+    _attach_validation_handler(resolve_time_range_old)
+    return resolve_time_range_old
 
 
 # ============================================================================
@@ -206,13 +262,13 @@ def make_probe_dimension_values_tool(services: DbAgentServices):
         mode: Literal["exact", "contains", "distinct"] = Field(
             description="exact=确认值存在；contains=确认包含该文本的值存在；distinct=列出取值"
         )
-        value_text: Optional[str] = Field(
+        value_text: str | None = Field(
             default=None,
             min_length=1,
             max_length=100,
             description="exact/contains 模式必填的待探测文本",
         )
-        limit: Optional[int] = Field(
+        limit: int | None = Field(
             default=None,
             ge=1,
             le=max_values,
@@ -409,20 +465,16 @@ def make_reuse_evidence_tool(services: DbAgentServices, storage_clock=None):
     storage_clock：存储生命周期时钟（复用保留期判定，禁用 ctx.now／--fixed-now），
     测试可注入固定时刻；默认实时 UTC。
     """
-    from datetime import datetime, timedelta, timezone
+    from datetime import datetime, timedelta
 
     from src.modules.db_deepagent.errors import ResultStoreError
     from src.modules.db_deepagent.persistence.session_guard import (
         SessionGuardRequired,
         validate_lease,
     )
-    from src.modules.db_deepagent.services.sql_pipeline import (
-        LedgerView,
-        TaskAccessError,
-    )
     from src.modules.db_deepagent.services.task_ledger import canonical_json
 
-    clock = storage_clock or (lambda: datetime.now(timezone.utc))
+    clock = storage_clock or (lambda: datetime.now(UTC))
 
     def _parse_utc(value):
         if not isinstance(value, str):
@@ -432,8 +484,8 @@ def make_reuse_evidence_tool(services: DbAgentServices, storage_clock=None):
         except ValueError:
             return None
         if parsed.tzinfo is None:
-            parsed = parsed.replace(tzinfo=timezone.utc)
-        return parsed.astimezone(timezone.utc)
+            parsed = parsed.replace(tzinfo=UTC)
+        return parsed.astimezone(UTC)
 
     class SourceEvidenceRefItem(RuntimeToolArgs.__bases__[0]):
         """完整来源引用（doc 6.3 §6.4）：session 固定取当前会话"""
@@ -1068,5 +1120,6 @@ def _reuse_time_dim(services, ctx, runtime, ids, by_id, ambiguous, clock):
 __all__ = [
     "make_probe_dimension_values_tool",
     "make_resolve_time_range_tool",
+    "make_resolve_time_range_tool_old",
     "make_reuse_evidence_tool",
 ]

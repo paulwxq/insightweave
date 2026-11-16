@@ -1,4 +1,4 @@
-"""TimeResolver 单元测试（docs/v4/5 §7.5、§18.2 R01–R03/F01）
+"""TimeResolverOld（退役规则版）单元测试（docs/v4/5 §7.5、§18.2 R01–R03/F01；doc 16 后仅对比用）
 
 固定时钟 2026-10-13 12:00:00+08:00（conftest.db_agent_context）。
 """
@@ -10,14 +10,14 @@ from dataclasses import replace
 import pytest
 
 from src.modules.db_deepagent.context import DbAgentContext
-from src.modules.db_deepagent.services.time_resolver import TimeResolver
+from src.modules.db_deepagent.services.time_resolver_old import TimeResolverOld
 
 pytestmark = pytest.mark.unit
 
 
 @pytest.fixture()
-def resolver() -> TimeResolver:
-    return TimeResolver()
+def resolver() -> TimeResolverOld:
+    return TimeResolverOld()
 
 
 @pytest.fixture()

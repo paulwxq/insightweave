@@ -16,7 +16,9 @@ from dataclasses import dataclass, field
 from typing import Any
 
 # 完成规则版本：随判定语义变化递增，写入最终记录供审计
-TASK_COMPLETION_RULES_VERSION = 1
+# v2（doc 19）：新增零任务直接提交分支（completed/needs_clarification，
+# findings 与 unresolved 必空）；已登记任务路径语义不变。
+TASK_COMPLETION_RULES_VERSION = 2
 
 
 @dataclass
@@ -367,6 +369,31 @@ def evaluate_submission(
             and r.get("reason_code") == "dependency_blocked"
         ),
     }
+
+    # 步骤 1.5（doc 19 §3）：零任务直接提交分支——本 run 从未登记任何
+    # 任务（含作废记录）且存在有效提交时，纯解释/澄清答案直接交付，不进
+    # 入任务视图核验。无提交（None）不进本分支，维持未提交收尾；零任务的
+    # failed/partial/no_data 同样不进本分支，落回步骤 2 保持数据任务失败
+    # 语义。直接回答不得携带 findings/任务引用；澄清问题写入 answer 与
+    # open_questions（提交 schema 无 clarification_question 字段）。
+    if not tasks and normalized_submission is not None:
+        direct_status = normalized_submission.get("status")
+        if direct_status in ("completed", "needs_clarification"):
+            if normalized_submission.get("findings") or normalized_submission.get(
+                "unresolved_task_refs"
+            ):
+                decision.errors.append(
+                    GateError(
+                        "direct_answer_task_refs_not_allowed",
+                        "零任务直接回答不得携带 findings 或 unresolved_task_refs；"
+                        "澄清问题写入 answer 与 open_questions",
+                    )
+                )
+                return decision
+            decision.accepted = True
+            decision.expected_status = direct_status
+            decision.counts = {}  # doc 19 §3.3：直接回答无任务视图计数
+            return decision
 
     # 步骤 2：任务视图——空集合与全部作废均拒绝（§7.4 第一行）
     if not tasks or not non_void:
@@ -906,12 +933,20 @@ def all_task_versions(state: Any) -> dict[tuple[str, int], dict]:
 # ------------------------------------------------ §7.2 确定性分项正文
 
 
-def build_delivery_answer_section(decision: CompletionDecision) -> str:
-    """确定性"分项结果/未完成事项"段落（§7.2；R1-13）。
+def build_delivery_answer_section(
+    decision: CompletionDecision,
+    *,
+    include_audit_details: bool = True,
+) -> str:
+    """确定性"分项结果/未完成事项"段落（§7.2；R1-13；doc 17 §4.2）。
 
     逐项展示合法 finding 文本、失败原因、澄清问题与作废说明；完全相同
     条目去重（保序）。合法交付（model 来源）与系统兜底共用；原始提交
     payload 由调用方保真归档，不因此改写。
+
+    include_audit_details=False 为精简模式（doc 17）：跳过 finding 技术标签、
+    completed 与 voided 审计条目，仅保留 failed、needs_clarification 任务与
+    权威澄清问题——成功交付不再向用户正文追加重复审计段。
     """
     lines: list[str] = []
     seen: set[str] = set()
@@ -927,19 +962,21 @@ def build_delivery_answer_section(decision: CompletionDecision) -> str:
 
     # R2-07：合法 findings 的实际结论必须进入交付正文（模型 answer 可能
     # 只写"已处理"）。逐项展示 finding 文本及对应分项任务，原始 payload
-    # 由调用方保真归档，不因此改写。
-    for finding in decision.finding_summaries:
-        refs = ", ".join(
-            f"{r.get('sub_task_id')}@{r.get('revision')}"
-            for r in finding.get("task_refs") or []
-            if isinstance(r, Mapping)
-        )
-        label = finding.get("finding_id") or "分项"
-        suffix = f"（{refs}）" if refs else ""
-        _add(f"结论 {label}{suffix}：{finding.get('text')}")
+    # 由调用方保真归档，不因此改写。精简模式跳过（answer 由模型组织）。
+    if include_audit_details:
+        for finding in decision.finding_summaries:
+            refs = ", ".join(
+                f"{r.get('sub_task_id')}@{r.get('revision')}"
+                for r in finding.get("task_refs") or []
+                if isinstance(r, Mapping)
+            )
+            label = finding.get("finding_id") or "分项"
+            suffix = f"（{refs}）" if refs else ""
+            _add(f"结论 {label}{suffix}：{finding.get('text')}")
     for summary in decision.outcome_summaries:
         if summary.status == "completed":
-            _add(f"已完成：{summary.content}")
+            if include_audit_details:
+                _add(f"已完成：{summary.content}")
         elif summary.status == "failed":
             reason = (summary.reason or "").strip() or "未提供原因"
             _add(f"未完成：{summary.content}（原因：{reason}）")
@@ -947,8 +984,9 @@ def build_delivery_answer_section(decision: CompletionDecision) -> str:
             question = (summary.clarification_question or "").strip() or "需要澄清"
             _add(f"待澄清：{summary.content}（问题：{question}）")
         elif summary.status == "voided":
-            reason = (summary.reason or "").strip() or "计划调整"
-            _add(f"已作废：{summary.content}（原因：{reason}）")
+            if include_audit_details:
+                reason = (summary.reason or "").strip() or "计划调整"
+                _add(f"已作废：{summary.content}（原因：{reason}）")
     for question in decision.authoritative_questions:
         _add(f"需要澄清：{question}")
     return "\n".join(lines)

@@ -145,7 +145,9 @@ class TestChecks:
         assert payload["error"]["error_type"] == "final_answer_already_submitted"
 
     def test_no_task_ledger_rejected(self, node, db_agent_context):
-        """doc 6.3 §7.4：没有有效业务任务时拒绝提交（简单题也不例外）。"""
+        """doc 6.3 §7.4 + doc 19：零任务且携带 findings → 直接分支空约束
+        拒绝（零任务的 completed/澄清可无 findings 直答，另见
+        test_doc19_direct_answer.py）。"""
         updates, msg = invoke_tool_node(
             node,
             [("submit_final_answer", _args(), "tc-sub")],
@@ -159,7 +161,7 @@ class TestChecks:
             },
         )
         payload = json.loads(msg.content)
-        assert payload["error"]["error_type"] == "task_not_registered"
+        assert payload["error"]["error_type"] == "direct_answer_task_refs_not_allowed"
         assert "db_final_answers" not in updates
 
     def test_invalid_evidence_reference(self, node, db_agent_context):

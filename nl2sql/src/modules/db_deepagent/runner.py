@@ -8,6 +8,7 @@ P0 准备（线程确定／轮换／携带证据）→ P1 运行（invoke）→ 
 from __future__ import annotations
 
 import json
+import logging
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -763,13 +764,24 @@ class DbAgentRunner:
         if not should_fallback and eligible_submission is not None:
             # R1-13：合法交付（model 来源）附加确定性分项段落；原始提交
             # payload 按原值归档，交付正文实时/归档/历史/CLI 一致。
+            # doc 17 §4：用户正文用精简模式（仅失败/澄清），完整分项诊断
+            # 写 DEBUG 日志，不拼入交付正文。
             from src.modules.db_deepagent.services.task_completion import (
                 build_delivery_answer_section,
             )
 
-            section = build_delivery_answer_section(decision)
+            section = build_delivery_answer_section(
+                decision, include_audit_details=False
+            )
             if section:
                 answer = f"{answer}\n\n{section}"
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(
+                    "[request_id=%s run_id=%s] 完整分项诊断（不进交付正文）:\n%s",
+                    request_id,
+                    run_id,
+                    build_delivery_answer_section(decision),
+                )
         if should_fallback:
             answer = self._build_fallback_answer(status, evidence, known_counts)
             task_section = self._fallback_task_section(decision)
@@ -1236,6 +1248,15 @@ class DbAgentRunner:
             and eligible_payload.get("status") in ("completed", "partial")
             and cited_reused
         )
+        # 条件 c（doc 19 §6）：零任务直接回答（本 run 从未登记任何任务，
+        # 含作废记录）的合法提交 → 正常 QA 归档，不写 run_errors。复用
+        # decision.outcome_summaries（由全部任务记录生成）判定，与门控
+        # 直接分支口径一致；仅作废时该列表非空，不满足本条件。
+        condition_c = (
+            decision is not None
+            and decision.accepted
+            and not decision.outcome_summaries
+        )
         # doc 6.3 §8.2：封存运行来源快照（写 QA/run_errors 前；失败轮次
         # 同样封存以保留解释依据）。封存异常原样上抛，由 _finalize 的
         # P3 分类处理（持久化/运行时）。
@@ -1253,7 +1274,7 @@ class DbAgentRunner:
             "thread_id": thread_id,
             "run_id": run_id,
         }
-        if has_real_execution or condition_b:
+        if has_real_execution or condition_b or condition_c:
             self._archive.write_qa(
                 session_id,
                 request_id,

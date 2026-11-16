@@ -330,8 +330,15 @@ class TestR301AnalysisReuseScope:
             result.status,
             [e.message for e in result.errors],
         )
-        # R2-07：合法 finding 的实际结论进入确定性交付正文
-        assert "沿用分析结论：销售额123万元" in result.answer
+        # R2-07（doc 17 调整）：交付正文为模型提交原文，不再强制追加
+        # finding 审计段；finding 结论保留在结构化 payload 与 QA 归档中。
+        assert result.answer == "已处理"
+        assert "结论 F-" not in result.answer
+        qa_values = [v for (ns, _k), v in store.items.items() if ns[1] == "qa"]
+        assert any(
+            f["text"] == "沿用分析结论：销售额123万元"
+            for f in qa_values[0]["answer"]["findings"]
+        )
         assert result.archived is True
         assert any(
             ns[1] == "qa" for (ns, _k) in store.items

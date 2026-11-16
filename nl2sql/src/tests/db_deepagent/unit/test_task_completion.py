@@ -135,9 +135,13 @@ def _codes(decision):
 
 class TestGateBasics:
     def test_no_tasks_rejected(self):
+        """doc 19：零任务 + completed + 空 findings → 直接回答分支放行；
+        任务视图拒绝（task_not_registered）由 voided-only/failed/None
+        形态承担（本类 test_all_voided_rejected 及
+        test_doc19_direct_answer.py）。"""
         decision = evaluate_submission(_submission(), _snapshot({}))
-        assert not decision.accepted
-        assert "task_not_registered" in _codes(decision)
+        assert decision.accepted
+        assert decision.expected_status == "completed"
 
     def test_all_voided_rejected(self):
         tasks = {"T1": _task(status="voided")}

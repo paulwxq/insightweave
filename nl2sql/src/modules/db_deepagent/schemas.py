@@ -398,7 +398,9 @@ class DbAgentFinalAnswer(BaseModel):
     doc 6.3 §7.2：unresolved_task_refs 默认空列表（Field(default_factory=list)），
     仅列本轮 failed/needs_clarification 任务，与 open_questions（非阻塞补充）
     分工不同；显式 None 不接受为列表。open_questions 不参与 expected_status
-    计算，也不做与 unresolved 的结构化一致性校验。
+    计算，也不做与 unresolved 的结构化一致性校验。doc 19 例外：零任务直接
+    澄清分支中，open_questions 承载澄清问题（提交接口无 clarification_question
+    字段，该字段属于任务记录）。
     """
 
     model_config = ConfigDict(extra="forbid")

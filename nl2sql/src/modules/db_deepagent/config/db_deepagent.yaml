@@ -149,6 +149,13 @@ summarization:                           # 摘要器配置（doc 5.1：独立摘
   recent_context_tokens: 24000           # 必须小于 summary_trigger_tokens
   trim_tokens_to_summarize: null         # 显式传 None，所选待摘要历史不再按 SDK 默认 4000 Token 裁剪
 
+time_resolution:                          # 日期解析专用 flash 模型（doc 16）
+  llm_profile: qwen3_8_flash             # 引用全局 llm_profiles；profile 自带 temperature=0 与 enable_thinking=false
+  overrides:
+    response_format: {type: json_object} # 输出协议固定 JSON 对象
+    max_retries: 2                       # SDK 传输层重试（连接失败/429/5xx）
+  request_timeout_seconds: 15            # build_time_resolver 显式映射为工厂 timeout 覆盖
+
 filesystem:
   tool_token_limit_before_evict: 20000   # SDK 近似转存阈值；当前版本按 4 字符/token 判断，
                                          #   20000 对应 80000 字符（超过即转存）

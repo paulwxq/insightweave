@@ -302,21 +302,8 @@ TOOL_VISIBLE_FIELDS: dict[str, tuple[list[str], list[str]]] = {
         ["base_table", "target_tables"],
     ),
     "resolve_time_range": (
-        [
-            "source_text",
-            "kind",
-            "relative",
-            "n",
-            "year",
-            "quarter",
-            "month",
-            "day",
-            "start_date",
-            "end_date_inclusive",
-            "boundary_date",
-            "relation",
-        ],
-        ["source_text", "kind"],
+        ["source_text", "context"],
+        ["source_text"],
     ),
     "probe_dimension_values": (
         ["table_id", "column", "mode", "value_text", "limit"],

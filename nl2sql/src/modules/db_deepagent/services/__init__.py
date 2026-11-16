@@ -26,7 +26,10 @@ from src.modules.db_deepagent.services.sql_guard import SqlEvidenceGuard
 from src.modules.db_deepagent.services.sql_pipeline import SqlPipeline
 from src.modules.db_deepagent.services.sql_validation import DbSqlValidator
 from src.modules.db_deepagent.services.table_catalog import TableCatalog
-from src.modules.db_deepagent.services.time_resolver import TimeResolver
+from src.modules.db_deepagent.services.time_resolver import (
+    TimeResolver,
+    build_time_resolver,
+)
 from src.services.config_loader import get_config
 from src.utils.logger import get_module_logger
 
@@ -202,7 +205,7 @@ def build_services(
             validator=validator,
             guard=guard,
             pipeline=pipeline,
-            time_resolver=TimeResolver(),
+            time_resolver=build_time_resolver(cfg),
             probe=DimensionProbeBuilder(),
             results=results,
             analysis=ResultAnalysisService(cfg, results),

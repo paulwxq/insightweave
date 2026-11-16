@@ -1118,18 +1118,23 @@ class TestFallbackFinalization:
         assert result.answer.startswith("系统兜底说明：")
 
     def test_normal_answer_not_overridden_with_v2_fields(self, assembly_services):
-        """正常有效答案：不覆盖；qa 记录 v2 字段齐备，原 answer 保留模型提交。"""
+        """正常有效答案：不覆盖；qa 记录 v2 字段齐备，原 answer 保留模型提交。
+
+        doc 17：成功交付不再向正文追加分项审计段（结论 F-/已完成/已作废），
+        交付正文即模型原文；失败/澄清场景的追加见 doc 17 精简模式测试。
+        """
         store = FakeStore()
         result, _ = _run_ok(assembly_services, store, _state())
         assert result.status == "completed"
-        assert result.answer.startswith(ANSWER["answer"])  # R1-13：附加分项段
-        assert result.answer.strip().endswith("已完成：统计 9 月订单")
+        assert result.answer == ANSWER["answer"]  # doc 17：无追加审计段
+        for token in ("结论 F-", "已完成：", "已作废："):
+            assert token not in result.answer
         assert not any("服务端兜底" in w for w in result.warnings)
         qa = _qa_records(store)[0]
         assert qa["archive_schema_version"] == 2
         assert qa["answer_source"] == "model"
         assert qa["answer"] == ANSWER  # 原模型提交 payload 原样
-        # R1-13：交付正文=模型原文+分项段；原始 payload 原样
+        # R1-13：交付正文与归档一致；原始 payload 原样
         assert qa["delivery_answer"]["answer"] == result.answer
         assert qa["delivery_answer"]["status"] == "completed"
 

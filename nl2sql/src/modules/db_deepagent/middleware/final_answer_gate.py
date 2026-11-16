@@ -80,8 +80,8 @@ class FinalAnswerGateMiddleware(AgentMiddleware[DbDeepAgentState, DbAgentContext
             "messages": [
                 HumanMessage(
                     content=(
-                        "请调用 submit_final_answer 单独提交最终答案，"
-                        "并引用已有 evidence_id。"
+                        "请调用 submit_final_answer 单独提交最终答案；"
+                        "已登记数据任务时在 findings 中引用对应 evidence_id。"
                         + (
                             f"待处理任务：{pending_summary}。"
                             if pending_summary

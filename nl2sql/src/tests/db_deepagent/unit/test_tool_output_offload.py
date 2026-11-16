@@ -159,7 +159,7 @@ def result_services(db_agent_config, tmp_path):
     from src.modules.db_deepagent.services.sql_guard import SqlEvidenceGuard
     from src.modules.db_deepagent.services.sql_pipeline import SqlPipeline
     from src.modules.db_deepagent.services.sql_validation import DbSqlValidator
-    from src.modules.db_deepagent.services.time_resolver import TimeResolver
+    from src.tests.db_deepagent.conftest import fake_time_resolver
 
     cfg = db_agent_config.model_copy(deep=True)
     cfg.workspace.root = str(tmp_path)
@@ -194,7 +194,7 @@ def result_services(db_agent_config, tmp_path):
             source_id=TEST_SOURCE_ID,
             guard=guard,
             pipeline=pipeline,
-            time_resolver=TimeResolver(),
+            time_resolver=fake_time_resolver(),
             probe=DimensionProbeBuilder(),
             results=results,
             analysis=ResultAnalysisService(cfg, results),

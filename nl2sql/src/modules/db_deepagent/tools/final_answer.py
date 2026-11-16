@@ -142,10 +142,15 @@ def make_submit_final_answer_tool(services: Any = None):
     ):
         """提交本运行的最终答案；必须单独调用（同一条消息不调用其他工具）。
 
-        每条 finding 带 finding_id（F-1、F-2…）与 task_refs，并引用
-        execute_sql／analyze_result／reuse_evidence 返回过、且已选入对应任务
-        成果的 evidence_id；探针执行记录不能引用。unresolved_task_refs 恰列
-        本轮 failed/needs_clarification 任务；open_questions 只放非阻塞补充。
+        需要取数的问题：每条 finding 带 finding_id（F-1、F-2…）与
+        task_refs，并引用 execute_sql／analyze_result／reuse_evidence 返回
+        过、且已选入对应任务成果的 evidence_id；探针执行记录不能引用。
+        unresolved_task_refs 恰列本轮 failed/needs_clarification 任务；
+        open_questions 只放非阻塞补充。
+        无需取数的问题（纯解释/向用户澄清）：不登记任务，findings 与
+        unresolved_task_refs 留空，直接提交；澄清问题写入 answer 并列入
+        open_questions。answer 面向用户简洁完整；详细技术口径写入
+        metric_definitions，不在 answer 展开内部表字段、任务号或证据编号。
         提交后运行由系统结束。
         """
         ctx = runtime.context
@@ -216,14 +221,27 @@ def make_submit_final_answer_tool(services: Any = None):
                 run_id,
                 primary.code if primary else "unknown",
             )
+            # doc 19 §7：hint 按错误码分流，不得互相承诺对方的恢复路径
+            reject_hints = {
+                "task_not_registered": (
+                    "已作废全部任务时当前不支持切换为零任务直接回答；数据"
+                    "问题请重新登记真实任务，无需补做无关 SQL"
+                ),
+                "direct_answer_task_refs_not_allowed": (
+                    "清空 findings 与 unresolved_task_refs 后直接重提；澄清"
+                    "问题写入 answer 与 open_questions"
+                ),
+            }
+            hint = reject_hints.get(
+                primary.code if primary else "",
+                "修正提交（登记终态/覆盖 findings/unresolved 恰覆盖/"
+                "status 与业务判定一致）；不需要重新执行 SQL",
+            )
             return error_envelope(
                 primary.code if primary else "task_completion_rejected",
                 primary.message if primary else "任务门控拒绝",
                 retryable=True,
-                hint=(
-                    "修正提交（登记终态/覆盖 findings/unresolved 恰覆盖/"
-                    "status 与业务判定一致）；不需要重新执行 SQL"
-                ),
+                hint=hint,
                 data=data,
             )
         # 4. 通过：保存原提交与服务端规范化答案记录（doc 6.3 §7.1）

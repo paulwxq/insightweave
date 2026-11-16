@@ -31,8 +31,65 @@ from src.modules.db_deepagent.services.sql_validation import DbSqlValidator
 from src.modules.db_deepagent.services.table_catalog import TableCatalog
 from src.modules.db_deepagent.services.time_resolver import TimeResolver
 
+
 # 测试统一使用的来源绑定（doc 5.1 §1 短 ID：服务/会话绑定 source_id 的
 # 假数据源 A；双源用例另用 TEST_SOURCE_ID_B 区分同名对象）
+class ScriptedTimeModel(BaseChatModel):
+    """doc 16 测试用可编程 flash 模型：按 source_text 查脚本返回 JSON。
+
+    真实 BaseChatModel 子类——metadata/回调链路与生产一致；未命中脚本时
+    返回 default（固定月区间），供既有工具测试离线使用。
+    """
+
+    script: dict = Field(default_factory=dict)
+    default_response: str = (
+        '{"status":"ok","start":"2026-10-01","end":"2026-11-01","grain":"month",'
+        '"interpretation":"固定测试区间（conftest 默认）","clarification_question":null}'
+    )
+
+    @property
+    def _llm_type(self) -> str:
+        return "scripted-time-test"
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        import json as _json
+
+        source = ""
+        try:
+            payload = _json.loads(messages[-1].content)
+            source = str(payload.get("source_text") or "")
+        except Exception:  # noqa: BLE001（测试假模型容错）
+            source = ""
+        content = self.script.get(source, self.default_response)
+        return ChatResult(
+            generations=[ChatGeneration(message=AIMessage(content=content))]
+        )
+
+
+_DEFAULT_TIME_SCRIPT = {
+    "2026年9月": (
+        '{"status":"ok","start":"2026-09-01","end":"2026-10-01","grain":"month",'
+        '"interpretation":"2026年9月整月（conftest 脚本）","clarification_question":null}'
+    ),
+    "2026年10月1日之前，不含当天": (
+        '{"status":"ok","start":null,"end":"2026-10-01","grain":"day",'
+        '"interpretation":"单边：不含 10-01 当天（conftest 脚本）","clarification_question":null}'
+    ),
+}
+
+
+def fake_time_resolver(script: dict | None = None) -> TimeResolver:
+    """离线 LLM 版时间解析器（doc 16 §8：测试不调真实 flash）。
+
+    自带默认脚本覆盖既有工具测试的两条原文；调用方可传 script 覆盖或扩展。
+    """
+    merged = {**_DEFAULT_TIME_SCRIPT, **(script or {})}
+    return TimeResolver(
+        ScriptedTimeModel(script=merged),
+        "TEST-SYSTEM-PROMPT（conftest 假解析器，不加载真实提示词文件）",
+    )
+
+
 TEST_SOURCE_ID = "db_src_1"
 TEST_SOURCE_ID_B = "db_src_2"
 
@@ -461,7 +518,7 @@ def guard_services(pipeline_stack, db_agent_config: DbAgentConfig) -> DbAgentSer
             db_agent_config.validation.guard, _db, DimensionProbeBuilder()
         ),
         pipeline=pipeline,
-        time_resolver=TimeResolver(),
+        time_resolver=fake_time_resolver(),
         probe=DimensionProbeBuilder(),
         results=results,
         analysis=_result_analysis(db_agent_config, results),
@@ -722,7 +779,7 @@ def assembly_services(
         validator=validator,
         guard=guard,
         pipeline=pipeline,
-        time_resolver=TimeResolver(),
+        time_resolver=fake_time_resolver(),
         probe=DimensionProbeBuilder(),
         results=results,
         analysis=ResultAnalysisService(cfg, results),

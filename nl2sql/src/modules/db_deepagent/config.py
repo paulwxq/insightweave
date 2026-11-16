@@ -222,6 +222,14 @@ class FilesystemConfig(_StrictModel):
     tool_token_limit_before_evict: int = Field(gt=0)
 
 
+class TimeResolutionConfig(_StrictModel):
+    # 日期解析专用 LLM profile（doc 16 §6）：必填，引用全局 llm_profiles；
+    # 存在性由 _check_time_resolution 校验，参数合法性由 get_llm() 负责
+    llm_profile: str = Field(min_length=1)
+    overrides: dict[str, Any] = Field(default_factory=dict)
+    request_timeout_seconds: float = Field(gt=0)
+
+
 class ThreadConfig(_StrictModel):
     rotate_after_messages: int = Field(gt=0)
     carry_max_evidence: int = Field(gt=0)
@@ -265,6 +273,7 @@ class DbAgentConfig(_StrictModel):
     results: ResultsConfig
     budget: BudgetConfig
     summarization: SummarizationConfig
+    time_resolution: TimeResolutionConfig
     filesystem: FilesystemConfig
     thread: ThreadConfig
     workspace: WorkspaceConfig
@@ -359,6 +368,17 @@ def _check_summarization(cfg: DbAgentConfig) -> None:
     # trim_tokens_to_summarize: None 或正整数已由字段约束保证；显式传 None 时不回落 SDK 默认 4000（§4.3）。
 
 
+def _check_time_resolution(cfg: DbAgentConfig) -> None:
+    # 日期 profile 引用检查（doc 16 §6）：不在此创建 LLM；
+    # provider/模型 ID/密钥合法性由 get_llm() 在构造时校验
+    profiles = get_config().get("llm_profiles", {})
+    if cfg.time_resolution.llm_profile not in profiles:
+        raise DbAgentConfigError(
+            "time_resolution.llm_profile: 引用的 LLM profile 不存在；"
+            "请在 src/configs/config.yaml 的 llm_profiles 中注册"
+        )
+
+
 def _check_maintenance(cfg: DbAgentConfig) -> None:
     m = cfg.maintenance
     # 正整数已由字段约束保证；这里校验锁超时小于语句超时
@@ -400,6 +420,7 @@ def run_config_checks(
     _check_business_target(cfg)
     _check_platform_target(cfg)
     _check_summarization(cfg)
+    _check_time_resolution(cfg)
     _check_maintenance(cfg)
     _check_semantic(cfg)
     _check_fixed_now(cfg)

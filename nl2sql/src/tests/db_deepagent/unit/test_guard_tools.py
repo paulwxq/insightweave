@@ -50,6 +50,8 @@ def _ctx(db_agent_context: DbAgentContext, texts: tuple[str, ...]) -> DbAgentCon
 
 
 class TestResolveTimeRange:
+    """doc 16：新契约——只传 source_text（+可选 context），flash（假模型）解析。"""
+
     def test_ok_writes_evidence(self, node, db_agent_context):
         ctx = _ctx(db_agent_context, ("统计2026年9月的订单",))
         updates, msg = invoke_tool_node(
@@ -57,12 +59,7 @@ class TestResolveTimeRange:
             [
                 (
                     "resolve_time_range",
-                    {
-                        "source_text": "2026年9月",
-                        "kind": "calendar",
-                        "year": 2026,
-                        "month": 9,
-                    },
+                    {"source_text": "2026年9月", "context": "订单按月统计"},
                     "tc-r1",
                 )
             ],
@@ -76,6 +73,7 @@ class TestResolveTimeRange:
             payload["data"]["sql_hint"]
             == "<时间列> >= '2026-09-01' AND <时间列> < '2026-10-01'"
         )
+        assert payload["data"]["interpretation"] != ""
         ev = updates["db_time_evidence"][0]
         assert ev["time_evidence_id"] == payload["data"]["time_evidence_id"]
         assert ev["run_id"] == ctx.run_id
@@ -87,12 +85,7 @@ class TestResolveTimeRange:
             [
                 (
                     "resolve_time_range",
-                    {
-                        "source_text": "2026年10月1日之前，不含当天",
-                        "kind": "open_range",
-                        "boundary_date": "2026-10-01",
-                        "relation": "before",
-                    },
+                    {"source_text": "2026年10月1日之前，不含当天"},
                     "tc-r2",
                 )
             ],
@@ -102,18 +95,14 @@ class TestResolveTimeRange:
         assert payload["data"]["sql_hint"] == "<时间列> < '2026-10-01'"
 
     def test_text_not_in_question(self, node, db_agent_context):
-        """原文核对失败 → 错误包，不写证据。"""
+        """原文核对失败 → 错误包，不写证据（沿用现行检查）。"""
         ctx = _ctx(db_agent_context, ("统计订单",))
         updates, msg = invoke_tool_node(
             node,
             [
                 (
                     "resolve_time_range",
-                    {
-                        "source_text": "昨天",
-                        "kind": "relative",
-                        "relative": "yesterday",
-                    },
+                    {"source_text": "昨天"},
                     "tc-r3",
                 )
             ],
