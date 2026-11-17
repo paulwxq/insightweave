@@ -1,0 +1,27 @@
+# InsightWeave 本地发布（doc 13 §8.2）
+# 接入时将 actions/checkout 固定到经过核对的 action commit SHA（doc 13 §8.2）
+name: InsightWeave local release
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: insightweave-local-release
+  cancel-in-progress: false
+jobs:
+  release:
+    if: github.ref == 'refs/heads/main'
+    runs-on: [self-hosted, Linux, X64, insightweave-local]
+    steps:
+      # TODO(任务5接入)：核对并固定 checkout 的 action commit SHA
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: Test, build and deploy locally
+        shell: bash
+        run: |
+          release_id="${GITHUB_SHA:0:12}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          bash deploy/scripts/ci.sh "$release_id"
+          bash deploy/scripts/deploy.sh release "$release_id"
