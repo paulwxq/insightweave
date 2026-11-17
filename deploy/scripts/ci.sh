@@ -28,8 +28,16 @@ log "干净源码：$GIT_SHA"
   || die "INSIGHTWEAVE_CI_PYTHON 不是 Python 3.12"
 node --version | grep -q '^v22\.' || die "需要 Node 22.x（≥22.18，§7.2）"
 
-# ---------------------------------------------------------------- 2) 离线测试（§7.2）
+# ---------------------------------------------------------------- 1.5) 依赖环境（§7.2/13.1 §5.4：独立 checkout 各自锁文件独立 venv）
 NL="$REPO_ROOT/nl2sql"; MW="$REPO_ROOT/metaweave"; FE="$REPO_ROOT/frontend"
+log "准备依赖环境（uv sync --frozen）"
+uv --version >/dev/null 2>&1 || die "需要 uv（Runner 环境准备，13.1 §5.4）"
+(cd "$NL" && uv sync --frozen --python "$INSIGHTWEAVE_CI_PYTHON" --no-python-downloads --extra dev) \
+  || die "NL2SQL 依赖安装失败"
+(cd "$MW" && uv sync --frozen --python "$INSIGHTWEAVE_CI_PYTHON" --no-python-downloads --extra platform --extra dev) \
+  || die "MetaWeave 依赖安装失败"
+
+# ---------------------------------------------------------------- 2) 离线测试（§7.2）
 export PYTHONPATH="$REPO_ROOT:$NL"
 (cd "$NL" && .venv/bin/python -m pytest src/tests/unit/api src/tests/unit/services \
    tests/unit/db_deepagent/test_independent_summarizer.py -q) || die "NL2SQL 离线套件失败"
