@@ -247,25 +247,37 @@ class TestCiSh:
         assert r.returncode == 0, r.stderr
         assert sh.stat().st_mode & _stat.S_IXUSR
 
-    def test_dirty_tree_refused_without_skip(self):
+    def test_dirty_tree_refused_without_skip(self, tmp_path):
+        """自建脏仓库：与宿主树状态无关（CI 的 checkout 是干净的）。"""
         import os as _os
         import subprocess as _sp
 
+        repo = tmp_path / "dirty-repo"
+        (repo / "deploy" / "scripts").mkdir(parents=True)
+        _sp.run(["git", "init", "-q", str(repo)], check=True)
+        sh = repo / "deploy" / "scripts" / "ci.sh"
+        sh.write_bytes(
+            _sp.run(
+                ["git", "-C", str(REPO_ROOT), "show", "HEAD:deploy/scripts/ci.sh"],
+                check=True,
+                stdout=_sp.PIPE,
+            ).stdout
+        )
+        (repo / "untracked.txt").write_text("x", encoding="utf-8")
         env = {
             **_os.environ,
             "INSIGHTWEAVE_CI_PYTHON": "/usr/bin/python3",
+            "REPO_ROOT": str(repo),
         }
         r = _sp.run(
-            ["bash", str(REPO_ROOT / "deploy" / "scripts" / "ci.sh"), "probe-rid"],
+            ["bash", str(sh), "probe-rid"],
             env=env,
             capture_output=True,
             text=True,
             timeout=60,
             check=False,
-            cwd=str(REPO_ROOT),
         )
         assert r.returncode != 0
-        # 当前工作树必然含未提交改动 → 必须被拒；且无跳过开关
         assert "干净" in r.stderr or "不干净" in r.stderr
 
     def test_missing_ci_python_refused(self):
