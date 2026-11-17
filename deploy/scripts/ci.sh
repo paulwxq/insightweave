@@ -38,6 +38,17 @@ uv --version >/dev/null 2>&1 || die "需要 uv（Runner 环境准备，13.1 §5.
   || die "MetaWeave 依赖安装失败"
 
 # ---------------------------------------------------------------- 2) 离线测试（§7.2）
+# 离线哑配置：干净 checkout 无 .env（被忽略，正确）；部分单测要求配置
+# 形状完整（不连库），与开发机 .env 等价的最小集合在此集中注入。
+export DB_NAME=orders DB_USER=orders DB_PASSWORD=ci-dummy
+export LANGGRAPH_DB_NAME=lg_persist LANGGRAPH_DB_USER=postgres LANGGRAPH_DB_PASSWORD=ci-dummy
+export PLATFORM_DB_NAME=metaweave PLATFORM_DB_USER=postgres PLATFORM_DB_PASSWORD=ci-dummy
+export NEO4J_PASSWORD=ci-dummy NEO4J_USER=neo4j NEO4J_URI=bolt://127.0.0.1:1 NEO4J_DATABASE=neo4j
+export MILVUS_HOST=127.0.0.1 MILVUS_PORT=19530 MILVUS_DATABASE=nl2sql
+export DASHSCOPE_API_KEY=ci-dummy DEEPSEEK_API_KEY=ci-dummy MINIMAX_API_KEY=ci-dummy
+export OPENAI_API_KEY=ci-dummy OPENROUTER_API_KEY=ci-dummy LANGSMITH_API_KEY=ci-dummy
+export REDIS_PASSWORD=ci-dummy
+export SOURCE_CREDENTIAL_KEY=ci-dummy-credential-key
 export PYTHONPATH="$REPO_ROOT:$NL"
 (cd "$NL" && .venv/bin/python -m pytest src/tests/unit/api src/tests/unit/services \
    tests/unit/db_deepagent/test_independent_summarizer.py -q) || die "NL2SQL 离线套件失败"
