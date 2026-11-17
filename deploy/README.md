@@ -81,6 +81,14 @@ docker exec insightweave-local-frontend-1 nginx -s reload
 | `metaweave/tests/unit/metaweave/relationships/test_repository.py` | 12 例硬依赖本机历史产物 `output/json/*.json`（干净 checkout 不存在，空目录亦失败） |
 | `metaweave/tests/unit/*_live.py`、`test_read_tx_isolation.py` | 实库断言，需 `METAWEAVE_RUN_LIVE_TESTS=1` 显式开关 + 真实数据库（本地开发时按需启用） |
 
+## NL2SQL 日志级别
+
+Docker 镜像默认 `NL2SQL_LOG_LEVEL=INFO`（覆盖 YAML 的 DEBUG），完整提示词不输出、日志量大幅减少。
+
+**临时排查**：编辑 `/home/iw-runner/insightweave-runtime/config/nl2sql.env`，取消注释 `NL2SQL_LOG_LEVEL=DEBUG`，然后在 Actions 手动 Run workflow（自动排空+重建+冒烟）。恢复时改回 INFO 并重跑。
+
+**注意**：修改后需**重新创建容器**（`--force-recreate`），`restart` 不加载新 env（见上）。
+
 ## 已知边界（M-4 / M-7）
 
 - **M-4**：`init_platform.py nl2sql --mode initialize` 将连接错误也包装为 `DeployInitConflict`（exit 4），与结构冲突共用退出码。错误消息中已含"连接问题"提示，人工排查可区分；如需脚本自动分支，可按异常类型拆分。
