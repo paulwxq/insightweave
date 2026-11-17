@@ -59,12 +59,16 @@ lock_run() { exec 9>"$LOCK_FILE"; flock -n 9 || die "另一发布进程持有锁
 
 # ---------------------------------------------------------------- 预检
 
-require_images() {  # 三个应用镜像必须本地存在且同名 tag
+require_images() {  # 三个应用镜像必须本地存在且同名 tag；OS 环境变量覆盖 deploy.env 插值
   local rid="$1"
   for app in $APPS; do
     $DOCKER_BIN image inspect "insightweave/$app:$rid" >/dev/null 2>&1 \
       || die "缺少本地镜像 insightweave/$app:$rid（先由 ci.sh 构建；不在线拉取）"
   done
+  # compose 插值优先级：OS env > --env-file；确保替换的就是目标 release
+  export METAWEAVE_IMAGE="insightweave/metaweave:$rid"
+  export NL2SQL_IMAGE="insightweave/nl2sql:$rid"
+  export FRONTEND_IMAGE="insightweave/frontend:$rid"
 }
 
 precheck_ports() {
