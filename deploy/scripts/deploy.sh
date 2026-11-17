@@ -168,19 +168,28 @@ frontend_reload() {  # 保留容器时刷新代理解析（§4.1）
 }
 
 bring_up_apps() {  # 后端先替换并等健康，再 frontend（保留匹配则 reload）
+  # 显式 return 1：调用侧 || ok=0 会禁用 set -e，不能依赖隐式失败（审核 P1）
   local rid="$1"
-  compose up -d --no-deps --force-recreate metaweave nl2sql >/dev/null
-  wait_healthy metaweave nl2sql
+  if ! compose up -d --no-deps --force-recreate metaweave nl2sql >/dev/null; then
+    log "后端容器替换命令失败"
+    return 1
+  fi
+  wait_healthy metaweave nl2sql || return 1
   if frontend_image_matches "$rid"; then
-    frontend_reload || die "frontend 保留但 nginx reload 失败：按恢复规则处理（§9.2）"
+    if ! frontend_reload; then
+      log "frontend 保留但 nginx reload 失败"
+      return 1
+    fi
     log "frontend 容器保留（镜像匹配），已 nginx reload"
   else
-    compose up -d --no-deps frontend >/dev/null
+    compose up -d --no-deps frontend >/dev/null || return 1
   fi
-  wait_healthy frontend
+  wait_healthy frontend || return 1
+  return 0
 }
 
 wait_healthy() {
+  # return 1 而非 die：由调用侧决定是退出（bootstrap/set -e）还是恢复（release/||）
   local svc i
   for svc in "$@"; do
     for i in $(seq 1 60); do
@@ -188,7 +197,7 @@ wait_healthy() {
       sleep 3
     done
     [ "$($DOCKER_BIN inspect --format '{{.State.Health.Status}}' "$(compose ps -q "$svc" | head -1)" 2>/dev/null || true)" = "healthy" ] \
-      || die "$svc 未达 healthy"
+      || { log "$svc 未达 healthy"; return 1; }
   done
 }
 

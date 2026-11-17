@@ -28,6 +28,11 @@ case "$1" in
     if [ "$2" = "--format" ] && [ "$3" = "{{.Config.Image}}" ]; then
       echo "$DEPLOY_FRONTEND_IMAGE"; exit 0
     fi
+    # 可选：首次 health 检查返回 unhealthy（模拟 wait_healthy 失败→恢复）
+    if [ -n "$DEPLOY_INSPECT_UNHEALTHY_ONCE" ] && [ ! -f "$DEPLOY_ROOT/.unhealthy_hit" ]; then
+      : > "$DEPLOY_ROOT/.unhealthy_hit"
+      echo "unhealthy"; exit 0
+    fi
     echo healthy; exit 0
     ;;
   run) exit 0 ;;
@@ -49,7 +54,15 @@ if [ "$1" = "compose" ]; then
         *) echo "NAME HEALTH" ;;
       esac
       exit 0 ;;
-    *" up "*) echo "up $ALL" >> "$LOG"; exit 0 ;;
+    *" up "*)
+      echo "up $ALL" >> "$LOG"
+      # 一次性失败：首次 --force-recreate 返回 42（模拟新版替换失败），恢复阶段成功
+      if [ -n "$DEPLOY_UP_FAIL" ] && [[ "$ALL" == *"--force-recreate"* ]] \
+         && [ ! -f "$DEPLOY_ROOT/.up_fail_hit" ]; then
+        : > "$DEPLOY_ROOT/.up_fail_hit"
+        exit 42
+      fi
+      exit 0 ;;
   esac
 fi
 exit 0
@@ -278,6 +291,37 @@ class TestBootstrap:
         r = env.run("bootstrap", "R1")
         assert r.returncode != 0
         assert "rollback" in r.stderr
+
+
+class TestBringUpAppsExplicitFailure:
+    """bring_up_apps 显式 return 1（审核 P1：|| 上下文禁用 set -e）。"""
+
+    def test_backend_replace_failure_triggers_recovery(self, tmp_path):
+        """后端替换命令失败(exit 42) → ok=0 → 自动回退到旧版本。"""
+        env = Env(tmp_path)
+        env.set_state("ready", current="R0")
+        d = env.root / "releases" / "R0"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "manifest.env").write_text(
+            "POSTGRES_IMAGE=p@1\nNEO4J_IMAGE=n@1\nMILVUS_IMAGE=m@1\nATTU_IMAGE=a@1\n",
+            encoding="utf-8",
+        )
+        r = env.run("release", "R1", extra={"DEPLOY_UP_FAIL": "1"})
+        assert r.returncode != 0
+        state = env.state()
+        assert state["current"] == "R0", f"应回退到 R0，实际 {state}"
+        assert state["phase"] == "ready"
+
+    def test_wait_healthy_returns_not_dies(self):
+        """wait_healthy 源码用 return 1 而非 die（审核 P1 代码验证）。"""
+        sh = (REPO_ROOT / "deploy" / "scripts" / "deploy.sh").read_text(encoding="utf-8")
+        # wait_healthy 函数体内不应调用 die
+        import re
+
+        func = re.search(r"wait_healthy\(\).*?\n\}", sh, re.DOTALL)
+        assert func, "wait_healthy 函数未找到"
+        assert "die" not in func.group(), "wait_healthy 不应调用 die（应 return 1）"
+        assert "return 1" in func.group(), "wait_healthy 应含 return 1"
 
 
 class TestAutoRollbackRebind:
