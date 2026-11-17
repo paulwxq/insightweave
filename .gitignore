@@ -77,3 +77,7 @@ Thumbs.db
 # 本机部署产物与临时报告（doc 13 §8；实值不入库）
 deploy/candidate-*.json
 deploy/logs/
+# deploy/env/ 下仅入库 *.example 模板（实值 env 文件仍被忽略）
+!deploy/env/
+deploy/env/*
+!deploy/env/*.example
