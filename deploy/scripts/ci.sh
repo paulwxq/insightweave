@@ -53,7 +53,9 @@ export PYTHONPATH="$REPO_ROOT:$NL"
 (cd "$NL" && .venv/bin/python -m pytest src/tests/unit/api src/tests/unit/services \
    tests/unit/db_deepagent/test_independent_summarizer.py -q) || die "NL2SQL 离线套件失败"
 (cd "$NL" && .venv/bin/python -m pytest "$REPO_ROOT/deploy/tests" -q) || die "deploy/tests 失败"
-(cd "$MW" && .venv/bin/python -m pytest tests/unit -q) || die "MetaWeave tests/unit 失败"
+(cd "$MW" && .venv/bin/python -m pytest tests/unit -q    --ignore=tests/unit/metaweave/relationships/test_repository.py)   || die "MetaWeave tests/unit 失败"
+# 排除原因（§7.2 记入 README）：test_repository.py 12 例硬依赖本机历史产物
+# output/json/*.json（开发环境产物，干净 checkout 不存在；实测空目录亦失败）。
 (cd "$FE" && mapfile_test_count=$(find src -type f \( -name '*.test.cjs' -o -name '*.test.ts' \) | wc -l) \
    && [ "$mapfile_test_count" -gt 0 ] || die "未发现前端测试文件") \
   && (cd "$FE" && node --version && mapfile -d '' files < <(find src -type f \( -name '*.test.cjs' -o -name '*.test.ts' \) -print0 | sort -z) \
