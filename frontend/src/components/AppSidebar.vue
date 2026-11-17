@@ -5,6 +5,7 @@ import { notifyNewQueryReset } from '../modules/nl2sql/newQueryReset'
 import { queryBusyKey } from '../modules/nl2sql/queryBusy'
 
 const route = useRoute()
+const buildInfo = __APP_BUILD_INFO__
 const queryBusy = inject(queryBusyKey, ref(false))
 const assetsActive = computed(
   () => route.path === '/data-assets' || route.path.startsWith('/data-assets/'),
@@ -172,10 +173,31 @@ function guardNewQuery(event: MouseEvent, navigate: (event: MouseEvent) => void)
         系统设置 <small>待开放</small>
       </span>
     </nav>
+
+    <footer class="build-info" aria-label="应用版本">
+      <span>版本：{{ buildInfo.version }}</span>
+      <template v-if="buildInfo.builtAt">
+        <span>构建时间：{{ buildInfo.builtAt }}</span>
+        <span>（北京时间）</span>
+      </template>
+      <span v-else>本地开发环境</span>
+    </footer>
   </aside>
 </template>
 
 <style scoped>
+.build-info {
+  margin-top: auto;
+  padding: 28px 6px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  color: #7c8798;
+  font-size: 11px;
+  line-height: 1.6;
+  font-weight: 400;
+}
+
 /* doc 9 §4.3 行容器承担选中背景与悬停样式；箭头是相邻 <button>，不嵌在 <a> 内 */
 .nav-row {
   min-height: 44px;
@@ -260,7 +282,8 @@ function guardNewQuery(event: MouseEvent, navigate: (event: MouseEvent) => void)
 @media (max-width: 800px) {
   /* 移动端侧边栏收窄为图标态，隐藏折叠箭头（沿用既有行为） */
   .nav-chevron,
-  .query-sub {
+  .query-sub,
+  .build-info {
     display: none !important;
   }
 }

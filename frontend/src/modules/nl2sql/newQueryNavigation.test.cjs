@@ -162,6 +162,7 @@ function createEnv(options = {}) {
   const cache = new Map()
   const contextGlobals = {
     console,
+    __APP_BUILD_INFO__: { version: '123abcd', builtAt: '2026-11-18 02:30' },
     setTimeout,
     clearTimeout,
     setInterval,
@@ -551,6 +552,20 @@ async function sidebarNewQueryLink(h) {
 }
 
 // ---------------------------------------------------------------- 用例
+
+test('导航栏底部展示构建版本和北京时间', async () => {
+  const h = await createHarness({ initial: '/query' })
+  try {
+    const footer = findAll(h.container, (node) => node.tag === 'footer')[0]
+    assert.ok(footer)
+    const text = textOf(footer)
+    assert.ok(text.includes('版本：123abcd'))
+    assert.ok(text.includes('构建时间：2026-11-18 02:30'))
+    assert.ok(text.includes('（北京时间）'))
+  } finally {
+    await h.unmount()
+  }
+})
 
 test('doc21 顶部沿用：会话页显示顶部按钮，点击后预选当前库、零页面检查、立即允许输入', async () => {
   const h = await createHarness({ initial: '/query/s_1?home=/query' })

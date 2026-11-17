@@ -10,7 +10,8 @@ COPY frontend/public ./public
 # 固定 API origin（doc 13 §4.1；构建后固化，改 origin 需重建镜像）
 ARG VITE_API_BASE_URL=http://localhost:18080
 ARG VITE_NL2SQL_API_BASE_URL=http://localhost:18080
-RUN VITE_API_BASE_URL=$VITE_API_BASE_URL VITE_NL2SQL_API_BASE_URL=$VITE_NL2SQL_API_BASE_URL npm run build
+ARG APP_GIT_SHA
+RUN APP_GIT_SHA="$APP_GIT_SHA" VITE_API_BASE_URL=$VITE_API_BASE_URL VITE_NL2SQL_API_BASE_URL=$VITE_NL2SQL_API_BASE_URL npm run build
 
 FROM docker.io/library/nginx:1.30.6-trixie@sha256:42c68eab6f7e22611786a9fe1d1c019e275c50185bd54b8f75dc2b9184322703
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl && rm -rf /var/lib/apt/lists/*

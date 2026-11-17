@@ -69,9 +69,11 @@ build_args=()
 [ -n "$BUILD_PROXY" ] && build_args=(--build-arg HTTP_PROXY="$BUILD_PROXY" --build-arg HTTPS_PROXY="$BUILD_PROXY" --build-arg NO_PROXY="$no_proxy")
 for spec in "metaweave metaweave/Dockerfile" "nl2sql nl2sql/Dockerfile" "frontend frontend/Dockerfile"; do
   set -- $spec
+  app_build_args=("${build_args[@]}")
+  [ "$1" = frontend ] && app_build_args+=(--build-arg "APP_GIT_SHA=$GIT_SHA")
   log "构建 insightweave/$1:$RELEASE_ID"
   $DOCKER_BIN buildx build --builder default --platform linux/amd64 --load \
-    "${build_args[@]}" -f "$2" -t "insightweave/$1:$RELEASE_ID" "$REPO_ROOT" \
+    "${app_build_args[@]}" -f "$2" -t "insightweave/$1:$RELEASE_ID" "$REPO_ROOT" \
     || die "镜像构建失败：$1"
 done
 
