@@ -1,5 +1,4 @@
 # InsightWeave 本地发布（doc 13 §8.2）
-# 接入时将 actions/checkout 固定到经过核对的 action commit SHA（doc 13 §8.2）
 name: InsightWeave local release
 on:
   push:
@@ -15,8 +14,8 @@ jobs:
     if: github.ref == 'refs/heads/main'
     runs-on: [self-hosted, Linux, X64, insightweave-local]
     steps:
-      # TODO(任务5接入)：核对并固定 checkout 的 action commit SHA
-      - uses: actions/checkout@v5
+      # actions/checkout v5.0.0（2026-11-17 核验：08c6903 = "Prepare v5.0.0 release"）
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
           persist-credentials: false
       - name: Test, build and deploy locally

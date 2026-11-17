@@ -435,19 +435,21 @@ class TestComposeSevenServices:
             assert logging.get("options", {}).get("max-file") == "3"
 
     def test_stable_named_volumes(self):
-        volumes = set(_compose().get("volumes", {}))
-        expected = {
+        volumes = _compose().get("volumes", {})
+        compose_managed = {
             "pg-data",
             "neo4j-data",
             "neo4j-logs",
-            "neo4j-plugins",
             "milvus-data",
             "metaweave-output",
             "metaweave-logs",
             "nl2sql-workspace",
             "nl2sql-logs",
         }
-        assert expected <= volumes, sorted(expected - volumes)
+        assert compose_managed <= set(volumes), sorted(compose_managed - set(volumes))
+        ext_key = "insightweave-local_neo4j-plugins"
+        assert volumes.get(ext_key, {}).get("external") is True
+        assert volumes[ext_key]["name"] == ext_key
 
 
 class TestNginxConf:

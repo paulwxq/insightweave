@@ -60,7 +60,7 @@ services:
     volumes:
       - neo4j-data:/data
       - neo4j-logs:/logs
-      - neo4j-plugins:/plugins
+      - insightweave-local_neo4j-plugins:/plugins
     healthcheck:
       test: ["CMD-SHELL", "wget -q --spider http://localhost:7474 || exit 1"]
       interval: 10s
@@ -240,9 +240,14 @@ volumes:
   pg-data:
   neo4j-data:
   neo4j-logs:
-  neo4j-plugins:
   milvus-data:
   metaweave-output:
   metaweave-logs:
   nl2sql-workspace:
   nl2sql-logs:
+  # Neo4j 插件卷由 deploy.sh prepare_neo4j_plugin() 在 Compose 外离线准备
+  # （13.1 §2.2：从固定镜像提取 APOC JAR，不在线下载）；声明为 external
+  # 表示卷须在 compose up 之前已存在，否则 Compose 会明确报错。
+  insightweave-local_neo4j-plugins:
+    external: true
+    name: insightweave-local_neo4j-plugins
