@@ -73,3 +73,7 @@ Thumbs.db
 *.swp
 *.swo
 *~
+
+# 本机部署产物与临时报告（doc 13 §8；实值不入库）
+deploy/candidate-*.json
+deploy/logs/

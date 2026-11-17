@@ -5,6 +5,7 @@
 注册；本机 Origin/Host/媒体类型拒绝在业务前以稳定错误码返回（403/400/415）。
 """
 
+import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -17,8 +18,8 @@ from src.api.v2.envelope import (
     error_response,
     register_exception_handlers,
 )
-from src.api.v2.runtime import get_web_runtime
 from src.api.v2.router import router as v2_router
+from src.api.v2.runtime import get_web_runtime
 
 
 def _guard_error(scope, error_code: str, message: str):
@@ -144,3 +145,20 @@ app.add_middleware(
 )
 app.add_middleware(LocalOriginGuard, allowed_origins=_runtime.cors_origins)
 app.add_middleware(TraceIdMiddleware)
+
+# ---- 部署门闩接线（doc 13 §7.5、§8）----
+# 仅部署开关启用时惰性导入 deploy.runtime.lifecycle（容器内 PYTHONPATH 含 /app）；
+# 默认开发启动零额外路径依赖。门闩最后添加、位于最外层：活动计数覆盖整个
+# ASGI 调用（含响应发送后的后台任务）；NL2SQL 的 executor future 由
+# gate.submit_tracked 追踪（提交前登记、完成释放）。
+if os.getenv("DEPLOY_CONTROL_ENABLED") == "1":
+    from deploy.runtime.lifecycle import install_deployment_gate
+
+    _deploy_gate = install_deployment_gate(
+        app,
+        control_prefix="/api/v2/_deploy",
+        health_paths=("/api/v2/health",),
+    )
+    from src.api.v2.runtime import set_future_tracker
+
+    set_future_tracker(_deploy_gate.submit_tracked)

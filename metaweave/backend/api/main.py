@@ -66,4 +66,17 @@ def create_app(
         except Exception:  # noqa: BLE001 —— 扫描失败不阻断启动
             logging.getLogger("backend.api").exception("删除任务启动扫描失败")
 
+    # ---- 部署门闩接线（doc 13 §7.5、§8）----
+    # 仅部署开关启用时惰性导入 deploy.runtime.lifecycle（容器内 PYTHONPATH 含
+    # /app）；默认开发启动零额外路径依赖。最后添加、位于最外层：活动计数覆盖
+    # 整个 ASGI 调用（含响应发送后的 BackgroundTasks 采集/发布/删除任务）。
+    if os.getenv("DEPLOY_CONTROL_ENABLED") == "1":
+        from deploy.runtime.lifecycle import install_deployment_gate
+
+        install_deployment_gate(
+            app,
+            control_prefix="/api/_deploy",
+            health_paths=("/openapi.json",),
+        )
+
     return app

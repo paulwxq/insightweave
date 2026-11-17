@@ -16,8 +16,9 @@ import os
 import threading
 import time
 from collections import deque
+from collections.abc import Callable
 from contextlib import contextmanager
-from typing import Any, Callable, Optional
+from typing import Any
 
 from src.utils.logger import get_module_logger
 
@@ -25,6 +26,19 @@ logger = get_module_logger("nl2sql.api.v2.runtime")
 
 DEFAULT_CORS_ORIGINS = "http://127.0.0.1:5173"
 DEFAULT_ALLOWED_HOSTS = "127.0.0.1,localhost"
+
+# 部署门闩 future 追踪钩子（doc 13 §7.5）：部署开关启用时由 src.api.main
+# 注入 gate.submit_tracked（提交前登记、future 完成释放）；默认 None 保持
+# 裸 executor.submit，开发/测试零额外依赖。
+_future_tracker: Callable[..., Any] | None = None
+
+
+def set_future_tracker(tracker: Callable[..., Any] | None) -> None:
+    """注入或清除 future 追踪器（部署接线与测试共用）。"""
+    global _future_tracker
+    _future_tracker = tracker
+
+
 DEFAULT_MAX_CONCURRENT_RUNS = 2
 DEFAULT_RATE_LIMIT_PER_MINUTE = 20
 _READ_EXECUTOR_THREADS = 4
@@ -72,12 +86,12 @@ class WebRuntime:
     def __init__(
         self,
         *,
-        store: Optional[Any] = None,
-        readiness_service: Optional[Any] = None,
-        lock_factory: Optional[Callable[[str], SessionLockHandle]] = None,
-        query_runner: Optional[Callable[..., Any]] = None,
-        now: Optional[Callable[..., Any]] = None,
-        snapshot_store: Optional[Any] = None,
+        store: Any | None = None,
+        readiness_service: Any | None = None,
+        lock_factory: Callable[[str], SessionLockHandle] | None = None,
+        query_runner: Callable[..., Any] | None = None,
+        now: Callable[..., Any] | None = None,
+        snapshot_store: Any | None = None,
     ):
         from src.api.v2.webstore import WebStore
 
@@ -86,7 +100,7 @@ class WebRuntime:
         self._store_lock = threading.Lock()
         self._platform_pool = None
         self._snapshot_store = snapshot_store
-        self._snapshot_table_ready: Optional[bool] = None
+        self._snapshot_table_ready: bool | None = None
         self.webstore = WebStore(store, now=now) if store is not None else None
         self.readiness = readiness_service
         self._lock_factory = lock_factory
@@ -262,15 +276,23 @@ class WebRuntime:
         return self._closed
 
     def submit_run(self, fn: Callable[[], Any]) -> Any:
-        """提交阻塞运行到专用 executor（调用方已持名额）。"""
+        """提交阻塞运行到专用 executor（调用方已持名额）。
+
+        部署门闩启用时经 tracker 走 submit_tracked（提交前登记、
+        future 完成释放；doc 13 §7.5）；未启用保持裸提交。
+        """
         if self._closed:
             raise RuntimeError("服务正在关闭，不再接受新查询")
+        if _future_tracker is not None:
+            return _future_tracker(self._run_executor.submit, fn)
         return self._run_executor.submit(fn)
 
     def submit_read(self, fn: Callable[[], Any]) -> Any:
         """阻塞读取（Store/文件/知识 SDK）放独立受限读取线程。"""
         if self._closed:
             raise RuntimeError("服务正在关闭")
+        if _future_tracker is not None:
+            return _future_tracker(self._read_executor.submit, fn)
         return self._read_executor.submit(fn)
 
     # ------------------------------------------------------------ 按需校正
@@ -330,7 +352,7 @@ class WebRuntime:
         logger.info("Web 运行时已关闭（执行器排空、平台池释放）")
 
 
-_RUNTIME: Optional[WebRuntime] = None
+_RUNTIME: WebRuntime | None = None
 _RUNTIME_LOCK = threading.Lock()
 
 
@@ -343,7 +365,7 @@ def get_web_runtime() -> WebRuntime:
     return _RUNTIME
 
 
-def set_web_runtime(runtime: Optional[WebRuntime]) -> None:
+def set_web_runtime(runtime: WebRuntime | None) -> None:
     """测试注入/清理用（生产路径不调用）。"""
     global _RUNTIME
     with _RUNTIME_LOCK:
