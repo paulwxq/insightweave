@@ -280,6 +280,28 @@ class TestBootstrap:
         assert "rollback" in r.stderr
 
 
+class TestAutoRollbackRebind:
+    """自动回退须重绑镜像环境变量到旧版本（审核 P1）。"""
+
+    def test_rollback_branch_rebinds_to_old_version(self, tmp_path):
+        env = Env(tmp_path)
+        env.set_state("ready", current="R0")
+        d = env.root / "releases" / "R0"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "manifest.env").write_text(
+            "POSTGRES_IMAGE=p@1\nNEO4J_IMAGE=n@1\nMILVUS_IMAGE=m@1\nATTU_IMAGE=a@1\n",
+            encoding="utf-8",
+        )
+        r = env.run("release", "R1", extra={"FAIL_SMOKE_MODE": "--mode public"})
+        assert r.returncode != 0
+        calls = env.calls()
+        # 回退分支的 up 应出现在 release 的 up 之后
+        ups = [line for line in calls.splitlines() if "force-recreate" in line]
+        assert len(ups) >= 2, f"应有两次 up（发布+回退），实际 {len(ups)}: {ups}"
+        state = env.state()
+        assert state["current"] == "R0" and state["phase"] == "ready"
+
+
 class TestRollback:
     def _setup(self, env):
         env.set_state("deploying", current="R0", previous="R1")

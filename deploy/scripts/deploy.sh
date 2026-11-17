@@ -284,6 +284,7 @@ cmd_release() {
     rm -f "$CONTROL_DIR/maintenance"
     if [ -n "$current" ]; then
       drain
+      require_images "$current"  # 重绑镜像环境变量到旧版本（否则 compose 仍用新版）
       bring_up_apps "$current"
       undrain; apps_smoke public
       state_write ready "$current" "$previous" "release $rid 失败已回退"
