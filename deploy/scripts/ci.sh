@@ -77,7 +77,8 @@ done
 
 # ---------------------------------------------------------------- 4) 候选预检（§7.2）
 precheck_backend() {  # 无端口/无数据卷/无外网；真实部署开关
-  local app="$1" probe="ci-probe-$app-$RELEASE_ID"
+  local app="$1"
+  local probe="ci-probe-$app-$RELEASE_ID"
   $DOCKER_BIN run --rm --network none -d --name "$probe" \
     -e DEPLOY_CONTROL_ENABLED=1 -e DEPLOY_CONTROL_TOKEN=probe-token \
     -e DEPLOY_CONTROL_DIR=/run/probe-control \
