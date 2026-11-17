@@ -15,7 +15,7 @@ PROJECT="${PROJECT:-insightweave-local}"
 DRAIN_TIMEOUT="${DEPLOY_DRAIN_TIMEOUT:-900}"
 DOCKER_BIN="${DOCKER_BIN:-docker --context default}"
 CURL_BIN="${CURL_BIN:-curl}"
-PYTHON_BIN="${PYTHON_BIN:-python3}"
+PYTHON_BIN="${PYTHON_BIN:-${INSIGHTWEAVE_CI_PYTHON:-python3}}"
 APPS="${APPS:-frontend metaweave nl2sql}"
 BACKENDS="metaweave nl2sql"
 
