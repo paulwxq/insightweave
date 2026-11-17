@@ -5,6 +5,8 @@
 结束后清理，不改动既有数据。
 """
 
+import os
+
 import pytest
 
 from backend.jobs.job_params import StepConfigError
@@ -60,7 +62,8 @@ def _settings():
 
 SETTINGS = _settings()
 pytestmark = pytest.mark.skipif(
-    SETTINGS is None, reason="缺少 PLATFORM_DB_* 环境变量，跳过作业实库断言"
+    SETTINGS is None or os.environ.get("METAWEAVE_RUN_LIVE_TESTS") != "1",
+    reason="缺少 PLATFORM_DB_* 环境变量，跳过作业实库断言",
 )
 
 
@@ -326,9 +329,7 @@ def test_publish_job_revision_and_publish_steps_whitelist(live_source_and_worksp
                     ]
                 },
                 "domain": {
-                    "domains": [
-                        {"name": "默认域", "description": "说明", "tables": []}
-                    ]
+                    "domains": [{"name": "默认域", "description": "说明", "tables": []}]
                 },
             },
         ),

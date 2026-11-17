@@ -5,6 +5,8 @@
 不创建、不修改。
 """
 
+import os
+
 import pytest
 
 from backend.jobs.job_service import list_jobs_global_page
@@ -24,7 +26,8 @@ def _settings():
 
 SETTINGS = _settings()
 pytestmark = pytest.mark.skipif(
-    SETTINGS is None, reason="缺少 PLATFORM_DB_* 环境变量，跳过全局列表实库断言"
+    SETTINGS is None or os.environ.get("METAWEAVE_RUN_LIVE_TESTS") != "1",
+    reason="缺少 PLATFORM_DB_* 环境变量，跳过全局列表实库断言",
 )
 
 
@@ -46,7 +49,7 @@ def test_global_list_orders_by_last_run_and_joins_names():
     times = [row["last_run_at"] for row in rows]
     known = [t for t in times if t is not None]
     assert known == sorted(known, reverse=True)
-    assert times[len(known):] == [None] * (len(times) - len(known))
+    assert times[len(known) :] == [None] * (len(times) - len(known))
 
     # 发布全局：按工作区过滤收窄
     some_workspace = rows[0]["workspace_id"]

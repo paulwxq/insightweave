@@ -15,6 +15,8 @@ import threading
 import uuid
 from contextlib import contextmanager
 
+import os
+
 import pytest
 
 from backend.jobs.job_service import JobConfigPayload, create_job as create_job_service
@@ -55,7 +57,9 @@ def _settings():
 
 SETTINGS = _settings()
 pytestmark = pytest.mark.skipif(
-    SETTINGS is None or SETTINGS.name != "metaweave_rehearsal_final",
+    SETTINGS is None
+    or os.environ.get("METAWEAVE_RUN_LIVE_TESTS") != "1"
+    or SETTINGS.name != "metaweave_rehearsal_final",
     reason="发布准入实库断言仅允许指向演练库 metaweave_rehearsal_final"
     "（需先 export PLATFORM_DB_NAME=metaweave_rehearsal_final）",
 )
@@ -87,14 +91,22 @@ def admission_env(tmp_path_factory):
                 )
             ).scalar_one()
             session.commit()
-        ws1 = create_workspace(SETTINGS, source_id, "准入一")[ "workspace_id"]
+        ws1 = create_workspace(SETTINGS, source_id, "准入一")["workspace_id"]
         ws2 = create_workspace(SETTINGS, source_id, "准入二")["workspace_id"]
         job1 = create_job_service(
-            SETTINGS, "publish", ws1, "准入作业一", None,
+            SETTINGS,
+            "publish",
+            ws1,
+            "准入作业一",
+            None,
             JobConfigPayload(steps=["db"], step_config=None),
         )
         job2 = create_job_service(
-            SETTINGS, "publish", ws2, "准入作业二", None,
+            SETTINGS,
+            "publish",
+            ws2,
+            "准入作业二",
+            None,
             JobConfigPayload(steps=["db"], step_config=None),
         )
         yield source_id, ws1, ws2, job1["job_id"], job2["job_id"]
@@ -242,7 +254,11 @@ def test_execution_plan_frozen_at_creation(admission_env, tmp_path, monkeypatch)
 
     def _stub_db(settings, run_id, workspace_id, *, input_manifest, payload):
         _ps._record_terminal(
-            settings, run_id, "db", STATUS_SUCCESS, "stub db",
+            settings,
+            run_id,
+            "db",
+            STATUS_SUCCESS,
+            "stub db",
             input_manifest=input_manifest,
         )
 
@@ -306,13 +322,21 @@ def test_capacity_exhausted_409(admission_env, tmp_path):
             "workspace_id"
         ]
         other_job = create_job_service(
-            SETTINGS, "publish", other_ws, "名额作业", None,
+            SETTINGS,
+            "publish",
+            other_ws,
+            "名额作业",
+            None,
             JobConfigPayload(steps=["db"], step_config=None),
         )
         with pytest.raises(PublishCapacityExhaustedError) as exc_info:
             create_publish_run(
-                SETTINGS, other_job["job_id"], revision_no=1,
-                mode="default", steps=None, step_config=None,
+                SETTINGS,
+                other_job["job_id"],
+                revision_no=1,
+                mode="default",
+                steps=None,
+                step_config=None,
             )
         assert exc_info.value.blocking == {"limit": 1}
     finally:
@@ -352,7 +376,11 @@ def test_workspace_collection_active_409(admission_env, tmp_path):
     source_id, ws1, _ws2, job1, _j2 = admission_env
     _make_ready(admission_env, tmp_path)
     coll_job = create_job_service(
-        SETTINGS, "collection", ws1, "准入采集", None,
+        SETTINGS,
+        "collection",
+        ws1,
+        "准入采集",
+        None,
         JobConfigPayload(steps=["ddl"], step_config=None),
     )
     with platform_session(SETTINGS) as session:
@@ -380,13 +408,21 @@ def test_collection_creation_blocked_by_active_publish(admission_env, tmp_path):
         SETTINGS, job1, revision_no=1, mode="default", steps=None, step_config=None
     )
     coll_job = create_job_service(
-        SETTINGS, "collection", ws1, "准入采集二", None,
+        SETTINGS,
+        "collection",
+        ws1,
+        "准入采集二",
+        None,
         JobConfigPayload(steps=["ddl"], step_config=None),
     )
     with pytest.raises(WorkspacePublishActiveError):
         create_collection_run(
-            SETTINGS, coll_job["job_id"], revision_no=1,
-            mode="default", steps=None, step_config=None,
+            SETTINGS,
+            coll_job["job_id"],
+            revision_no=1,
+            mode="default",
+            steps=None,
+            step_config=None,
         )
 
 
@@ -440,9 +476,7 @@ def test_target_guard_reserve_refuse_same_owner_and_release():
                 session.commit()
 
 
-def test_parallel_mode_dispatches_three_channels(
-    admission_env, tmp_path, monkeypatch
-):
+def test_parallel_mode_dispatches_three_channels(admission_env, tmp_path, monkeypatch):
     """§9.1（替身 publisher + 实库状态机）：并行计划下 PG 通道串行、
     首步骤可重叠；状态写回与汇总走真实运行表。"""
     import json as _json
@@ -469,10 +503,12 @@ def test_parallel_mode_dispatches_three_channels(
     write_collection_marker(sql_dir, uuid.uuid4(), "success")
 
     parallel_job = create_job_service(
-        SETTINGS, "publish", ws1, "并行计划", None,
-        JobConfigPayload(
-            steps=["db", "sql"], step_config=None
-        ),
+        SETTINGS,
+        "publish",
+        ws1,
+        "并行计划",
+        None,
+        JobConfigPayload(steps=["db", "sql"], step_config=None),
     )
 
     lock = threading.Lock()
@@ -490,18 +526,31 @@ def test_parallel_mode_dispatches_three_channels(
             with lock:
                 timeline.append((step_name, "end"))
             _ps._record_terminal(
-                settings, run_id, step_name, STATUS_SUCCESS,
-                f"stub {step_name}", input_manifest=input_manifest,
+                settings,
+                run_id,
+                step_name,
+                STATUS_SUCCESS,
+                f"stub {step_name}",
+                input_manifest=input_manifest,
             )
 
         return _run
 
-    monkeypatch.setattr(_ps, "_PUBLISHERS", {
-        "db": _stub("db"), "sql": _stub("sql"),
-    })
+    monkeypatch.setattr(
+        _ps,
+        "_PUBLISHERS",
+        {
+            "db": _stub("db"),
+            "sql": _stub("sql"),
+        },
+    )
     result = create_publish_run(
-        SETTINGS, parallel_job["job_id"], revision_no=1,
-        mode="default", steps=None, step_config=None,
+        SETTINGS,
+        parallel_job["job_id"],
+        revision_no=1,
+        mode="default",
+        steps=None,
+        step_config=None,
     )
     run_id = uuid.UUID(result["publish_run_id"])
     import threading as _threading
@@ -528,7 +577,10 @@ def test_parallel_mode_dispatches_three_channels(
     with platform_session(SETTINGS) as session:
         run = get_run(PUBLISH_RUN, session, run_id)
         assert run.status == STATUS_SUCCESS
-        statuses = {row.step_name: row.status for row in list_run_steps(PUBLISH_RUN, session, run_id)}
+        statuses = {
+            row.step_name: row.status
+            for row in list_run_steps(PUBLISH_RUN, session, run_id)
+        }
     assert statuses == {"db": STATUS_SUCCESS, "sql": STATUS_SUCCESS}
 
 
@@ -579,8 +631,12 @@ def test_concurrent_same_source_creation_single_winner(admission_env, tmp_path):
         barrier.wait()
         try:
             result = create_publish_run(
-                SETTINGS, job_id, revision_no=1, mode="default",
-                steps=None, step_config=None,
+                SETTINGS,
+                job_id,
+                revision_no=1,
+                mode="default",
+                steps=None,
+                step_config=None,
             )
             outcomes[tag] = ("ok", result["publish_run_id"])
         except SourcePublishActiveError as exc:

@@ -49,6 +49,8 @@ export DASHSCOPE_API_KEY=ci-dummy DEEPSEEK_API_KEY=ci-dummy MINIMAX_API_KEY=ci-d
 export OPENAI_API_KEY=ci-dummy OPENROUTER_API_KEY=ci-dummy LANGSMITH_API_KEY=ci-dummy
 export REDIS_PASSWORD=ci-dummy
 export SOURCE_CREDENTIAL_KEY=ci-dummy-credential-key
+# MetaWeave 形状键（实库 live 用例已由 METAWEAVE_RUN_LIVE_TESTS 显式开关门控跳过）
+export PLATFORM_DB_HOST=127.0.0.1 PLATFORM_DB_PORT=5432
 export PYTHONPATH="$REPO_ROOT:$NL"
 (cd "$NL" && .venv/bin/python -m pytest src/tests/unit/api src/tests/unit/services \
    tests/unit/db_deepagent/test_independent_summarizer.py -q) || die "NL2SQL 离线套件失败"

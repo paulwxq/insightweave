@@ -13,6 +13,8 @@
 结束后清理临时行，不改动既有数据。
 """
 
+import os
+
 import pytest
 from sqlalchemy import delete, select
 
@@ -40,7 +42,8 @@ def _settings():
 
 SETTINGS = _settings()
 pytestmark = pytest.mark.skipif(
-    SETTINGS is None, reason="缺少 PLATFORM_DB_* 环境变量，跳过工作区分页实库断言"
+    SETTINGS is None or os.environ.get("METAWEAVE_RUN_LIVE_TESTS") != "1",
+    reason="缺少 PLATFORM_DB_* 环境变量，跳过工作区分页实库断言",
 )
 
 
@@ -145,9 +148,7 @@ def test_page_items_carry_job_counts(temp_rows):
         # 作业行必须先于工作区临时行删除（外键约束）
         with platform_session(settings) as session:
             session.execute(
-                delete(CollectionJobInfo).where(
-                    CollectionJobInfo.workspace_id.in_(ids)
-                )
+                delete(CollectionJobInfo).where(CollectionJobInfo.workspace_id.in_(ids))
             )
             session.execute(
                 delete(PublishJobInfo).where(PublishJobInfo.workspace_id.in_(ids))

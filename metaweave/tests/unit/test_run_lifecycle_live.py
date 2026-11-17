@@ -8,6 +8,8 @@
 import json
 from uuid import uuid4
 
+import os
+
 import pytest
 from sqlalchemy import text
 
@@ -55,7 +57,8 @@ def _settings():
 
 SETTINGS = _settings()
 pytestmark = pytest.mark.skipif(
-    SETTINGS is None, reason="缺少 PLATFORM_DB_* 环境变量，跳过运行生命周期实库断言"
+    SETTINGS is None or os.environ.get("METAWEAVE_RUN_LIVE_TESTS") != "1",
+    reason="缺少 PLATFORM_DB_* 环境变量，跳过运行生命周期实库断言",
 )
 
 _SOURCE_NAME = "生命周期演练"
@@ -508,9 +511,7 @@ def test_publish_precheck_rejects_whole_request_without_records(live_workspace):
                     ]
                 },
                 "domain": {
-                    "domains": [
-                        {"name": "默认域", "description": "说明", "tables": []}
-                    ]
+                    "domains": [{"name": "默认域", "description": "说明", "tables": []}]
                 },
             },
         ),

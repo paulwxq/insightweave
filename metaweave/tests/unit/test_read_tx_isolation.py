@@ -1,5 +1,7 @@
 """读事务隔离级别实测（doc 19.2 §8.2/§8.3）：SHOW 断言，不依赖调用顺序。"""
 
+import os
+
 import pytest
 from sqlalchemy import text
 
@@ -21,7 +23,8 @@ def _settings():
 
 SETTINGS = _settings()
 pytestmark = pytest.mark.skipif(
-    SETTINGS is None, reason="缺少 PLATFORM_DB_* 环境变量，跳过平台库集成断言"
+    SETTINGS is None or os.environ.get("METAWEAVE_RUN_LIVE_TESTS") != "1",
+    reason="缺少 PLATFORM_DB_* 环境变量，跳过平台库集成断言",
 )
 
 

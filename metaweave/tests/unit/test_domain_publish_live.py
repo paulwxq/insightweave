@@ -8,6 +8,8 @@ create_job + create_publish_run + execute_publish_run 走完整新模型链路�
 import shutil
 from pathlib import Path
 
+import os
+
 import pytest
 import json
 
@@ -65,7 +67,9 @@ def _new_model_schema_ready(settings) -> bool:
 
 SETTINGS = _settings()
 pytestmark = pytest.mark.skipif(
-    SETTINGS is None or not _new_model_schema_ready(SETTINGS),
+    SETTINGS is None
+    or os.environ.get("METAWEAVE_RUN_LIVE_TESTS") != "1"
+    or not _new_model_schema_ready(SETTINGS),
     reason="缺少 PLATFORM_DB_* 环境变量或平台库尚未按 6.1 重建，跳过实库断言",
 )
 
