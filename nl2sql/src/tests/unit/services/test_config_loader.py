@@ -160,8 +160,10 @@ class TestNestedStructure:
         assert result["llm_providers"]["dashscope"]["api_key"] == "sk-dashscope-real"
         assert result["llm_providers"]["minimax"]["api_key"] == "sk-minimax-real"
 
-    def test_missing_provider_key_becomes_none(self):
+    def test_missing_provider_key_becomes_none(self, monkeypatch):
         """未配置的 provider api_key → None，已配置的正常，不影响启动"""
+        # 隔离外部环境（CI 哑值/本地 shell 泄漏），保证"缺失"语义成立
+        monkeypatch.delenv("MINIMAX_API_KEY", raising=False)
         result = _loader_from_yaml(
             self._yaml,
             env={"DASHSCOPE_API_KEY": "sk-dashscope-real"},
@@ -172,8 +174,10 @@ class TestNestedStructure:
         # base_url 不含变量，应正常保留
         assert result["llm_providers"]["minimax"]["base_url"] == "https://api.minimaxi.com/v1"
 
-    def test_all_missing_becomes_none(self):
+    def test_all_missing_becomes_none(self, monkeypatch):
         """所有 provider api_key 未配置 → 全部 None，不抛异常"""
+        monkeypatch.delenv("DASHSCOPE_API_KEY", raising=False)
+        monkeypatch.delenv("MINIMAX_API_KEY", raising=False)
         result = _loader_from_yaml(self._yaml, env={})
         assert result["llm_providers"]["dashscope"]["api_key"] is None
         assert result["llm_providers"]["minimax"]["api_key"] is None
