@@ -19,7 +19,8 @@ from src.utils.logger import get_module_logger
 logger = get_module_logger("nl2sql.db_deepagent.cli")
 
 # 依赖版本核对清单（§2.1；sqlglot 为锁定版本，其余记录实际值）
-_LOCKED_VERSIONS = {"sqlglot": "30.22.0"}
+# 2026-11-09 依赖升级：sqlglot 30.22.0 → 30.30.0（doc 1 §4.2，与 pyproject 同步）
+_LOCKED_VERSIONS = {"sqlglot": "30.30.0"}
 _VERSION_PACKAGES = (
     "deepagents",
     "langchain",
@@ -31,6 +32,58 @@ _VERSION_PACKAGES = (
 )
 
 _DOCTOR_STAGES = ("env", "retrieval", "all")
+
+# doctor 装配验证/维护路径使用的固定占位来源（doc 4 §4.7 + doc 5.1 §1）：
+# 这些路径不执行按源检索/寻路，仅装配；占位值必须是合法短 ID（doc 12.2
+# M-1：构造链已按 normalize_short_source_id 严格校验，UUID 会使 doctor/
+# cleanup 入口直接失败）；真实会话必须传登记 source_id
+_PLACEHOLDER_SOURCE_ID = "db_src_1"
+
+
+def _resolve_registration_and_apply(cfg, source_id: str, *, json_mode: bool = False):
+    """读取平台登记源并注入运行配置（doc 4 §4.7 端到端来源一致）。
+
+    业务库连接（host/port/user/password/sslmode）与 table_key_prefix 等
+    三键全部取登记值——检索、图查询、业务库连接保持同一来源；登记缺失/
+    禁用/密钥不可用明确失败，不回退为 YAML 固定连接。
+    """
+    from src.modules.db_deepagent.source_registry import (
+        SourceResolutionError,
+        apply_registration_to_config,
+        resolve_source_registration,
+    )
+
+    try:
+        registration = resolve_source_registration(source_id)
+        return apply_registration_to_config(cfg, registration)
+    except SourceResolutionError as exc:
+        message = f"登记源解析失败: {exc}"
+        if json_mode:
+            _emit_json_error("invalid_argument", message, code=2)
+        print(message, file=sys.stderr)
+        raise SystemExit(2) from None
+
+
+def _validate_source_id_arg(raw: str | None) -> str:
+    """校验 --source-id 为合法短 ID（doc 5.1 §1；doc 4 §3.2：不自动选源、
+    不回退）。"""
+
+    if not raw:
+        print(
+            "必须显式传入 --source-id（平台登记短 ID，形如 db_src_1）；"
+            "不自动选择唯一源，也不回退为无源查询",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+    try:
+        from src.modules.db_deepagent.source_registry import (
+            normalize_short_source_id,
+        )
+
+        return normalize_short_source_id(raw)
+    except ValueError:
+        print(f"--source-id 不是合法短 ID（形如 db_src_1）: {raw!r}", file=sys.stderr)
+        raise SystemExit(2) from None
 
 
 def _collect_dependency_report() -> list[tuple[str, bool, str]]:
@@ -120,7 +173,7 @@ def _check_model_and_harness() -> tuple[bool, str]:
     return True, f"{type(model).__name__} timeout={timeout} key={key}"
 
 
-def _build_embedding_and_milvus():
+def _build_embedding_and_milvus(source_id: str | None = None):
     """构造 Embedding 客户端与 Milvus 检索适配器（连接与集合存在性在构造时验证）。"""
     from src.modules.db_deepagent.config import load_db_agent_config
     from src.modules.db_deepagent.services import _embedding_profile_and_key
@@ -134,14 +187,22 @@ def _build_embedding_and_milvus():
         api_key=api_key,
         request_timeout_s=cfg.embedding.request_timeout_seconds,
     )
-    return cfg, profile, embedding, DbMilvusRetrieval(cfg, embedding)
+    return (
+        cfg,
+        profile,
+        embedding,
+        DbMilvusRetrieval(cfg, embedding, source_id=source_id),
+    )
 
 
 def _check_milvus() -> tuple[bool, str]:
-    """Milvus 连接、数据库与三个集合存在（§15.3 retrieval）。"""
-    cfg, _profile, _embedding, milvus = _build_embedding_and_milvus()
+    """Milvus 连接、数据库与三个集合存在（§15.3 retrieval；运维全库统计）。"""
+    cfg, _profile, _embedding, milvus = _build_embedding_and_milvus(
+        _PLACEHOLDER_SOURCE_ID
+    )
     try:
-        # 各集合实体计数（主键均为 VARCHAR，用非空下界作全量查询）
+        # 各集合实体计数（主键均为 VARCHAR，用非空下界作全量查询）——
+        # 全库口径，仅作运维统计，不能判断指定源知识就绪（doc 4 §4.7）
         counts = []
         for kind, pk in (
             ("table_schema", "object_id"),
@@ -155,7 +216,7 @@ def _check_milvus() -> tuple[bool, str]:
             counts.append(f"{name}={len(rows)}")
         return (
             True,
-            f"db={cfg.milvus.database} alias={cfg.milvus.alias} {' '.join(counts)}",
+            f"db={cfg.milvus.database} alias={milvus._alias} {' '.join(counts)}",
         )
     finally:
         milvus.close()
@@ -167,7 +228,9 @@ def _check_embedding_consistency() -> tuple[bool, str]:
         check_embedding_consistency,
     )
 
-    cfg, profile, embedding, milvus = _build_embedding_and_milvus()
+    cfg, profile, embedding, milvus = _build_embedding_and_milvus(
+        _PLACEHOLDER_SOURCE_ID
+    )
     try:
         release = check_embedding_consistency(cfg, profile, embedding, milvus)
         return (
@@ -180,7 +243,7 @@ def _check_embedding_consistency() -> tuple[bool, str]:
 
 
 def _check_neo4j_join_graph() -> tuple[bool, str]:
-    """Neo4j 连接、Table 节点与 JOIN_ON 边规模、APOC 可用（§15.3 retrieval）。"""
+    """Neo4j 连接、Table 节点与 JOIN_ON 边规模、APOC 可用（运维全库统计）。"""
     from src.modules.db_deepagent.config import load_db_agent_config
     from src.modules.db_deepagent.services import _neo4j_manager
 
@@ -198,7 +261,77 @@ def _check_neo4j_join_graph() -> tuple[bool, str]:
         manager.close()
 
 
-def _collect_doctor_results(stage: str, *, verbose: bool = True) -> list:
+def _check_source_scoped(source_id: str) -> tuple[bool, str]:
+    """doctor --source-id：只读统计指定源的 Milvus 三集合与 Neo4j 四类计数。
+
+    doc 4 §4.7 可选辅助交付：不生成 Embedding、不调用模型、不执行业务 SQL；
+    依赖不可用明确失败；数量为零只说明未发布或空集合，不以“非零”替代
+    完整就绪验收。来源登记核验（db_source_info 存在性）由 doc 2 装配层
+    承接，此处仅做短 ID 格式校验（差异见交付说明）。
+    """
+
+    from src.modules.db_deepagent.source_registry import (
+        normalize_short_source_id,
+    )
+
+    sid = normalize_short_source_id(source_id)
+    parts: list[str] = []
+
+    cfg, _profile, _embedding, milvus = _build_embedding_and_milvus(sid)
+    try:
+        for kind, pk in (
+            ("table_schema", "object_id"),
+            ("dim_value", "col_id"),
+            ("sql_example", "example_id"),
+        ):
+            name = getattr(cfg.milvus.collections, kind)
+            rows = milvus._collection(kind).query(
+                expr=f'source_id == "{sid}"',
+                output_fields=["count(*)"],
+                timeout=cfg.milvus.timeout,
+            )
+            # 服务端计数：不把全部命中记录拉回客户端再 len()
+            parts.append(f"milvus:{name}={int(rows[0]['count(*)']) if rows else 0}")
+    finally:
+        milvus.close()
+
+    from src.modules.db_deepagent.config import load_db_agent_config
+    from src.modules.db_deepagent.services import _neo4j_manager
+
+    cfg = load_db_agent_config()
+    manager = _neo4j_manager(cfg)
+    try:
+        with manager.get_session() as session:
+            row = session.run(
+                """
+                MATCH (t:Table) WHERE t.source_id = $sid
+                WITH count(t) AS tables
+                OPTIONAL MATCH (c:Column) WHERE c.source_id = $sid
+                WITH tables, count(c) AS columns
+                OPTIONAL MATCH ()-[h:HAS_COLUMN]->() WHERE h.source_id = $sid
+                WITH tables, columns, count(h) AS has_column
+                OPTIONAL MATCH ()-[r:JOIN_ON]->() WHERE r.source_id = $sid
+                RETURN tables, columns, has_column, count(r) AS join_on
+                """,
+                sid=sid,
+            ).single()
+            parts.append(
+                f"neo4j:Table={row['tables']} Column={row['columns']} "
+                f"HAS_COLUMN={row['has_column']} JOIN_ON={row['join_on']}"
+            )
+    finally:
+        manager.close()
+
+    zero = [p for p in parts if p.endswith("=0")]
+    detail = " ".join(parts)
+    if zero:
+        detail += f"（零计数 {len(zero)}/7 项，可能未发布或空集合）"
+    return True, detail
+
+
+def _collect_doctor_results(
+    stage: str, *, verbose: bool = True, source_id: str | None = None
+) -> list:
     """执行各阶段检查并返回 [(名称, ok, 详情)]；过程打印仅在 verbose 时。"""
     results: list[tuple[str, bool, str]] = []
 
@@ -240,24 +373,36 @@ def _collect_doctor_results(stage: str, *, verbose: bool = True) -> list:
         except Exception as exc:  # noqa: BLE001
             ok, detail = False, f"{type(exc).__name__}: {exc}"
         results.append(("装配后验证（§10.6）", ok, detail))
+
+    if source_id is not None:
+        if verbose:
+            print("-- source-scoped --")
+        try:
+            ok, detail = _check_source_scoped(source_id)
+        except Exception as exc:  # noqa: BLE001
+            ok, detail = False, f"{type(exc).__name__}: {exc}"
+        results.append((f"按源统计（source_id={source_id}）", ok, detail))
     return results
 
 
-def run_doctor(stage: str = "all", *, json_output: bool = False) -> int:
+def run_doctor(
+    stage: str = "all", *, json_output: bool = False, source_id: str | None = None
+) -> int:
     """执行检查并输出；json_output 时 stdout 仅单个 JSON 文档（§15.2）。"""
     if not json_output:
         print(f"== doctor / stage={stage} ==")
     if json_output:
         with contextlib.redirect_stdout(sys.stderr):
-            results = _collect_doctor_results(stage, verbose=False)
+            results = _collect_doctor_results(stage, verbose=False, source_id=source_id)
     else:
-        results = _collect_doctor_results(stage, verbose=True)
+        results = _collect_doctor_results(stage, verbose=True, source_id=source_id)
     passed = sum(1 for _, ok, _ in results if ok)
     if json_output:
         print(
             json.dumps(
                 {
                     "stage": stage,
+                    "source_id": source_id,
                     "passed": passed,
                     "total": len(results),
                     "items": [
@@ -368,7 +513,7 @@ def _render_result(result) -> None:
         for limitation in result.limitations:
             print(f"  - {limitation}")
     if result.open_questions:
-        print("\n待澄清:")
+        print("\n澄清与补充问题:")
         for question in result.open_questions:
             print(f"  - {question}")
     stats = result.stats
@@ -386,9 +531,21 @@ def _render_result(result) -> None:
 
 
 class _Session:
-    """一次 CLI 会话的装配：services + persistence + agent + runner"""
+    """一次 CLI 会话的装配：services + persistence + agent + runner。
 
-    def __init__(self, cfg, *, session_id: str, memory_persistence: bool = False):
+    source_id 为平台登记短 ID（doc 5.1 §1 + doc 4 §4.7）：CLI 会话在构造
+    服务前显式接收并验证，服务绑定来源不可变；同一 CLI 会话内复用
+    （chat 允许），退出释放。
+    """
+
+    def __init__(
+        self,
+        cfg,
+        *,
+        session_id: str,
+        source_id: str,
+        memory_persistence: bool = False,
+    ):
         from src.modules.db_deepagent.agent import build_db_agent
         from src.modules.db_deepagent.persistence.archive import QaArchive
         from src.modules.db_deepagent.persistence.checkpoint import build_persistence
@@ -396,30 +553,47 @@ class _Session:
 
         self.cfg = cfg
         self.session_id = session_id
-        self.services = build_services(cfg)
+        self.source_id = _validate_source_id_arg(source_id)
+        self.services = build_services(cfg, source_id=self.source_id)
         # 命令行覆盖后统一以最终 cfg.persistence.mode 决定装配：
-        # memory 模式不建平台池，Runner 也不取会话锁
+        # memory 模式不建平台池，Runner 也不取会话锁。
+        # services 建成后的任一后续构造失败，都按 close() 相同顺序回收
+        # （persistence/平台池 → services），不留半装配会话
         memory = memory_persistence or cfg.persistence.mode == "memory"
-        self.persistence = build_persistence(
-            cfg,
-            platform_pool=None if memory else self._open_platform_pool(cfg),
-        )
-        self.handle = build_db_agent(
-            self.services,
-            session_id=session_id,
-            checkpointer=self.persistence.checkpointer,
-            store=self.persistence.store,
-        )
-        self.archive = QaArchive(self.persistence.store)
-        from src.modules.db_deepagent.runner import DbAgentRunner
+        self.persistence = None
+        platform_pool = None
+        try:
+            if not memory:
+                platform_pool = self._open_platform_pool(cfg)
+            self.persistence = build_persistence(cfg, platform_pool=platform_pool)
+            self.handle = build_db_agent(
+                self.services,
+                session_id=session_id,
+                checkpointer=self.persistence.checkpointer,
+                store=self.persistence.store,
+            )
+            self.archive = QaArchive(self.persistence.store)
+            self.services.store = self.persistence.store  # doc 6.3：快照读取
+            from src.modules.db_deepagent.runner import DbAgentRunner
 
-        # 会话级互斥只在 postgres 持久化下生效；memory 模式无平台库，跳过
-        self.runner = DbAgentRunner(
-            services=self.services,
-            handle=self.handle,
-            archive=self.archive,
-            persistence=None if memory else self.persistence,
-        )
+            # 会话级互斥只在 postgres 持久化下生效；memory 模式无平台库，跳过
+            self.runner = DbAgentRunner(
+                services=self.services,
+                handle=self.handle,
+                archive=self.archive,
+                persistence=None if memory else self.persistence,
+            )
+        except BaseException:
+            if self.persistence is not None:
+                try:
+                    self.persistence.close()
+                except Exception:  # noqa: BLE001（回收失败不覆盖原始错误）
+                    pass
+            elif platform_pool is not None:
+                # build_persistence 未接管即失败：自行关闭平台池
+                platform_pool.close()
+            self.services.close()
+            raise
 
     @staticmethod
     def _open_platform_pool(cfg):
@@ -429,18 +603,22 @@ class _Session:
         )
 
         pool = build_platform_pool(cfg.platform_db)
-        pool.open(wait=False)
         try:
-            pool.wait()
-        except Exception as exc:
+            try:
+                pool.open(wait=False)
+                pool.wait()
+            except Exception as exc:
+                raise RuntimeError(f"平台库连接失败: {exc}") from exc
+            missing = check_platform_tables(pool, cfg.platform_db.schema_name)
+            if missing:
+                raise RuntimeError(
+                    f"平台库缺表 {', '.join(missing)}；请先运行 maintenance init-platform"
+                )
+        except BaseException:
+            # 打开/等待/表检查任一步失败：函数不返回，池由这里关闭，
+            # 不留无主的已打开连接池（调用方拿不到 pool 无法负责）
             pool.close()
-            raise RuntimeError(f"平台库连接失败: {exc}") from exc
-        missing = check_platform_tables(pool, cfg.platform_db.schema_name)
-        if missing:
-            pool.close()
-            raise RuntimeError(
-                f"平台库缺表 {', '.join(missing)}；请先运行 maintenance init-platform"
-            )
+            raise
         return pool
 
     def close(self) -> None:
@@ -540,7 +718,9 @@ def _run_maintenance_cleanup(args, cfg) -> int:
     if cfg.persistence.mode == "memory":
         print("memory 持久化模式没有可清理的平台库数据，跳过 cleanup")
         return 0
-    services = build_services(cfg)
+    # cleanup 只做平台库线程/归档清理，不执行按源检索；占位来源仅为满足
+    # build_services 的来源绑定（doc 4 §4.7）
+    services = build_services(cfg, source_id=_PLACEHOLDER_SOURCE_ID)
     try:
         # cleanup 需要真实平台库（checkpoints 在 PG）；接通已核对表的池
         pool = _Session._open_platform_pool(cfg)
@@ -565,7 +745,8 @@ def _run_maintenance_cleanup(args, cfg) -> int:
         print(f"  - {thread_id}")
     print(
         f"保留: {len(report.kept_threads)}  跳过: {len(report.skipped)}  "
-        f"结果目录: {len(report.result_dirs)}  归档条目: {len(report.archives)}"
+        f"结果目录: {len(report.result_dirs)}  归档条目: {len(report.archives)}  "
+        f"快照行: {report.snapshot_deleted}"
     )
     for item in report.skipped:
         print(f"  - {item}")
@@ -588,6 +769,10 @@ def _run_query_command(args, json_mode: bool) -> int:
 
     question = args.question
     session_id = args.session_id or ("s_" + _uuid.uuid4().hex[:10])
+    source_id = _validate_source_id_arg(getattr(args, "source_id", None))
+    # 配置加载（env 加载提示走 stdout）留在重定向内；登记源解析过程不写
+    # stdout，放在重定向之外：--json 模式的错误出口保持"stdout 单 JSON
+    # 文档"协议（§15.2）
     with (
         contextlib.redirect_stdout(sys.stderr)
         if json_mode
@@ -600,8 +785,18 @@ def _run_query_command(args, json_mode: bool) -> int:
         if args.fixed_now:
             cfg = cfg.model_copy(deep=True)
             cfg.clock.fixed_now = args.fixed_now
+    # 登记源注入：业务库连接与三键运行配置取登记值（doc 4 §4.7）
+    cfg = _resolve_registration_and_apply(cfg, source_id, json_mode=json_mode)
+    with (
+        contextlib.redirect_stdout(sys.stderr)
+        if json_mode
+        else contextlib.nullcontext()
+    ):
         session = _Session(
-            cfg, session_id=session_id, memory_persistence=args.memory_persistence
+            cfg,
+            session_id=session_id,
+            source_id=source_id,
+            memory_persistence=args.memory_persistence,
         )
         try:
             result = session.runner.run(
@@ -609,6 +804,7 @@ def _run_query_command(args, json_mode: bool) -> int:
                 session_id,
                 thread_id=args.thread_id,
                 request_id=args.request_id,
+                source_id=source_id,
             )
         finally:
             session.close()
@@ -634,13 +830,22 @@ def _run_chat_command(args) -> int:
     from src.modules.db_deepagent.config import load_db_agent_config
 
     session_id = args.session_id or ("s_" + _uuid.uuid4().hex[:10])
+    source_id = _validate_source_id_arg(getattr(args, "source_id", None))
     cfg = load_db_agent_config()
     if args.memory_persistence or cfg.persistence.mode == "memory":
         cfg = cfg.model_copy(deep=True)
         cfg.persistence.mode = "memory"
-    print(f"交互会话 {session_id}（/rotate /trace /result <ref> /exit）")
+    # 登记源注入：业务库连接与三键运行配置取登记值（doc 4 §4.7）
+    cfg = _resolve_registration_and_apply(cfg, source_id)
+    print(
+        f"交互会话 {session_id}（source_id={source_id}；/rotate /trace "
+        "/result <ref> /exit）"
+    )
     session = _Session(
-        cfg, session_id=session_id, memory_persistence=args.memory_persistence
+        cfg,
+        session_id=session_id,
+        source_id=source_id,
+        memory_persistence=args.memory_persistence,
     )
     last_result = None
     pending_rotate = False  # /rotate 登记：下一轮问题前强制轮换线程（§13.4）
@@ -665,7 +870,7 @@ def _run_chat_command(args) -> int:
                 _print_result_ref(session, line.split(None, 1)[1], cfg)
                 continue
             last_result = session.runner.run(
-                line, session_id, force_rotate=pending_rotate
+                line, session_id, force_rotate=pending_rotate, source_id=source_id
             )
             pending_rotate = False
             _render_result(last_result)
@@ -715,34 +920,17 @@ def _print_result_ref(session, ref_args: str, cfg) -> None:
 
 
 def _check_assembly() -> tuple[bool, str]:
-    """doctor --stage all 的装配后验证（§10.6；不调用模型生成）。"""
+    """doctor --stage all 的装配后验证（§10.6；不调用模型生成）。
+
+    build_services 需要来源绑定（doc 4 §4.7）：装配验证不执行按源检索，
+    使用固定占位来源；真实会话必须传登记 source_id。
+    """
     from src.modules.db_deepagent.agent import build_db_agent, stage_expected_tool_names
     from src.modules.db_deepagent.config import load_db_agent_config
     from src.modules.db_deepagent.services import build_services
 
     cfg = load_db_agent_config()
-    services = build_services(cfg)
-    try:
-        handle = build_db_agent(services, session_id="doctor-assembly")
-        expected = stage_expected_tool_names(cfg)
-        return (
-            True,
-            f"装配验证通过：{len(expected)} 件工具，harness={handle.harness_key}",
-        )
-    except Exception as exc:  # doctor 汇总失败
-        return False, f"{type(exc).__name__}: {exc}"
-    finally:
-        services.close()
-
-
-def _check_assembly() -> tuple[bool, str]:
-    """doctor --stage all 的装配后验证（§10.6；不调用模型生成）。"""
-    from src.modules.db_deepagent.agent import build_db_agent, stage_expected_tool_names
-    from src.modules.db_deepagent.config import load_db_agent_config
-    from src.modules.db_deepagent.services import build_services
-
-    cfg = load_db_agent_config()
-    services = build_services(cfg)
+    services = build_services(cfg, source_id=_PLACEHOLDER_SOURCE_ID)
     try:
         handle = build_db_agent(services, session_id="doctor-assembly")
         expected = stage_expected_tool_names(cfg)
@@ -803,6 +991,11 @@ def main(argv: list[str] | None = None) -> int:
         "--stage", choices=_DOCTOR_STAGES, default="all", help="检查阶段"
     )
     p_doctor.add_argument("--json", action="store_true", help="结构化 JSON 输出")
+    p_doctor.add_argument(
+        "--source-id",
+        default=None,
+        help="只读统计指定源的 Milvus/Neo4j 计数（doc 4 §4.7 可选辅助交付）",
+    )
 
     p_maint = sub.add_parser("maintenance", help="平台库维护动作")
     p_maint.add_argument(
@@ -821,10 +1014,20 @@ def main(argv: list[str] | None = None) -> int:
     p_query.add_argument("--session-id", default=None)
     p_query.add_argument("--thread-id", default=None)
     p_query.add_argument("--request-id", default=None)
+    p_query.add_argument(
+        "--source-id",
+        required=True,
+        help="平台登记 source_id（短 ID 形如 db_src_1，必填；不自动选源、不回退全图）",
+    )
     p_query.add_argument("--show-trace", action="store_true", help="显示工具调用轨迹")
 
     p_chat = sub.add_parser("chat", help="交互会话")
     p_chat.add_argument("--session-id", default=None)
+    p_chat.add_argument(
+        "--source-id",
+        required=True,
+        help="平台登记 source_id（短 ID 形如 db_src_1，必填；不自动选源、不回退全图）",
+    )
 
     p_acc = sub.add_parser("acceptance", help="验收题集运行（§18.4）")
     p_acc.add_argument("run", help="执行验收")
@@ -832,7 +1035,10 @@ def main(argv: list[str] | None = None) -> int:
 
     args = parser.parse_args(argv)
     if args.command == "doctor":
-        return run_doctor(args.stage, json_output=json_mode)
+        source_id = None
+        if getattr(args, "source_id", None):
+            source_id = _validate_source_id_arg(args.source_id)
+        return run_doctor(args.stage, json_output=json_mode, source_id=source_id)
     if args.command == "maintenance":
         from src.modules.db_deepagent.config import load_db_agent_config
 

@@ -1,11 +1,13 @@
-"""doc 23.2 §6.1/§6.2：rel 发布的预检数据、严格断言与锚点快照。
+"""rel 发布的输入检查与锚点快照（doc 23.2、6 §4.3、6.2 §8.2）。
 
-- ``check_rel_output_ready``：宽松产物就绪（D6 解冻口径，纯文件面）；
-- ``inspect_rel_context``：check_publication / publish_steps 共用的 rel 行检查；
-- ``assert_rel_publish_strict``：执行预检第 1–5 条（§6.2 控制流块，仅当
-  chosen 含 rel 时在 publish_id 之前调用）；
-- ``capture_rel_precheck_snapshot``：第 2+6 条锚点打包（登记快照 + json/
-  domain 两行 marker + rel json 指纹 + 主配置快照）。
+- ``check_rel_output_ready``：宽松产物就绪（纯文件面）；
+- ``inspect_rel_inputs``：json/domain/rel 三目录的 marker 与内容检查
+  （集中预检与执行期复查共用）；
+- ``capture_rel_precheck_snapshot``：登记快照 + 三个目录 marker 运行 +
+  rel json 指纹 + 主配置快照。
+
+跨步骤采集完成时间的新鲜度检查已按 doc 6 §4.3 取消：不再比较 rel 与
+json/domain 的先后，时间展示交给发布页。内容、端点与配置检查保留。
 """
 
 from __future__ import annotations
@@ -14,25 +16,27 @@ import hashlib
 import json
 import logging
 from dataclasses import dataclass
-from datetime import datetime
-from uuid import UUID
+from pathlib import Path
 
 from backend.data_sources.domain_step_service import verify_domain_artifact
 from backend.data_sources.json_step_service import (
+    JSON_MANIFEST_NAME,
     ManagedJsonInputError,
     read_managed_json_input,
 )
-from backend.jobs.repository import assert_workspace_owner, get_step_row
-from backend.persistence.platform_db import platform_session
-from backend.profile_loading.json_loader import read_registration_snapshot
 from backend.profile_loading.file_utils import read_regular_text
-from backend.publishing.errors import PublicationStepNotReadyError
+from backend.profile_loading.json_loader import (
+    RegistrationSnapshot,
+    read_registration_snapshot,
+)
 from metaweave.core.clean_targets import (
     resolve_domain_output_dir,
+    resolve_json_output_dir,
     resolve_rel_output_dir,
 )
 from metaweave.core.metadata.execution import load_main_config_snapshot
 from metaweave.utils.file_utils import resolve_project_path
+from backend.workspace_files.markers import read_collection_marker
 
 logger = logging.getLogger("backend.publishing")
 
@@ -41,224 +45,165 @@ JSON_STEP_FOR_REL = "json"
 DOMAIN_STEP_FOR_REL = "domain"
 DOMAIN_ARTIFACT_NAME = "db_domains.yaml"
 METADATA_CONFIG = "configs/metadata_config.yaml"
-BACKUP_DIR_NAME = ".backup"
 TMP_PREFIX = ".tmp"
-NOT_READY_THREE_ROWS = "同一作业的 JSON/Domain/Rel 步骤未成功，无法发布 Rel"
+NOT_READY_THREE_DIRS = "工作区的 JSON/Domain/Rel 产物未就绪，无法发布 Rel"
+
+
+class RelPrecheckError(ValueError):
+    """Rel 发布输入不满足（doc 23.2 §6.2，无新鲜度要求）。"""
 
 
 @dataclass(frozen=True)
 class RelPrecheckSnapshot:
-    """§6.2 第 6 条锚点包（经 registrations 旁路携带到 ``_publish_rel``）。"""
+    """集中预检捕获的锚点包（执行期复查用）。"""
 
-    registration: object  # RegistrationSnapshot（updated_at/db_name/selected_schemas）
-    json_marker: datetime
-    domain_marker: datetime
+    registration: RegistrationSnapshot
+    json_run_id: str
+    domain_run_id: str
+    rel_run_id: str
     rel_fingerprint: str
     main_config: dict
 
 
-def check_rel_output_ready(source_id, job_id) -> bool:
-    """宽松产物就绪（D6 解冻口径）：rel 目录顶层存在非忽略普通文件。
-
-    忽略规则与执行预检共用（§6.2）：``.tmp*`` 前缀与 ``.backup/`` 子目录不算
-    数——PUT 崩溃残留的临时文件不会单独造成假就绪。纯文件面检查，不访问
-    平台库（与 ``check_dim_value_output_ready`` 同构）。目录不可用（路径含
-    符号链接的 ValueError、不可读的 OSError）兜底降级为未就绪 + warning——
-    不让整个 check_publication 500（check_domain/dim_value 同款）。
-    """
+def check_rel_output_ready(source_id: str, workspace_id: str) -> bool:
+    """宽松产物就绪：rel 目录顶层存在非忽略普通文件（点号文件不算）。"""
     try:
-        rel_dir = resolve_rel_output_dir(source_id, job_id)
+        rel_dir = resolve_rel_output_dir(source_id, workspace_id)
         if not rel_dir.is_dir():
             return False
         for path in rel_dir.iterdir():
-            if path.name.startswith(TMP_PREFIX):
+            if path.name.startswith("."):
                 continue
             if path.is_file() and not path.is_symlink():
                 return True
         return False
     except (ValueError, OSError) as exc:
         logger.warning(
-            "Rel 预检产物目录不可用 source_id=%s job_id=%s type=%s",
+            "Rel 预检产物目录不可用 source_id=%s workspace_id=%s type=%s",
             source_id,
-            job_id,
+            workspace_id,
             type(exc).__name__,
         )
         return False
 
 
-def inspect_rel_context(session, source_id: UUID, job_id: UUID):
-    """rel 行检查（不读文件）：返回 (last_status, updated_at)。"""
-
-    from backend.data_sources.repository import get_db_source
-    from backend.profile_loading.db_loader import (
-        MetaLoadSourceDisabledError,
-        MetaLoadSourceNotFoundError,
-    )
-
-    source = get_db_source(session, source_id)
-    if source is None:
-        raise MetaLoadSourceNotFoundError("未找到指定 source_id 的数据源")
-    if not source.is_active:
-        raise MetaLoadSourceDisabledError("指定数据源已禁用，不能加载画像")
-    assert_workspace_owner(session, job_id, source_id)
-    step = get_step_row(session, job_id, REL_STEP)
-    if step is None:
-        return None, None
-    return step.last_status, step.updated_at
+def _require_marker(directory: Path, label: str) -> str:
+    marker, error = read_collection_marker(directory)
+    if marker is None:
+        raise RelPrecheckError(error or f"{label} 目录没有采集 marker")
+    if marker.status != "success":
+        raise RelPrecheckError(f"{label} 目录采集未成功，不可发布")
+    return marker.run_id
 
 
-def _require_step_marker(session, job_uuid: UUID, step_name: str) -> datetime:
-    """三行存在性 + success 就地复查（§6.2 块内职责终稿：不依赖外层闸）。"""
-    row = get_step_row(session, job_uuid, step_name)
-    if row is None or row.last_status != "success":
-        raise PublicationStepNotReadyError(NOT_READY_THREE_ROWS)
-    return row.updated_at
+def inspect_rel_inputs(
+    source_id: str,
+    workspace_id: str,
+    registration: RegistrationSnapshot,
+    *,
+    require_marker_dirs: bool = True,
+) -> tuple[str, str, str, str]:
+    """三目录输入检查：marker + 内容（doc 6 §4.1；无新鲜度比较）。
 
-
-def _assert_fresh_ordering(
-    rel_marker: datetime, json_marker: datetime, domain_marker: datetime
-) -> None:
-    """新鲜度排序（§6.2：rel 严格晚于 json/domain，等值按过期）。
-
-    assert 与 capture 是两个无锁会话——上游重跑可能恰在其间提交，使
-    assert 用旧时间戳判过、capture 却锚定新 marker（锁下核对该新值「自
-    预检未变」必然通过，旧 rel 便配新 json 发布）。故排序必须以**将被
-    锚定的那组 marker** 复查：capture 期再跑一次本函数即封住该窗口。
+    返回 (json_run_id, domain_run_id, rel_run_id, rel_json 指纹)。
     """
-    stale = [
-        label
-        for label, marker in (("JSON", json_marker), ("Domain", domain_marker))
-        if not (rel_marker > marker)
-    ]
-    if stale:
-        raise PublicationStepNotReadyError(
-            f"同一作业的 {' 与 '.join(stale)} 已重跑，Rel 产物已过期；"
-            "请重跑 Rel 后再发布"
-        )
-
-
-def assert_rel_publish_strict(settings, source_uuid: UUID, job_uuid: UUID) -> None:
-    """执行预检第 1–5 条（§6.2；任一失败 400，不生成 publish_id）。
-
-    1. 三行存在性 + success（就地复查）+ 新鲜度（rel 严格晚于 json/domain，
-       等值按过期——§6.2 等值边界）；
-    3. json 画像 ≥1；
-    4. domain yaml 核验；
-    5. 主配置快照合法（CQLGenerator 构造期完成阈值校验）。
-    """
-    with platform_session(settings) as session:
-        json_marker = _require_step_marker(session, job_uuid, JSON_STEP_FOR_REL)
-        domain_marker = _require_step_marker(session, job_uuid, DOMAIN_STEP_FOR_REL)
-        rel_marker = _require_step_marker(session, job_uuid, REL_STEP)
-        _assert_fresh_ordering(rel_marker, json_marker, domain_marker)
-
-        from backend.data_sources.repository import get_db_source
-        from backend.profile_loading.db_loader import (
-            MetaLoadSourceDisabledError,
-            MetaLoadSourceNotFoundError,
-        )
-
-        source = get_db_source(session, source_uuid)
-        if source is None:
-            raise MetaLoadSourceNotFoundError("未找到指定 source_id 的数据源")
-        if not source.is_active:
-            raise MetaLoadSourceDisabledError("指定数据源已禁用，不能加载画像")
-        assert_workspace_owner(session, job_uuid, source_uuid)
-
-        try:
-            read_managed_json_input(source_uuid, job_uuid, source.db_name)
-        except ManagedJsonInputError as exc:
-            raise PublicationStepNotReadyError(
-                f"同一作业的 JSON 产物未就绪：{exc}"
-            ) from None
-
-        domain_yaml_path = (
-            resolve_domain_output_dir(source_uuid, job_uuid) / DOMAIN_ARTIFACT_NAME
-        )
-        artifact_ok, artifact_reason = verify_domain_artifact(domain_yaml_path)
-        if not artifact_ok:
-            raise PublicationStepNotReadyError(
-                f"{artifact_reason}；请先执行 Domain 或指定已有 job_id"
-            )
-
-    # 第 5 条：主配置快照合法（generator 构造期校验 composite_score_threshold）
-    from metaweave.core.cql_generator.generator import CQLGenerator
+    json_dir = resolve_json_output_dir(source_id, workspace_id)
+    domain_dir = resolve_domain_output_dir(source_id, workspace_id)
+    rel_dir = resolve_rel_output_dir(source_id, workspace_id)
+    json_run_id = _require_marker(json_dir, "JSON")
+    domain_run_id = _require_marker(domain_dir, "Domain")
+    rel_run_id = _require_marker(rel_dir, "Rel")
 
     try:
-        main_config = load_main_config_snapshot(resolve_project_path(METADATA_CONFIG))
-        CQLGenerator(resolve_project_path(METADATA_CONFIG), config=main_config)
-    except ValueError as exc:
-        raise PublicationStepNotReadyError(str(exc)) from None
+        read_managed_json_input(source_id, workspace_id, registration.db_name)
+    except ManagedJsonInputError as exc:
+        raise RelPrecheckError(f"JSON 产物未就绪：{exc}") from None
 
+    domain_yaml_path = domain_dir / DOMAIN_ARTIFACT_NAME
+    artifact_ok, artifact_reason = verify_domain_artifact(domain_yaml_path)
+    if not artifact_ok:
+        raise RelPrecheckError(f"{artifact_reason}；请先执行 Domain 采集")
 
-def _rel_artifact_paths(source_uuid: UUID, job_uuid: UUID, database_name: str):
-    rel_dir = resolve_rel_output_dir(source_uuid, job_uuid)
-    return (
-        rel_dir,
-        rel_dir / f"{database_name}.relationships_global.json",
-        rel_dir / f"{database_name}.relationships_global.md",
-    )
-
-
-def capture_rel_precheck_snapshot(
-    settings, source_uuid: UUID, job_uuid: UUID
-) -> RelPrecheckSnapshot:
-    """第 2+6 条锚点打包：登记快照 + json/domain marker + 文件面 + 指纹。
-
-    文件面核验（第 2 条）：恰两份非忽略普通文件、json 可解析、库名匹配、
-    relationships 为列表、statistics 为对象（23.1 采集核验的文件面子集）。
-    """
-    with platform_session(settings) as session:
-        registration = read_registration_snapshot(session, source_uuid)
-        json_marker = _require_step_marker(session, job_uuid, JSON_STEP_FOR_REL)
-        domain_marker = _require_step_marker(session, job_uuid, DOMAIN_STEP_FOR_REL)
-        rel_marker = _require_step_marker(session, job_uuid, REL_STEP)
-        # 排序以锚点为准：assert 与 capture 分立会话间的上游重跑由此拦截
-        # （见 _assert_fresh_ordering 的并发窗口说明）
-        _assert_fresh_ordering(rel_marker, json_marker, domain_marker)
-
-    # 登记快照已校验存在/启用并携带 db_name——不再二次查询源行
-    rel_dir, json_path, md_path = _rel_artifact_paths(
-        source_uuid, job_uuid, registration.db_name
-    )
+    json_path = rel_dir / f"{registration.db_name}.relationships_global.json"
+    md_path = rel_dir / f"{registration.db_name}.relationships_global.md"
     actual = set()
     for path in rel_dir.iterdir() if rel_dir.is_dir() else []:
-        if path.name.startswith(TMP_PREFIX) or path.is_dir():
+        if (
+            path.name.startswith(TMP_PREFIX)
+            or path.name.startswith(".")
+            or path.is_dir()
+        ):
             continue
         if path.is_symlink() or not path.is_file():
-            raise PublicationStepNotReadyError(
-                f"受管 Rel 目录存在非常规文件: {path.name}"
-            )
+            raise RelPrecheckError(f"受管 Rel 目录存在非常规文件: {path.name}")
         actual.add(path.name)
     if actual != {json_path.name, md_path.name}:
-        raise PublicationStepNotReadyError(
+        raise RelPrecheckError(
             "Rel 产物目录应为恰好 json 与 md 两份文件，请重跑 Rel 后再发布"
         )
-
     status, content = read_regular_text(json_path, "rel json")
     if status != "ok":
-        raise PublicationStepNotReadyError("Rel 产物不可读，请重跑 Rel 后再发布")
+        raise RelPrecheckError("Rel 产物不可读，请重跑 Rel 后再发布")
     try:
         data = json.loads(content)
     except ValueError:
-        raise PublicationStepNotReadyError(
-            "Rel 产物 JSON 无法解析，请重跑 Rel 后再发布"
-        ) from None
+        raise RelPrecheckError("Rel 产物 JSON 无法解析，请重跑 Rel 后再发布") from None
     if (
         not isinstance(data, dict)
         or data.get("database") != registration.db_name
         or not isinstance(data.get("relationships"), list)
         or not isinstance(data.get("statistics"), dict)
     ):
-        raise PublicationStepNotReadyError(
+        raise RelPrecheckError(
             "Rel 产物结构不合法（库名/relationships/statistics），请重跑 Rel"
         )
+    fingerprint = hashlib.sha256(content.encode("utf-8")).hexdigest()[:16]
+    return json_run_id, domain_run_id, rel_run_id, fingerprint
 
-    main_config = load_main_config_snapshot(resolve_project_path(METADATA_CONFIG))
+
+def build_rel_input_manifest(
+    source_id: str,
+    workspace_id: str,
+    json_run_id: str,
+    domain_run_id: str,
+    rel_run_id: str,
+    database_name: str,
+) -> list[tuple[str, str | None]]:
+    """Rel 发布 input_manifest 条目：json/domain/rel 全部实际读取文件。"""
+    json_dir = resolve_json_output_dir(source_id, workspace_id)
+    entries = [
+        (f"json/{path.name}", json_run_id)
+        for path in sorted(json_dir.glob("*.json"), key=lambda item: item.name)
+        if path.name != JSON_MANIFEST_NAME
+    ]
+    entries.append((f"domain/{DOMAIN_ARTIFACT_NAME}", domain_run_id))
+    entries.append((f"rel/{database_name}.relationships_global.json", rel_run_id))
+    entries.append((f"rel/{database_name}.relationships_global.md", rel_run_id))
+    return entries
+
+
+def capture_rel_precheck_snapshot(
+    session, source_id: str, workspace_id: str
+) -> RelPrecheckSnapshot:
+    """集中预检锚点打包（登记快照 + marker 运行 + 指纹 + 主配置）。"""
+    registration = read_registration_snapshot(session, source_id)
+    json_run_id, domain_run_id, rel_run_id, fingerprint = inspect_rel_inputs(
+        source_id, workspace_id, registration
+    )
+    # 主配置快照合法（generator 构造期校验 composite_score_threshold）
+    from metaweave.core.cql_generator.generator import CQLGenerator
+
+    config_path = resolve_project_path(METADATA_CONFIG)
+    main_config = load_main_config_snapshot(config_path)
+    try:
+        CQLGenerator(config_path, config=main_config)
+    except ValueError as exc:
+        raise RelPrecheckError(str(exc)) from None
     return RelPrecheckSnapshot(
         registration=registration,
-        json_marker=json_marker,
-        domain_marker=domain_marker,
-        rel_fingerprint=hashlib.sha256(content.encode("utf-8")).hexdigest()[:16],
+        json_run_id=json_run_id,
+        domain_run_id=domain_run_id,
+        rel_run_id=rel_run_id,
+        rel_fingerprint=fingerprint,
         main_config=main_config,
     )

@@ -43,20 +43,35 @@ _PROVIDER_MAP: dict[str, tuple[str, str]] = {
 
 _OPENAI_COMPATIBLE = frozenset({"openai", "openrouter", "deepseek"})
 
-_ALLOWED_OVERRIDES = frozenset({
-    "temperature", "timeout", "max_tokens",
-    "top_p", "enable_thinking", "enable_search",
-    "search_options", "response_format", "stream",
-    "thinking",
-})
+_ALLOWED_OVERRIDES = frozenset(
+    {
+        "temperature",
+        "timeout",
+        "max_tokens",
+        "top_p",
+        "enable_thinking",
+        "enable_search",
+        "search_options",
+        "response_format",
+        "stream",
+        "thinking",
+        "max_retries",
+    }
+)
 
-_DASHSCOPE_ONLY_PARAMS = frozenset({
-    "enable_thinking", "enable_search", "search_options",
-})
+_DASHSCOPE_ONLY_PARAMS = frozenset(
+    {
+        "enable_thinking",
+        "enable_search",
+        "search_options",
+    }
+)
 
-_DEEPSEEK_ONLY_PARAMS = frozenset({
-    "thinking",
-})
+_DEEPSEEK_ONLY_PARAMS = frozenset(
+    {
+        "thinking",
+    }
+)
 
 _PROFILE_RESERVED_KEYS = frozenset({"provider", "model"})
 
@@ -222,6 +237,15 @@ def _build_params(
             f"仅允许: {sorted(_ALLOWED_OVERRIDES)}"
         )
 
+    # max_retries（doc 6.2 §7.5.1）：非负整数；仅 OpenAI 兼容路径支持，
+    # 原生 dashscope 路径显式拒绝，不静默丢弃。
+    if "max_retries" in overrides:
+        retry_count = overrides["max_retries"]
+        if type(retry_count) is not int or retry_count < 0:
+            raise ValueError("max_retries 必须是非负整数")
+        if provider_name == "dashscope":
+            raise ValueError("原生 DashScope 路径尚不支持本重试参数")
+
     if provider_name == "dashscope":
         if "timeout" in overrides:
             raise ValueError(
@@ -229,11 +253,17 @@ def _build_params(
                 "（DashScope SDK 自行管理超时），请从节点配置中移除 timeout"
             )
 
-        _DS_MODEL_KWARGS_KEYS = frozenset({
-            "temperature", "max_tokens", "top_p",
-            "enable_thinking", "enable_search", "search_options",
-            "response_format",
-        })
+        _DS_MODEL_KWARGS_KEYS = frozenset(
+            {
+                "temperature",
+                "max_tokens",
+                "top_p",
+                "enable_thinking",
+                "enable_search",
+                "search_options",
+                "response_format",
+            }
+        )
         model_kwargs: dict[str, Any] = {
             k: overrides[k] for k in _DS_MODEL_KWARGS_KEYS if k in overrides
         }
@@ -285,6 +315,10 @@ def _build_params(
             params["streaming"] = overrides["stream"]
         if "response_format" in overrides:
             params["response_format"] = overrides["response_format"]
+        # max_retries 是 ChatOpenAI 顶层构造参数（doc 6.2 §7.5.1），
+        # 不能放进 model_kwargs/extra_body。
+        if "max_retries" in overrides:
+            params["max_retries"] = overrides["max_retries"]
 
         # DeepSeek thinking 参数通过 extra_body 传入（非标准字段，不能放 model_kwargs）
         if provider_name == "deepseek" and "thinking" in overrides:
@@ -292,9 +326,7 @@ def _build_params(
 
         # 自动检测的 provider：DashScope 专有参数通过 extra_body 透传
         if not _is_hardcoded:
-            extra = {
-                k: overrides[k] for k in _DASHSCOPE_ONLY_PARAMS if k in overrides
-            }
+            extra = {k: overrides[k] for k in _DASHSCOPE_ONLY_PARAMS if k in overrides}
             if extra:
                 params.setdefault("extra_body", {}).update(extra)
 

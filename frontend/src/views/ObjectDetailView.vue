@@ -4,6 +4,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { getObjectDdl, getObjectDetail, listObjectOptions } from '../api/assets'
 import { displayDate } from '../api/format'
 import { ApiError } from '../api/http'
+import PageBreadcrumbs from '../components/PageBreadcrumbs.vue'
 import type {
   ObjectDetailColumn,
   ObjectDetailResponse,
@@ -390,8 +391,8 @@ async function ensureDdl(retrying = false) {
   try {
     const response = await getObjectDdl(sourceId.value, schemaName.value, objectName.value)
     if (requestId !== ddlRequestId || key !== routeKey.value) return
-    const displayedPublishId = detail.value?.json_publish?.publish_id ?? null
-    if (response.json_publish_id !== displayedPublishId) {
+    const displayedPublishId = detail.value?.json_publish?.publish_run_id ?? null
+    if (response.json_publish_run_id !== displayedPublishId) {
       // JSON 在详情与 DDL 两次请求之间重新发布：不展示旧详情与新 DDL 的
       // 组合（doc 19.2 §8.2）——丢弃本次响应，先刷新详情；刷新后如仍停留
       // 在 DDL Tab 再取当前 DDL。连续重发布时放弃本轮，避免刷新循环
@@ -669,16 +670,8 @@ watch(
 )
 
 function goBack() {
-  const previous = window.history.state?.back
-  if (
-    typeof previous === 'string' &&
-    previous.includes('/objects') &&
-    !previous.includes('/detail')
-  ) {
-    router.back()
-    return
-  }
-  router.push({
+  // doc 9 §7.4：固定返回该数据源的对象列表（保留 schema_name），不再读浏览器历史
+  void router.push({
     path: `/data-assets/${sourceId.value}/objects`,
     query: schemaName.value ? { schema_name: schemaName.value } : {},
   })
@@ -723,6 +716,22 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="ds-jobs obj-detail">
+    <PageBreadcrumbs
+      :segments="[
+        { label: '数据资产', to: '/data-assets' },
+        // 本页不加载源显示名，按 §6.1 以「数据源」占位
+        { label: '数据源', to: `/data-assets/${sourceId}/profile` },
+        {
+          label: '对象列表',
+          // query 对象构造（与返回按钮一致）：schema 名可含 &、# 等特殊字符
+          to: {
+            path: `/data-assets/${sourceId}/objects`,
+            query: schemaName ? { schema_name: schemaName } : {},
+          },
+        },
+        { label: `${schemaName}.${objectName}` },
+      ]"
+    />
     <header class="ds-jobs-header">
       <div>
         <span class="ds-kicker">OBJECT PROFILE</span>

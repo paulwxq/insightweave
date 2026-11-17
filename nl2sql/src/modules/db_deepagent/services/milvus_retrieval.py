@@ -3,7 +3,12 @@
 复制自 src/services/vector_adapter/milvus_adapter.py 的六个检索方法，改造点：
 - 构造时注入 DbEmbeddingClient 与配置（集合名、搜索参数、连接别名）；
   所有 Collection(...) 调用显式传 using=<别名>，搜索传 timeout=cfg.milvus.timeout
-- 连接别名固定 db_deepagent，避免与旧链路的 default 别名互相影响；不实例化 pgvector
+- 连接别名基于配置别名加每实例唯一后缀（doc 4 §3.3/§4.7）：并发请求各持
+  独立连接，close 只断开本实例；避免与旧链路的 default 别名互相影响
+- 构造时绑定不可变 source_id（doc 4 §3 + doc 5.1 短 ID）：六个检索/回查
+  入口全部叠加 ``source_id ==`` 过滤，精确回查同样按源过滤；缺失或非法
+  来源直接拒绝（``normalize_short_source_id``，形如 db_src_1），禁止回退为
+  无源过滤查询
 - search_dim_values 结果增加 query_value；dim_table 保持 Milvus 原值（三段表键）
 - 新增 vector_field_dim(collection_name, field_name) -> int 供 §6.3 一致性检查
 - Milvus 异常向上抛 RetrievalBackendError，不吞掉、不降级为空列表
@@ -16,7 +21,8 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any
+import uuid
+from typing import Any, Iterator
 
 from pymilvus import Collection, connections, db as milvus_db, utility
 
@@ -28,13 +34,40 @@ from src.utils.logger import get_module_logger
 logger = get_module_logger("nl2sql.db_deepagent.milvus_retrieval")
 
 
-class DbMilvusRetrieval:
-    """Milvus 检索适配器（db_deepagent 专用连接别名）"""
+def _normalized_source_id(source_id: str | None) -> str:
+    """校验并规范化 source_id（短 ID，doc 5.1 §1）；缺失/非法直接拒绝
+    （doc 4 §3.2，doc 12.2 M-1：与 source_registry 同一严格校验）。"""
+    if not isinstance(source_id, str) or not source_id.strip():
+        raise ValueError(
+            "Milvus 检索必须绑定会话 source_id（短 ID 形如 db_src_1）；"
+            "缺失即拒绝查询"
+        )
+    try:
+        from src.modules.db_deepagent.source_registry import (
+            normalize_short_source_id,
+        )
 
-    def __init__(self, cfg: DbAgentConfig, embedding: DbEmbeddingClient):
+        return normalize_short_source_id(source_id)
+    except ValueError:
+        raise ValueError("source_id 不是合法短 ID，拒绝执行检索") from None
+
+
+class DbMilvusRetrieval:
+    """Milvus 检索适配器（每实例独立连接别名 + 不可变 source_id 绑定）"""
+
+    def __init__(
+        self,
+        cfg: DbAgentConfig,
+        embedding: DbEmbeddingClient,
+        *,
+        source_id: str | None = None,
+    ):
         self._cfg = cfg
         self._embedding = embedding
-        self._alias = cfg.milvus.alias
+        self.source_id = _normalized_source_id(source_id)
+        # doc 4 §3.3：每执行实例独立 alias——同源并发请求也不能共用连接，
+        # close 只释放本实例
+        self._alias = f"{cfg.milvus.alias}_{uuid.uuid4().hex[:8]}"
         self._search_params = {
             "metric_type": cfg.milvus.search_params.metric_type,
             "params": dict(cfg.milvus.search_params.params),
@@ -44,7 +77,13 @@ class DbMilvusRetrieval:
             "dim_value": None,
             "sql_example": None,
         }
-        self._connect()
+        try:
+            self._connect()
+        except BaseException:
+            # 连接已建立但集合缺失等场景下，对象尚未返回给调用方——
+            # 构造失败必须自行断开本实例 alias，否则连接残留
+            self.close()
+            raise
 
     # ---------------------------------------------------------------- 连接
 
@@ -98,25 +137,58 @@ class DbMilvusRetrieval:
             self._collections[kind] = Collection(name, using=self._alias)
         return self._collections[kind]
 
+    @property
+    def _source_expr(self) -> str:
+        """本实例绑定的 source_id 过滤表达式（doc 4 §3.1，六入口统一组合）。"""
+        return f'source_id == "{self.source_id}"'
+
+    def iter_source_records(
+        self, kind: str, output_fields: list[str]
+    ) -> Iterator[dict[str, Any]]:
+        """按本实例 source_id 全量枚举集合记录（doc 2 §5.5 readiness 用）。
+
+        用 query_iterator 分页遍历，返回 dict 记录（含请求的 output_fields）。
+        kind 为 table_schema/dim_value/sql_example；超时与检索一致取
+        cfg.milvus.timeout。
+        """
+        collection = self._collection(kind)
+        iterator = collection.query_iterator(
+            batch_size=1000,
+            limit=-1,
+            expr=self._source_expr,
+            output_fields=list(output_fields),
+            timeout=self._cfg.milvus.timeout,
+        )
+        try:
+            while True:
+                batch = iterator.next()
+                if not batch:
+                    break
+                for record in batch:
+                    yield dict(record)
+        finally:
+            iterator.close()
+
     # ---------------------------------------------------------------- 检索
 
     def search_tables(
         self, embedding: list[float], top_k: int, similarity_threshold: float
     ) -> list[dict[str, Any]]:
-        """检索语义相关的表（object_type == "table"；limit=top_k 再按原始分数过滤）。"""
+        """检索语义相关的表（本源 + object_type == "table"；按原始分数过滤）。"""
         collection = self._collection("table_schema")
         logger.debug(
-            "search_tables: collection=%s limit=%s threshold=%s",
+            "search_tables: collection=%s limit=%s threshold=%s source_id=%s",
             collection.name,
             top_k,
             similarity_threshold,
+            self.source_id,
         )
         results = collection.search(
             data=[embedding],
             anns_field="embedding",
             param=self._search_params,
             limit=top_k,
-            expr='object_type == "table"',
+            expr=f'{self._source_expr} and object_type == "table"',
             output_fields=[
                 "object_id",
                 "object_type",
@@ -145,14 +217,14 @@ class DbMilvusRetrieval:
     def search_columns(
         self, embedding: list[float], top_k: int, similarity_threshold: float
     ) -> list[dict[str, Any]]:
-        """检索语义相关的列（object_type == "column"）。"""
+        """检索语义相关的列（本源 + object_type == "column"）。"""
         collection = self._collection("table_schema")
         results = collection.search(
             data=[embedding],
             anns_field="embedding",
             param=self._search_params,
             limit=top_k,
-            expr='object_type == "column"',
+            expr=f'{self._source_expr} and object_type == "column"',
             output_fields=["object_id", "parent_id", "object_type"],
             timeout=self._cfg.milvus.timeout,
         )
@@ -183,7 +255,7 @@ class DbMilvusRetrieval:
             anns_field="col_value_embedding",
             param=self._search_params,
             limit=top_k,
-            expr=None,
+            expr=self._source_expr,
             output_fields=["table_name", "col_name", "col_value"],
             timeout=self._cfg.milvus.timeout,
         )
@@ -208,14 +280,14 @@ class DbMilvusRetrieval:
     def search_similar_sqls(
         self, embedding: list[float], top_k: int, similarity_threshold: float
     ) -> list[dict[str, Any]]:
-        """检索历史相似 SQL（question_sql 为 JSON 文本，解析失败时原文入 sql）。"""
+        """检索历史相似 SQL（本源；question_sql 为 JSON 文本，解析失败时原文入 sql）。"""
         collection = self._collection("sql_example")
         results = collection.search(
             data=[embedding],
             anns_field="embedding",
             param=self._search_params,
             limit=top_k,
-            expr=None,
+            expr=self._source_expr,
             output_fields=["example_id", "question_sql", "domain"],
             timeout=self._cfg.milvus.timeout,
         )
@@ -252,11 +324,18 @@ class DbMilvusRetrieval:
         return matches
 
     def fetch_table_cards(self, table_names: list[str]) -> dict[str, dict[str, Any]]:
-        """批量精确查询表卡片（object_desc 映射为 text_raw 保持接口一致）。"""
+        """批量精确查询表卡片（本源；object_desc 映射为 text_raw 保持接口一致）。
+
+        精确回查同样按源过滤——同名 object_id 的字典整理只能发生在已限定
+        来源的结果集上（doc 4 §3.1）。
+        """
         if not table_names:
             return {}
         collection = self._collection("table_schema")
-        expr = f'object_id in {json.dumps(table_names)} and object_type == "table"'
+        expr = (
+            f"{self._source_expr} and object_id in {json.dumps(table_names)} "
+            'and object_type == "table"'
+        )
         results = collection.query(
             expr=expr,
             output_fields=[
@@ -281,11 +360,14 @@ class DbMilvusRetrieval:
         return cards
 
     def fetch_table_categories(self, table_names: list[str]) -> dict[str, str]:
-        """批量查询表类别（只记录非空值）。"""
+        """批量查询表类别（本源；只记录非空值）。"""
         if not table_names:
             return {}
         collection = self._collection("table_schema")
-        expr = f'object_id in {json.dumps(table_names)} and object_type == "table"'
+        expr = (
+            f"{self._source_expr} and object_id in {json.dumps(table_names)} "
+            'and object_type == "table"'
+        )
         results = collection.query(
             expr=expr,
             output_fields=["object_id", "table_category"],

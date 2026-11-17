@@ -16,11 +16,28 @@ def _build_metadata():
         comment="店铺销售日流水事实表",
     )
     metadata.columns = [
-        ColumnInfo(column_name="store_id", ordinal_position=1, data_type="integer", is_nullable=False),
-        ColumnInfo(column_name="date_day", ordinal_position=2, data_type="date", is_nullable=False),
-        ColumnInfo(column_name="amount", ordinal_position=3, data_type="numeric", is_nullable=False),
+        ColumnInfo(
+            column_name="store_id",
+            ordinal_position=1,
+            data_type="integer",
+            is_nullable=False,
+        ),
+        ColumnInfo(
+            column_name="date_day",
+            ordinal_position=2,
+            data_type="date",
+            is_nullable=False,
+        ),
+        ColumnInfo(
+            column_name="amount",
+            ordinal_position=3,
+            data_type="numeric",
+            is_nullable=False,
+        ),
     ]
-    metadata.primary_keys = [PrimaryKey(constraint_name="pk_fact_sales", columns=["store_id", "date_day"])]
+    metadata.primary_keys = [
+        PrimaryKey(constraint_name="pk_fact_sales", columns=["store_id", "date_day"])
+    ]
     metadata.foreign_keys = [
         ForeignKey(
             constraint_name="fk_sales_store",
@@ -38,7 +55,9 @@ def test_profiler_generates_column_and_table_profiles():
     df = pd.DataFrame(
         {
             "store_id": [1, 2, 3, 1],
-            "date_day": pd.to_datetime(["2024-01-01", "2024-01-02", "2024-01-02", "2024-01-01"]),
+            "date_day": pd.to_datetime(
+                ["2024-01-01", "2024-01-02", "2024-01-02", "2024-01-01"]
+            ),
             "amount": [100, 120, 130, 110],
         }
     )
@@ -88,7 +107,9 @@ def test_complex_takes_precedence_over_audit():
 
     role, confidence, *rest = profiler._classify_semantics(column, None, struct_flags)
 
-    assert role == "complex", f"Expected 'complex' but got '{role}' for audit_log (jsonb)"
+    assert (
+        role == "complex"
+    ), f"Expected 'complex' but got '{role}' for audit_log (jsonb)"
     assert confidence == 0.95
 
 
@@ -153,7 +174,9 @@ def test_audit_still_works_for_non_complex_types():
     )
 
     role1, *rest1 = profiler._classify_semantics(column1, None, struct_flags1)
-    assert role1 == "audit", f"Expected 'audit' but got '{role1}' for created_at (timestamp)"
+    assert (
+        role1 == "audit"
+    ), f"Expected 'audit' but got '{role1}' for created_at (timestamp)"
 
     # Test 2: is_deleted (boolean) - should be audit
     column2 = ColumnInfo(
@@ -178,4 +201,6 @@ def test_audit_still_works_for_non_complex_types():
     )
 
     role2, *rest2 = profiler._classify_semantics(column2, None, struct_flags2)
-    assert role2 == "audit", f"Expected 'audit' but got '{role2}' for is_deleted (boolean)"
+    assert (
+        role2 == "audit"
+    ), f"Expected 'audit' but got '{role2}' for is_deleted (boolean)"

@@ -6,12 +6,13 @@
 - generate-domains 的参数规范化是两个入口唯一的语义事实源。
 """
 
+import contextvars
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
 from metaweave.utils.file_utils import clean_top_level_files
-from metaweave.utils.logger import set_current_step
+from metaweave.utils.logger import reset_current_step, set_current_step
 
 # metadata operation 标识；db 仅供独立 CLI，暂不加入 pipeline YAML 步骤集合。
 METADATA_OPERATIONS = (
@@ -34,13 +35,15 @@ OPERATION_STEP_MAP = {
     "md": "md",
     "generate-domains": "generate-domains",
     "json": "json",
-    "generate-dim-config": "dim_config",
+    "generate-dim-config": "dim",
     "rel": "rel",
     "cql": "cql",
     # Web 采集步骤 domain（doc 21.1 §5.1）：只进本映射，不进 METADATA_OPERATIONS
     "domain": "domain",
-    # Web 采集步骤 dim_config（doc 22.1 §5.1）：同上，复用 dim_config 日志段
-    "dim_config": "dim_config",
+    # Web 采集 dim 步骤（doc 6 §2 更名）：复用 dim 日志段
+    "dim": "dim",
+    # Web 采集 sql 步骤：复用 SQL 生成日志段，不改变 CLI operation 名称。
+    "sql": "sql-rag-generate",
     # generate-sql-rag 由执行函数按阶段切换 sql-rag-generate / sql-rag-validate
     "generate-sql-rag": "sql-rag-generate",
 }
@@ -81,7 +84,11 @@ def resolve_domain_params(
     """合并 domain/cross_domain 参数：CLI > yaml > 默认值 null（共享实现）。"""
     rel_cfg = config.get("relationships") or {}
     d = cli_domain if cli_domain is not None else rel_cfg.get("domain")
-    cd = cli_cross_domain if cli_cross_domain is not None else rel_cfg.get("cross_domain")
+    cd = (
+        cli_cross_domain
+        if cli_cross_domain is not None
+        else rel_cfg.get("cross_domain")
+    )
     if not d:
         return None, False
     return d, bool(cd)
@@ -158,9 +165,7 @@ def normalize_generate_domains_options(
     if md_limit is None:
         normalized_limit: Optional[int] = None
     elif isinstance(md_limit, bool) or not isinstance(md_limit, int) or md_limit <= 0:
-        raise ValueError(
-            f"md_limit 显式值必须为正整数（非布尔）: {md_limit!r}"
-        )
+        raise ValueError(f"md_limit 显式值必须为正整数（非布尔）: {md_limit!r}")
     else:
         normalized_limit = md_limit
 
@@ -182,18 +187,23 @@ class MetadataExecutionRequest:
     config_path: Path
     operation: str
     clean: bool = False
-    expected_clean_target: Optional[object] = None  # ResolvedCleanTarget | None（阶段二 B4 引入）
+    expected_clean_target: Optional[object] = (
+        None  # ResolvedCleanTarget | None（阶段二 B4 引入）
+    )
     domains_config_override: Optional[Path] = None
     md_context_dir_override: Optional[Path] = None
     dim_config_path_override: Optional[Path] = None
-    description: Optional[str] = None       # 仅 generate-domains
-    md_context_mode: str = "name_comment"   # 仅 generate-domains
-    md_limit: Optional[int] = None          # 仅 generate-domains
-    domain_override: Optional[str] = None       # 仅 rel（CLI 显式 --domain）
+    description: Optional[str] = None  # 仅 generate-domains
+    md_context_mode: str = "name_comment"  # 仅 generate-domains
+    md_limit: Optional[int] = None  # 仅 generate-domains
+    domain_override: Optional[str] = None  # 仅 rel（CLI 显式 --domain）
     cross_domain_override: Optional[bool] = None  # 仅 rel（CLI 显式 --cross-domain）
-    schemas_override: Optional[tuple] = None    # 仅 ddl/json/md（CLI 显式 --schemas）
-    tables_override: Optional[tuple] = None     # 仅 ddl/json/md（CLI 显式 --tables）
-    max_workers_override: Optional[int] = None  # 仅 ddl/json/md（CLI 显式 --max-workers）
+    schemas_override: Optional[tuple] = None  # 仅 ddl/json/md（CLI 显式 --schemas）
+    tables_override: Optional[tuple] = None  # 仅 ddl/json/md（CLI 显式 --tables）
+    max_workers_override: Optional[int] = (
+        None  # 仅 ddl/json/md（CLI 显式 --max-workers）
+    )
+    cql_source_id: Optional[str] = None  # 仅 cql（doc 4 §4.2：实体键身份必填）
 
     def __post_init__(self) -> None:
         if self.operation not in METADATA_OPERATIONS:
@@ -201,12 +211,17 @@ class MetadataExecutionRequest:
         self.config_path = Path(self.config_path)
 
 
-def set_operation_step(operation: str, stage: Optional[str] = None) -> None:
-    """按固定映射设置日志 step（generate-sql-rag 允许阶段二次切换）。"""
+def set_operation_step(
+    operation: str, stage: Optional[str] = None
+) -> contextvars.Token:
+    """按固定映射设置日志 step（generate-sql-rag 允许阶段二次切换）。
+
+    返回 set_current_step 的 token，供调用方在任务结束时恢复上下文
+    （doc 10.1 §4.4）。
+    """
     if operation == "generate-sql-rag" and stage in ("generate", "validate"):
-        set_current_step(f"sql-rag-{stage}")
-        return
-    set_current_step(OPERATION_STEP_MAP[operation])
+        return set_current_step(f"sql-rag-{stage}")
+    return set_current_step(OPERATION_STEP_MAP[operation])
 
 
 # ---------------------------------------------------------------------------
@@ -248,7 +263,7 @@ def execute_generate_domains(request: MetadataExecutionRequest) -> dict:
     import click
 
     start = _time.perf_counter()
-    set_operation_step("generate-domains")
+    _step_token = set_operation_step("generate-domains")
     try:
         from metaweave.utils.file_utils import resolve_domains_yaml_path
         from metaweave.core.metadata.domain_generator import DomainGenerator
@@ -269,9 +284,11 @@ def execute_generate_domains(request: MetadataExecutionRequest) -> dict:
 
         domains_config_path = resolve_domains_yaml_path(
             config,
-            str(request.domains_config_override)
-            if request.domains_config_override is not None
-            else None,
+            (
+                str(request.domains_config_override)
+                if request.domains_config_override is not None
+                else None
+            ),
         )
         md_dir = resolve_md_context_dir(config, request.md_context_dir_override)
 
@@ -305,6 +322,9 @@ def execute_generate_domains(request: MetadataExecutionRequest) -> dict:
         )
     except Exception as e:  # noqa: BLE001 —— 共享层收敛一切异常为失败结果
         return _task_result(False, _time.perf_counter() - start, str(e))
+    finally:
+        # 任务结束恢复步骤上下文（doc 10.1 §4.4）
+        reset_current_step(_step_token)
 
 
 def execute_generate_dim_config(request: MetadataExecutionRequest) -> dict:
@@ -314,7 +334,7 @@ def execute_generate_dim_config(request: MetadataExecutionRequest) -> dict:
     import click
 
     start = _time.perf_counter()
-    set_operation_step("generate-dim-config")
+    _step_token = set_operation_step("generate-dim-config")
     try:
         from metaweave.utils.file_utils import (
             resolve_dim_tables_yaml_path,
@@ -325,9 +345,11 @@ def execute_generate_dim_config(request: MetadataExecutionRequest) -> dict:
         config = load_main_config_snapshot(request.config_path)
         dim_tables_path = resolve_dim_tables_yaml_path(
             config,
-            str(request.dim_config_path_override)
-            if request.dim_config_path_override is not None
-            else None,
+            (
+                str(request.dim_config_path_override)
+                if request.dim_config_path_override is not None
+                else None
+            ),
         )
 
         _verify_err = verify_clean_target(request, "metadata", config)
@@ -353,7 +375,9 @@ def execute_generate_dim_config(request: MetadataExecutionRequest) -> dict:
         click.echo(f"📂 扫描目录: {json_dir}")
         click.echo("")
 
-        generator = DimTableConfigGenerator(json_dir=json_dir, output_path=dim_tables_path)
+        generator = DimTableConfigGenerator(
+            json_dir=json_dir, output_path=dim_tables_path
+        )
         result = generator.generate()
 
         databases_cfg = result.get("databases", {})
@@ -364,7 +388,9 @@ def execute_generate_dim_config(request: MetadataExecutionRequest) -> dict:
         )
 
         click.echo(f"✅ 已生成 {dim_tables_path}")
-        click.echo(f"📊 识别到 {len(databases_cfg)} 个数据库，{total_tables} 个维度表：")
+        click.echo(
+            f"📊 识别到 {len(databases_cfg)} 个数据库，{total_tables} 个维度表："
+        )
         for db_name, db_cfg in databases_cfg.items():
             tables = db_cfg.get("tables", {}) if isinstance(db_cfg, dict) else {}
             click.echo(f"  - {db_name} ({len(tables)} 张)")
@@ -373,7 +399,9 @@ def execute_generate_dim_config(request: MetadataExecutionRequest) -> dict:
 
         click.echo("")
         click.echo("⚠️  请手工填写 embedding_col 字段（要向量化的列名）")
-        click.echo("⚠️  重新执行本命令会覆盖整个文件，已人工填写的 embedding_col 将被重置")
+        click.echo(
+            "⚠️  重新执行本命令会覆盖整个文件，已人工填写的 embedding_col 将被重置"
+        )
         click.echo("")
         if databases_cfg:
             first_db_name = next(iter(databases_cfg.keys()))
@@ -395,14 +423,21 @@ def execute_generate_dim_config(request: MetadataExecutionRequest) -> dict:
             click.echo(f"      {first_db_name}:")
             click.echo("        tables:")
             click.echo(f"          {sample_table}:")
-            click.echo("            embedding_col: [col1, col2, col3]     # YAML列表（推荐）")
+            click.echo(
+                "            embedding_col: [col1, col2, col3]     # YAML列表（推荐）"
+            )
             click.echo("            # 或")
-            click.echo("            embedding_col: col1, col2, col3       # 逗号分隔（自动拆分）")
+            click.echo(
+                "            embedding_col: col1, col2, col3       # 逗号分隔（自动拆分）"
+            )
         return _task_result(
             True, _time.perf_counter() - start, f"已生成 {dim_tables_path}"
         )
     except Exception as e:  # noqa: BLE001
         return _task_result(False, _time.perf_counter() - start, str(e))
+    finally:
+        # 任务结束恢复步骤上下文（doc 10.1 §4.4）
+        reset_current_step(_step_token)
 
 
 def execute_generate_sql_rag(request: MetadataExecutionRequest) -> dict:
@@ -414,7 +449,7 @@ def execute_generate_sql_rag(request: MetadataExecutionRequest) -> dict:
     import time as _time
 
     start = _time.perf_counter()
-    set_operation_step("generate-sql-rag", stage="generate")
+    _step_token = set_operation_step("generate-sql-rag", stage="generate")
     try:
         from metaweave.cli.metadata_cli import _run_generate_sql_rag
 
@@ -424,9 +459,11 @@ def execute_generate_sql_rag(request: MetadataExecutionRequest) -> dict:
             return _task_result(False, _time.perf_counter() - start, _verify_err)
         _reason = _run_generate_sql_rag(
             config_path=request.config_path,
-            domains_config=str(request.domains_config_override)
-            if request.domains_config_override is not None
-            else None,
+            domains_config=(
+                str(request.domains_config_override)
+                if request.domains_config_override is not None
+                else None
+            ),
             md_context_dir_override=request.md_context_dir_override,
             clean=request.clean,
             main_config=_main_config,
@@ -439,6 +476,9 @@ def execute_generate_sql_rag(request: MetadataExecutionRequest) -> dict:
         return _task_result(
             False, _time.perf_counter() - start, str(e) or type(e).__name__
         )
+    finally:
+        # 任务结束恢复步骤上下文（doc 10.1 §4.4）
+        reset_current_step(_step_token)
 
 
 def _clean_step_dir(step_name: str, config: dict) -> None:
@@ -508,7 +548,7 @@ def execute_cql(request: MetadataExecutionRequest) -> dict:
     from metaweave.utils.file_utils import resolve_domains_yaml_path
 
     start = _time.perf_counter()
-    set_operation_step("cql")
+    _step_token = set_operation_step("cql")
     try:
         from metaweave.core.cql_generator.generator import CQLGenerator
 
@@ -526,8 +566,26 @@ def execute_cql(request: MetadataExecutionRequest) -> dict:
         default_path = resolve_domains_yaml_path(config, _domains_val)
         resolver = _DR(default_path) if default_path.exists() else None
 
+        # doc 4 §4.2：实体键身份依赖 source_id，CLI 生成入口必须显式携带
+        # （调试 publish_run_id 用随机 UUID；不写平台库发布记录）
+        from uuid import uuid4
+
+        from metaweave.utils.source_id import normalize_source_id
+
+        try:
+            source_uuid = str(normalize_source_id(request.cql_source_id))
+        except ValueError:
+            return _task_result(
+                False,
+                _time.perf_counter() - start,
+                "--step cql 需要 --source-id（平台登记短 ID，形如 db_src_1）：实体键身份"
+                "（entity_id = source_id:逻辑id）无法省略",
+            )
         generator = CQLGenerator(
-            request.config_path, domain_resolver=resolver, config=config
+            request.config_path,
+            domain_resolver=resolver,
+            config=config,
+            provenance=(source_uuid, str(uuid4())),
         )
 
         _verify_err = verify_clean_target(request, "metadata", config)
@@ -553,7 +611,9 @@ def execute_cql(request: MetadataExecutionRequest) -> dict:
         click.echo(f"✅ 列节点: {result.columns_count} 个")
         click.echo(f"✅ HAS_COLUMN 关系: {result.has_column_count} 个")
         click.echo(f"✅ JOIN_ON 关系: {result.relationships_count} 个")
-        click.echo(f"✅ 边总数: {result.has_column_count + result.relationships_count} 个")
+        click.echo(
+            f"✅ 边总数: {result.has_column_count + result.relationships_count} 个"
+        )
         _fstats = result.filter_stats
         click.echo(
             f"🔍 JOIN_ON 过滤统计: 候选 {_fstats.candidate_count} | "
@@ -586,6 +646,9 @@ def execute_cql(request: MetadataExecutionRequest) -> dict:
         return _task_result(True, _time.perf_counter() - start, "CQL 生成完成")
     except Exception as e:  # noqa: BLE001
         return _task_result(False, _time.perf_counter() - start, str(e))
+    finally:
+        # 任务结束恢复步骤上下文（doc 10.1 §4.4）
+        reset_current_step(_step_token)
 
 
 def execute_rel(request: MetadataExecutionRequest) -> dict:
@@ -599,7 +662,7 @@ def execute_rel(request: MetadataExecutionRequest) -> dict:
     import click
 
     start = _time.perf_counter()
-    set_operation_step("rel")
+    _step_token = set_operation_step("rel")
     try:
         from metaweave.utils.file_utils import resolve_domains_yaml_path
         from metaweave.core.domains import DomainResolver
@@ -700,6 +763,9 @@ def execute_rel(request: MetadataExecutionRequest) -> dict:
         return _task_result(True, _time.perf_counter() - start, "关系发现完成")
     except Exception as e:  # noqa: BLE001
         return _task_result(False, _time.perf_counter() - start, str(e))
+    finally:
+        # 任务结束恢复步骤上下文（doc 10.1 §4.4）
+        reset_current_step(_step_token)
 
 
 def execute_ddl_json_md(request: MetadataExecutionRequest) -> dict:
@@ -713,7 +779,7 @@ def execute_ddl_json_md(request: MetadataExecutionRequest) -> dict:
     import click
 
     start = _time.perf_counter()
-    set_operation_step(request.operation)
+    _step_token = set_operation_step(request.operation)
     step = request.operation
     try:
         from metaweave.utils.file_utils import resolve_project_path
@@ -811,7 +877,9 @@ def execute_ddl_json_md(request: MetadataExecutionRequest) -> dict:
         if request.clean:
             _clean_step_dir(step, config)
 
-        schema_list = list(request.schemas_override) if request.schemas_override else None
+        schema_list = (
+            list(request.schemas_override) if request.schemas_override else None
+        )
         if schema_list:
             click.echo(f"🎯 指定 Schema: {schema_list}")
         table_list = list(request.tables_override) if request.tables_override else None
@@ -853,8 +921,12 @@ def execute_ddl_json_md(request: MetadataExecutionRequest) -> dict:
                 f"   - 字段注释: 成功 {result.llm_column_comment_success_count}，"
                 f"失败 {result.llm_column_comment_failure_count}"
             )
-            click.echo(f"🔐 物理主键约束: {result.physical_primary_key_constraints_found} 个")
-            click.echo(f"🔗 物理外键约束: {result.physical_foreign_key_constraints_found} 个")
+            click.echo(
+                f"🔐 物理主键约束: {result.physical_primary_key_constraints_found} 个"
+            )
+            click.echo(
+                f"🔗 物理外键约束: {result.physical_foreign_key_constraints_found} 个"
+            )
             click.echo(f"🔒 唯一约束: {result.unique_constraints_found} 个")
             click.echo(f"📇 索引总数: {result.indexes_found} 个")
             click.echo(f"  - 普通索引: {result.regular_indexes_found} 个")
@@ -886,7 +958,9 @@ def execute_ddl_json_md(request: MetadataExecutionRequest) -> dict:
             click.echo(f"   - fact: {result.table_category_counts.get('fact', 0)}")
             click.echo(f"   - dim: {result.table_category_counts.get('dim', 0)}")
             click.echo(f"   - bridge: {result.table_category_counts.get('bridge', 0)}")
-            click.echo(f"   - unknown: {result.table_category_counts.get('unknown', 0)}")
+            click.echo(
+                f"   - unknown: {result.table_category_counts.get('unknown', 0)}"
+            )
         click.echo(f"📁 输出文件: {len(result.output_files)} 个")
 
         if result.errors:
@@ -906,3 +980,6 @@ def execute_ddl_json_md(request: MetadataExecutionRequest) -> dict:
         return _task_result(True, _time.perf_counter() - start, "元数据生成完成")
     except Exception as e:  # noqa: BLE001
         return _task_result(False, _time.perf_counter() - start, str(e))
+    finally:
+        # 任务结束恢复步骤上下文（doc 10.1 §4.4）
+        reset_current_step(_step_token)

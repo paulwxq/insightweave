@@ -5,6 +5,78 @@ import pytest
 from metaweave.core.metadata.ddl_loader import DDLLoader, DDLLoaderError
 
 
+def test_ddl_loader_keeps_columns_with_constraint_keyword_prefixes(tmp_path):
+    ddl = """
+        CREATE TABLE public.table_profile (
+            constraint_count INTEGER,
+            constraint_label TEXT NOT NULL,
+            unique_constraints JSONB,
+            unique_count INTEGER,
+            constraint$count INTEGER,
+            unique$value TEXT,
+            "constraint" INTEGER,
+            "unique" TEXT
+        );
+    """
+    metadata = DDLLoader(tmp_path).parse_content(
+        ddl, tmp_path / "postgres.public.table_profile.sql"
+    ).metadata
+
+    assert [column.column_name for column in metadata.columns] == [
+        "constraint_count",
+        "constraint_label",
+        "unique_constraints",
+        "unique_count",
+        "constraint$count",
+        "unique$value",
+        "constraint",
+        "unique",
+    ]
+    assert [column.ordinal_position for column in metadata.columns] == list(range(1, 9))
+    assert metadata.columns[1].is_nullable is False
+    assert metadata.columns[2].data_type == "jsonb"
+    assert metadata.primary_keys == []
+    assert metadata.unique_constraints == []
+    assert metadata.foreign_keys == []
+
+
+@pytest.mark.parametrize("separator", [" ", "\t", "\n"])
+@pytest.mark.parametrize("named_primary_key", [True, False])
+def test_ddl_loader_preserves_real_constraints(tmp_path, separator, named_primary_key):
+    primary_key = "PRIMARY KEY(id)"
+    if named_primary_key:
+        primary_key = f"CONSTRAINT pk_profile {primary_key}"
+    ddl = f"""
+        CREATE TABLE public.table_profile (
+            id INTEGER NOT NULL,
+            constraint_count INTEGER,
+            unique_constraints JSONB,
+            {primary_key},
+            CONSTRAINT uq_count UNIQUE(constraint_count),
+            CONSTRAINT fk_count FOREIGN KEY(constraint_count)
+                REFERENCES public.table_profile(id)
+        );
+    """.replace(" ", separator)
+    metadata = DDLLoader(tmp_path).parse_content(
+        ddl, tmp_path / "postgres.public.table_profile.sql"
+    ).metadata
+
+    assert [column.column_name for column in metadata.columns] == [
+        "id",
+        "constraint_count",
+        "unique_constraints",
+    ]
+    assert len(metadata.primary_keys) == 1
+    assert metadata.primary_keys[0].columns == ["id"]
+    assert len(metadata.unique_constraints) == 1
+    assert metadata.unique_constraints[0].constraint_name == "uq_count"
+    assert metadata.unique_constraints[0].columns == ["constraint_count"]
+    assert len(metadata.foreign_keys) == 1
+    assert metadata.foreign_keys[0].source_columns == ["constraint_count"]
+    assert metadata.foreign_keys[0].target_table == "table_profile"
+    assert metadata.foreign_keys[0].target_columns == ["id"]
+
+
 def _write_sample_ddl(tmp_path):
     ddl_text = textwrap.dedent(
         """

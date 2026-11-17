@@ -50,6 +50,8 @@ def _ctx(db_agent_context: DbAgentContext, texts: tuple[str, ...]) -> DbAgentCon
 
 
 class TestResolveTimeRange:
+    """doc 16：新契约——只传 source_text（+可选 context），flash（假模型）解析。"""
+
     def test_ok_writes_evidence(self, node, db_agent_context):
         ctx = _ctx(db_agent_context, ("统计2026年9月的订单",))
         updates, msg = invoke_tool_node(
@@ -57,12 +59,7 @@ class TestResolveTimeRange:
             [
                 (
                     "resolve_time_range",
-                    {
-                        "source_text": "2026年9月",
-                        "kind": "calendar",
-                        "year": 2026,
-                        "month": 9,
-                    },
+                    {"source_text": "2026年9月", "context": "订单按月统计"},
                     "tc-r1",
                 )
             ],
@@ -76,6 +73,7 @@ class TestResolveTimeRange:
             payload["data"]["sql_hint"]
             == "<时间列> >= '2026-09-01' AND <时间列> < '2026-10-01'"
         )
+        assert payload["data"]["interpretation"] != ""
         ev = updates["db_time_evidence"][0]
         assert ev["time_evidence_id"] == payload["data"]["time_evidence_id"]
         assert ev["run_id"] == ctx.run_id
@@ -87,12 +85,7 @@ class TestResolveTimeRange:
             [
                 (
                     "resolve_time_range",
-                    {
-                        "source_text": "2026年10月1日之前，不含当天",
-                        "kind": "open_range",
-                        "boundary_date": "2026-10-01",
-                        "relation": "before",
-                    },
+                    {"source_text": "2026年10月1日之前，不含当天"},
                     "tc-r2",
                 )
             ],
@@ -102,18 +95,14 @@ class TestResolveTimeRange:
         assert payload["data"]["sql_hint"] == "<时间列> < '2026-10-01'"
 
     def test_text_not_in_question(self, node, db_agent_context):
-        """原文核对失败 → 错误包，不写证据。"""
+        """原文核对失败 → 错误包，不写证据（沿用现行检查）。"""
         ctx = _ctx(db_agent_context, ("统计订单",))
         updates, msg = invoke_tool_node(
             node,
             [
                 (
                     "resolve_time_range",
-                    {
-                        "source_text": "昨天",
-                        "kind": "relative",
-                        "relative": "yesterday",
-                    },
+                    {"source_text": "昨天"},
                     "tc-r3",
                 )
             ],
@@ -163,7 +152,11 @@ class TestProbeDimensionValues:
     def test_distinct_truncated_warning(
         self, pipeline_stack, guard_services, db_agent_context
     ):
-        """3 个不同值、limit=2 → 返回 2 值 + values_truncated + warning。"""
+        """3 个不同值、limit=2 → 返回 2 值 + values_truncated + 恰一条 warning。
+
+        doc 9 §4 步骤 1：warnings 精确等于单元素预期列表（旧实现的
+        finalize+_merge_warnings 会把同一条警告重复添加一次）。
+        """
         _pipeline, db, *_ = pipeline_stack
         db.probe_rows = [("微信",), ("支付宝",), ("现金",)]
         node2 = ToolNode([make_probe_dimension_values_tool(guard_services)])
@@ -187,7 +180,29 @@ class TestProbeDimensionValues:
         assert payload["status"] == "ok"
         assert payload["data"]["values"] == ["微信", "支付宝"]
         assert payload["data"]["values_truncated"] is True
-        assert any("只有列出的值有证据" in w for w in payload["warnings"])
+        assert payload["warnings"] == ["该列取值多于 limit（2），只有列出的值有证据"]
+
+    def test_exact_hit_no_warnings(self, node, db_agent_context):
+        """正常命中路径 warnings == []（无截断即无警告）。"""
+        _u, msg = invoke_tool_node(
+            node,
+            [
+                (
+                    "probe_dimension_values",
+                    {
+                        "table_id": "public.orders",
+                        "column": "status",
+                        "mode": "exact",
+                        "value_text": "已支付",
+                    },
+                    "tc-p1b",
+                )
+            ],
+            db_agent_context,
+        )
+        payload = json.loads(msg.content)
+        assert payload["status"] == "ok"
+        assert payload["warnings"] == []
 
     def test_empty_no_evidence(self, pipeline_stack, guard_services, db_agent_context):
         _pipeline, db, *_ = pipeline_stack
@@ -211,6 +226,7 @@ class TestProbeDimensionValues:
         )
         payload = json.loads(msg.content)
         assert payload["status"] == "empty"
+        assert payload["warnings"] == []  # 空结果不变失败，也无多余警告
         assert "不要放宽条件" in payload["error"]["message"]
         assert "db_dim_evidence" not in updates
 
@@ -401,3 +417,54 @@ class TestReuseEvidence:
         )
         payload = json.loads(msg.content)
         assert payload["error"]["error_type"] == "evidence_not_found"
+
+    def test_multi_time_dim_mapping_complete(self, node, db_agent_context):
+        """doc 9 §5：时间/维度混合沿用映射完整可见，不只第一个 ID。
+
+        逐项核对消息 mapping 的 new_id 与账本登记一致；interval/values
+        原样保留；无 E/A 沿用时 warnings 恰为单条口径提示。
+        """
+        old_time = [
+            make_time_evidence(
+                f"T-old{i}", "2026-09-01", "2026-10-01", run_id="run-earlier"
+            )
+            for i in range(3)
+        ]
+        old_dim = [
+            make_dim_evidence(
+                "public.orders",
+                "status",
+                [f"已支付{i}"],
+                evidence_id=f"D-old{i}",
+                run_id="run-earlier",
+            )
+            for i in range(3)
+        ]
+        ids = ["T-old0", "D-old0", "T-old1", "D-old1", "T-old2", "D-old2"]
+        updates, msg = invoke_tool_node(
+            node,
+            [("reuse_evidence", {"evidence_ids": ids}, "tc-e8")],
+            db_agent_context,
+            extra_state={
+                "db_time_evidence": old_time,
+                "db_dim_evidence": old_dim,
+            },
+        )
+        payload = json.loads(msg.content)
+        assert payload["status"] == "ok", payload
+        mapping = payload["data"]["mapping"]
+        assert [m["old_id"] for m in mapping] == ids  # 顺序与输入一致、无缺失
+        assert [m["kind"] for m in mapping] == ["time", "dim"] * 3
+        assert payload["warnings"] == ["沿用口径须在回答中写明（原始表达与区间/取值）"]
+        # 逐项核对：mapping new_id 与账本登记一致，interval/values 保留
+        ledger_time = {e["time_evidence_id"]: e for e in updates["db_time_evidence"]}
+        ledger_dim = {e["dim_evidence_id"]: e for e in updates["db_dim_evidence"]}
+        for entry in mapping:
+            if entry["kind"] == "time":
+                ev = ledger_time[entry["new_id"]]
+                assert entry["interval"] == ["2026-09-01", "2026-10-01"]
+            else:
+                ev = ledger_dim[entry["new_id"]]
+                assert entry["values"] == [f"已支付{entry['old_id'][-1]}"]
+            assert ev["run_id"] == db_agent_context.run_id
+        assert len(ledger_time) == 3 and len(ledger_dim) == 3

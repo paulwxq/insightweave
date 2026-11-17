@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Optional, Type
 from uuid import UUID
 
 from metaweave.utils.file_utils import resolve_project_path
+from metaweave.utils.source_id import normalize_source_id
 from metaweave.core.loaders.base import BaseLoader
 from services.config_loader import ConfigLoader
 from metaweave.services.embedding_service import EmbeddingService
@@ -87,7 +88,7 @@ class SQLExampleLoader(BaseLoader):
         milvus_client_cls: Type[MilvusClient] = MilvusClient,
         embedding_service_cls: Type[EmbeddingService] = EmbeddingService,
         source_id: Any = None,
-        publish_id: Any = None,
+        publish_run_id: Any = None,
     ):
         super().__init__(config)
         self.loader_cfg = self.config.get("sql_loader", {})
@@ -98,16 +99,18 @@ class SQLExampleLoader(BaseLoader):
         self.options = self.loader_cfg.get("options", {})
         self.batch_size = self.options.get("batch_size", 50)
 
-        # source_id/publish_id：UUID 对象或合法 UUID 字符串，统一规范化为字符串；
+        # source_id 为 db_src_N 短 ID（doc 6 §1）；publish_run_id 为发布运行 UUID。
         # 非法值记录标记，由 validate() 拒绝（构造不抛错）
         self._source_id: Optional[str] = None
-        self._publish_id: Optional[str] = None
+        self._publish_run_id: Optional[str] = None
         self._uuid_error: Optional[str] = None
         try:
             if source_id is not None:
-                self._source_id = _normalize_uuid_value(source_id, "source_id")
-            if publish_id is not None:
-                self._publish_id = _normalize_uuid_value(publish_id, "publish_id")
+                self._source_id = normalize_source_id(source_id)
+            if publish_run_id is not None:
+                self._publish_run_id = _normalize_uuid_value(
+                    publish_run_id, "publish_run_id"
+                )
         except ValueError as exc:
             self._uuid_error = str(exc)
 
@@ -133,10 +136,10 @@ class SQLExampleLoader(BaseLoader):
     def validate(self) -> bool:
         """验证配置和依赖服务（六项按序，任一失败返回 False）"""
         if self._uuid_error is not None:
-            logger.error("source_id/publish_id 非法: %s", self._uuid_error)
+            logger.error("source_id/publish_run_id 非法: %s", self._uuid_error)
             return False
-        if self._source_id is None or self._publish_id is None:
-            logger.error("未注入 source_id/publish_id（受管发布必填）")
+        if self._source_id is None or self._publish_run_id is None:
+            logger.error("未注入 source_id/publish_run_id（受管发布必填）")
             return False
 
         # 输入目录：存在且顶层至少一个非忽略 *.json 普通文件（共享枚举 helper）；
@@ -332,7 +335,7 @@ class SQLExampleLoader(BaseLoader):
             if result["records_failed"] == 0 and result["records_unconfirmed"] == 0:
                 delete_expr = (
                     f'source_id == "{self._source_id}" '
-                    f'and publish_id != "{self._publish_id}"'
+                    f'and publish_run_id != "{self._publish_run_id}"'
                 )
                 # 删旧调用前置位（22.2 修订 16 同款）：全跳过零 upsert 场景下
                 # 删旧超时也不得误报未开始替换、错误保留旧 current（审核修订 29）
@@ -436,7 +439,7 @@ class SQLExampleLoader(BaseLoader):
                         self._source_id, pair["question"], pair["sql"]
                     ),
                     "source_id": self._source_id,
-                    "publish_id": self._publish_id,
+                    "publish_run_id": self._publish_run_id,
                     "question_sql": pair["question_sql"],
                     "domain": pair["domain"],
                     "embedding": (
@@ -474,7 +477,7 @@ class SQLExampleLoader(BaseLoader):
                 auto_id=False,
             ),
             FieldSchema(name="source_id", dtype=DataType.VARCHAR, max_length=36),
-            FieldSchema(name="publish_id", dtype=DataType.VARCHAR, max_length=36),
+            FieldSchema(name="publish_run_id", dtype=DataType.VARCHAR, max_length=36),
             FieldSchema(
                 name="question_sql",
                 dtype=DataType.VARCHAR,
@@ -535,12 +538,11 @@ class SQLExampleLoader(BaseLoader):
 
     @staticmethod
     def compute_example_id(source_id: Any, question: str, sql: str) -> str:
-        """计算 example_id：`source_id:sha256(question+sql)[:8]`（唯一拼接路径）"""
-        prefix = (
-            str(source_id)
-            if isinstance(source_id, UUID)
-            else _normalize_uuid_value(source_id, "source_id")
-        )
+        """计算 example_id：`source_id:sha256(question+sql)[:8]`（唯一拼接路径）。
+
+        source_id 为 db_src_N 短 ID（doc 6 §1，与 __init__ 同一口径）。
+        """
+        prefix = str(normalize_source_id(source_id))
         content = question + sql
         content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()[:8]
         return f"{prefix}:{content_hash}"

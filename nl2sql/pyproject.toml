@@ -6,67 +6,61 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     # LangGraph核心
-    "fastapi==0.143.0",
-    "langchain==1.4.5",
-    "langgraph==1.2.15",
+    "fastapi==0.162.2",
+    "starlette==1.10.0",
+    "langchain==1.4.9",
+    "langgraph==1.2.20",
     "uvicorn==0.54.0",
     # 数据库驱动
-    "psycopg[binary]==3.3.6",
+    "psycopg[binary]==3.3.8",
+    "cryptography==50.0.2",
     "pgvector>=0.2.0",
     "neo4j>=5.15.0",
     # SQL处理和验证
     "sqlparse>=0.4.4",
-    "sqlglot==30.22.0",
-    "pydantic==2.14.1",
+    "sqlglot==30.30.0",
+    "pydantic==2.14.3",
     # LLM和嵌入
-    "dashscope==1.27.5",
-    "langchain-openai==1.7.1",
-    "openai==3.29.0",
+    "dashscope==2.0.4",
+    "langchain-openai==1.7.4",
+    "openai==3.46.0",
     # 工具
     "python-dotenv==1.2.4",
     "PyYAML>=6.0.0",
     "langchain-community==0.4.2",
     "psycopg-pool==3.3.3",
-    "pytest>=8.4.2",
     "pymilvus>=2.6.5",
-    "langgraph-checkpoint-postgres==3.1.3",
+    "langgraph-checkpoint-postgres==3.2.0",
     "rich==15.0.0",
     # Deep Agents（db_deepagent 主框架，docs/v4/5 §2.1）
-    "deepagents==0.7.25",
+    "deepagents==0.7.34",
 ]
 
 [project.optional-dependencies]
 dev = [
-    "pytest>=7.4.0",
-    "pytest-asyncio>=0.24.0",
-    "pytest-cov>=4.1.0",
+    "pytest>=8.4.2",
     "black>=23.0.0",
     "ruff>=0.1.0",
 ]
 monitoring = [
-    # deepagents==0.7.25 要求 langsmith>=0.14.8（docs/v4/5 §2.1）
-    "langsmith==0.14.8",
-    "redis>=5.0.0",
-]
-web = [
-    "streamlit==1.65.0",
-    "requests==2.34.2",
+    # deepagents==0.7.34 要求 langsmith>=0.14.17（docs/v4/5 §2.1）
+    "langsmith==0.14.17",
 ]
 
 [tool.uv]
 constraint-dependencies = [
     # 本次升级的间接依赖，固定为已评估版本
-    "langchain-core==1.6.10",
+    "langchain-core==1.7.6",
     "langchain-classic==1.0.8",
     "langchain-text-splitters==1.1.3",
-    "langgraph-checkpoint==4.3.0",
-    "langgraph-prebuilt==1.1.0",
-    "langgraph-sdk==0.4.7",
-    "psycopg-binary==3.3.6",
-    # 暂缓升级，保持原锁定版本
-    "neo4j==6.1.0",
-    "pgvector==0.4.2",
-    "pymilvus==2.6.9",
-    "sqlparse==0.5.5",
-    "redis==7.3.0",
+    "langgraph-checkpoint==4.3.1",
+    "langgraph-prebuilt==1.1.1",
+    "langgraph-sdk==0.4.14",
+    "psycopg-binary==3.3.8",
+    # Milvus 服务端实测 2.5.2（implementation_2026-11-09_run01/service-versions.md）；
+    # 客户端保持 2.6 系列与现状一致，真实检索行为在 §6.5 验收
+    "neo4j==6.4.1",
+    "pgvector==0.5.1",
+    "pymilvus==2.6.18",
+    "sqlparse==0.6.1",
 ]

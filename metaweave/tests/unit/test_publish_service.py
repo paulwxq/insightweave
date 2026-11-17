@@ -1,72 +1,79 @@
-"""发布预检与 db 发布事务。平台库用假会话，产物用临时目录。"""
+"""发布集中预检、运行创建与后台执行（doc 6.2 §6.3、§8）。
+
+平台库用假会话（FakeSession 覆盖 run/job/内容表的最小语义），产物按
+`output/<db_src_N>/<ws_N>/<step>/` 在临时目录构造，采集 marker 用真实
+`write_collection_marker` 落盘。其他发布步骤测试文件复用本文件的假件。
+"""
 
 import json
-import logging
-import traceback
 from contextlib import contextmanager
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from uuid import UUID
 
 import pytest
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import SQLAlchemyError
 
-from backend.jobs.repository import WorkspaceMissingError, WorkspaceSourceMismatchError
 from backend.persistence.models import (
     DbProfile,
     DbSourceInfo,
-    JobInfo,
-    PublishInfo,
+    PublishJobInfo,
+    PublishJobRevision,
+    PublishRunInfo,
+    PublishRunStep,
+    TableColumnProfile,
     TableDefinition,
+    TableDomain,
+    TableProfile,
+    WorkspaceInfo,
 )
 from backend.persistence.platform_db import PlatformSettings
-from backend.profile_loading import db_loader
 from backend.profile_loading.db_loader import (
     MetaLoadSourceDisabledError,
     MetaLoadSourceNotFoundError,
-    ProfileInputError,
-    commit_db_current_state,
-    read_db_profile_input,
-    resolve_db_profile_input_path,
 )
 from backend.publishing import publish_service
-from backend.publishing.publish_service import (
-    INPUT_SUMMARY,
-    INTERNAL_MESSAGE,
-    NOT_READY_MESSAGE,
-    WRITE_SUMMARY,
-    PublicationConflictError,
-    PublicationStepNotReadyError,
-    check_db_output_ready,
-    check_publication,
-    is_current_index_conflict,
-    is_primary_key_conflict,
-    publish_steps,
+from backend.publishing.precheck import (
+    PUBLISH_STEP_ORDER,
+    PublishPrecheckError,
+    check_step,
+    collect_input_dir_times,
+    normalize_publish_steps,
+    precheck_steps,
+    require_success_markers,
 )
-from backend.data_sources.registration_service import PlatformUnavailableError
+from backend.publishing.publish_service import (
+    create_publish_run,
+    execute_publish_run,
+    check_publication,
+)
+from backend.workspace_files.markers import write_collection_marker
+from backend.workspace_files.timestamps import SHANGHAI_TZ
 
-SOURCE_ID = UUID("b9a4943d-44d6-4f35-b553-d25207f9d8c1")
-OTHER_SOURCE_ID = UUID("adb15693-2dda-4e4d-8ca7-ad5164c5e85d")
-JOB_ID = UUID("550e8400-e29b-41d4-a716-446655440000")
+SOURCE_ID = "db_src_1"
+OTHER_SOURCE_ID = "db_src_2"
+WORKSPACE_ID = "ws_1"
+PUBLISH_JOB_ID = "pub_job_1"
+DB_NAME = "orders"
+RUN = UUID("11111111-1111-4111-8111-111111111111")
+RUN2 = UUID("22222222-2222-4222-8222-222222222222")
 SETTINGS = PlatformSettings(
     host="platform", port=5432, name="metaweave", user="admin", password="secret"
 )
-LEAK_SQL = "LEAK-SQL-TEXT-7391"
-LEAK_PARAM = "LEAK-PARAM-VALUE-8264"
-# 步骤行运行标识（updated_at）：start_step/finish_step 每次写入都会刷新。
-RUN_MARKER = datetime(2026, 9, 27, 10, 0, 0, tzinfo=timezone.utc)
+MOMENT = datetime(2026, 10, 21, 15, 0, 0, tzinfo=SHANGHAI_TZ)
 
 
 def profile_document(source_id=SOURCE_ID):
+    """合法 database.json（doc 9 契约；source_id 为短 ID）。"""
     return {
         "schema_version": 1,
-        "source_id": str(source_id),
-        "collected_at": "2026-09-25T08:00:00Z",
+        "source_id": source_id,
+        "collected_at": "2026-10-20T08:00:00Z",
         "database": {
             "type": "postgresql",
             "host": "example.internal",
             "port": 5432,
-            "name": "orders",
+            "name": DB_NAME,
             "server_version": "18.0",
             "size_bytes": 1234,
             "size_scope": "whole_database",
@@ -95,184 +102,427 @@ def profile_document(source_id=SOURCE_ID):
     }
 
 
-class _Diag:
-    def __init__(self, name):
-        self.constraint_name = name
+def step_dir(tmp_path, step, source_id=SOURCE_ID, workspace_id=WORKSPACE_ID):
+    return tmp_path / "output" / source_id / workspace_id / step
 
 
-class _Orig:
-    def __init__(self, sqlstate, name):
-        self.sqlstate = sqlstate
-        self.diag = _Diag(name) if name is not None else None
+def write_marker(tmp_path, step, run_id=RUN, status="success", moment=MOMENT):
+    return write_collection_marker(
+        step_dir(tmp_path, step), run_id, status, moment=moment
+    )
 
 
-def integrity_error(sqlstate, name, statement=LEAK_SQL):
-    return IntegrityError(statement, {"password": LEAK_PARAM}, _Orig(sqlstate, name))
+def write_profile(tmp_path, document=None, source_id=SOURCE_ID):
+    directory = step_dir(tmp_path, "db", source_id=source_id)
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / "database.json"
+    path.write_text(json.dumps(document or profile_document()), encoding="utf-8")
+    return directory, path
 
 
-def assert_safe_primary_key_exception(exc: BaseException) -> None:
-    """服务器会打印这个异常的格式化堆栈，其中不能出现原始 SQL 或参数。"""
-    assert type(exc) is RuntimeError
-    assert str(exc) == INTERNAL_MESSAGE
-    assert exc.__cause__ is None
-    rendered = "".join(traceback.format_exception(exc))
-    assert LEAK_SQL not in rendered
-    assert LEAK_PARAM not in rendered
+class FakeSession:
+    """覆盖发布链（预检/创建/执行）的最小假平台库会话。
 
+    - `get` 支持主键取行（含 with_for_update 等被忽略的参数）；
+    - `scalars`/`execute` 对普通 select 按 where 等值/不等条件过滤；
+    - `execute` 对 delete 按表名池删除（table_profile 级联删字段行）；
+    - `_claim_publish_step` 的三表 join 冲突查询按语义直接计算。
+    """
 
-class FakePublishSession:
-    def __init__(self):
-        self.source = SimpleNamespace(source_id=SOURCE_ID, is_active=True)
-        self.steps = [
-            SimpleNamespace(
-                job_id=JOB_ID,
-                source_id=SOURCE_ID,
-                step_name="db",
-                last_status="success",
-                updated_at=RUN_MARKER,
+    def __init__(self, *, steps=("db", "ddl"), revision_no=1, step_config=None):
+        self.source = SimpleNamespace(
+            source_id=SOURCE_ID,
+            is_active=True,
+            updated_at=datetime(2026, 10, 20, tzinfo=timezone.utc),
+            db_name=DB_NAME,
+            selected_schemas=["public"],
+            host="h",
+            port=5432,
+            username="u",
+            password_ciphertext="cipher",
+            sslmode=None,
+        )
+        self.workspace = SimpleNamespace(workspace_id=WORKSPACE_ID, source_id=SOURCE_ID)
+        self.publish_jobs = [
+            PublishJobInfo(
+                publish_job_id=PUBLISH_JOB_ID,
+                workspace_id=WORKSPACE_ID,
+                job_name="整包发布",
+                job_desc=None,
+                created_by_user_id=None,
             )
         ]
-        self.publishes: list[PublishInfo] = []
-        self.profiles: list[DbProfile] = []
-        self.definitions: list[TableDefinition] = []
+        self.publish_revisions = [
+            PublishJobRevision(
+                publish_job_id=PUBLISH_JOB_ID,
+                revision_no=revision_no,
+                steps=list(steps),
+                step_config=step_config,
+                change_note=None,
+            )
+        ]
+        self.runs: list = []
+        self.run_steps: list = []
+        self.profiles: list = []
+        self.definitions: list = []
+        self.table_profiles: list = []
+        self.table_column_profiles: list = []
+        self.table_domains: list = []
         self.pending: list = []
-        self.snapshot = None
-        self._profiles_snapshot: list[DbProfile] | None = None
-        self._definitions_snapshot: list[TableDefinition] | None = None
-        self.commit_errors: list[BaseException] = []
-        self.read_error: BaseException | None = None
+        self.guard_releases: list = []
+        # doc 10.2 §5.1（DeepSeek R2 #2）：目标互斥事件顺序（先清 guard
+        # 后放锁）的回归断言载体
+        self.target_mutex_events: list = []
+        self.commit_errors: list = []
+        self.rolled_back = 0
+        self.commits = 0
         self.flush_calls = 0
-        self._clock = datetime(2026, 9, 27, tzinfo=timezone.utc)
 
-    def tick(self) -> datetime:
-        """代替 func.now()，每次调用前进一秒。"""
-        self._clock += timedelta(seconds=1)
-        return self._clock
+    # ---- 池路由 ----
 
-    def get(self, model, key):
-        if self.read_error is not None:
-            raise self.read_error
+    def _pool(self, entity):
+        mapping = {
+            DbSourceInfo: [self.source] if self.source is not None else [],
+            WorkspaceInfo: [self.workspace] if self.workspace is not None else [],
+            PublishJobInfo: self.publish_jobs,
+            PublishJobRevision: self.publish_revisions,
+            PublishRunInfo: self.runs,
+            PublishRunStep: self.run_steps,
+            DbProfile: self.profiles,
+            TableDefinition: self.definitions,
+            TableProfile: self.table_profiles,
+            TableColumnProfile: self.table_column_profiles,
+            TableDomain: self.table_domains,
+        }
+        return mapping.get(entity, [])
+
+    _TABLE_POOLS = {
+        "db_profile": "profiles",
+        "table_definition": "definitions",
+        "table_profile": "table_profiles",
+        "table_domain": "table_domains",
+    }
+
+    # ---- Session 接口 ----
+
+    def get(self, model, key, **_kwargs):
         if model is DbSourceInfo:
-            return self.source if key == SOURCE_ID else None
-        if model is JobInfo:
-            for step in self.steps:
-                if {"job_id": step.job_id, "step_name": step.step_name} == key:
-                    return step
-            return None
+            if self.source is None:
+                return None
+            return self.source if key == self.source.source_id else None
+        if model is WorkspaceInfo:
+            if self.workspace is None:
+                return None
+            return self.workspace if key == self.workspace.workspace_id else None
+        if model is PublishJobInfo:
+            return next(
+                (row for row in self.publish_jobs if row.publish_job_id == key), None
+            )
+        if model is PublishJobRevision:
+            return next(
+                (
+                    row
+                    for row in self.publish_revisions
+                    if row.publish_job_id == key and row.revision_no == key
+                ),
+                None,
+            )
+        if model is PublishRunInfo:
+            return next((row for row in self.runs if row.publish_run_id == key), None)
         raise AssertionError(model)
 
-    def scalars(self, statement):
+    @staticmethod
+    def _clause_pairs(clause):
+        clauses = getattr(clause, "clauses", None) or [clause]
+        for item in clauses:
+            left = item.left
+            right = item.right
+            value = getattr(right, "value", right)
+            yield getattr(left, "key", None) or getattr(left, "name", None), (
+                item.operator,
+                value,
+            )
+
+    def _select_rows(self, statement):
         entity = statement.column_descriptions[0]["entity"]
-        params = statement.compile().params
-        if entity is JobInfo:
-            job_id = params.get("job_id_1")
-            rows = self.steps
-            if job_id is not None:
-                rows = [step for step in rows if step.job_id == job_id]
+        rows = list(self._pool(entity))
+        where = statement.whereclause
+        if where is None:
             return rows
-        if entity is DbSourceInfo:
-            source_id = params.get("source_id_1")
-            if self.source is not None and source_id == self.source.source_id:
-                return [self.source]
-            return []
-        if entity is DbProfile:
-            source_id = params.get("source_id_1")
-            return [row for row in self.profiles if row.source_id == source_id]
-        if entity is PublishInfo:
-            rows = [row for row in self.publishes if row.is_current_publish]
-            source_id = params.get("source_id_1")
+        for name, (op, value) in self._clause_pairs(where):
+            matched = []
+            for row in rows:
+                actual = getattr(row, name, None)
+                keep = actual != value if op.__name__ == "ne" else actual == value
+                if keep:
+                    matched.append(row)
+            rows = matched
+        return rows
+
+    def scalars(self, statement):
+        return self._select_rows(statement)
+
+    def scalar(self, statement):
+        rows = self._select_rows(statement)
+        return rows[0] if rows else None
+
+    def execute(self, statement):
+        from sqlalchemy.sql.elements import TextClause
+
+        if isinstance(statement, TextClause):
+            # doc 10.2：准入 advisory lock / SET LOCAL lock_timeout 真实库生效，
+            # 假件不建模锁等待
+            return SimpleNamespace(
+                scalar_one_or_none=lambda: None,
+                first=lambda: None,
+                all=lambda: [],
+                scalar_one=lambda: 0,
+            )
+        if getattr(statement, "is_update", False):
+            return self._apply_update(statement)
+        sql_text = str(statement)
+        if getattr(statement, "_setup_joins", None):
+            if "workspace_info" in sql_text and "publish_run_info" in sql_text:
+                # doc 10.2 §5.1 准入查询 active_publish_runs_for_source：
+                # 本假件不建模其他运行 → 无活动发布
+                return SimpleNamespace(
+                    all=lambda: [],
+                    first=lambda: None,
+                    scalar_one_or_none=lambda: None,
+                )
+            if (
+                "publish_run_info" in sql_text
+                and "publish_run_info.created_at" in sql_text.lower()
+            ):
+                # doc 10.2 §5.2 准入查询 active_publish_run_for_workspace
+                #（带 order_by created_at；认领冲突查询无 order_by）。
+                # 按池语义计算：pending/running 发布 + 作业同工作区即命中。
+                params = statement.compile().params
+                workspace_id = params.get("workspace_id_1")
+                hit = None
+                for run in self.runs:
+                    if getattr(run, "status", None) not in ("pending", "running"):
+                        continue
+                    job = next(
+                        (
+                            item
+                            for item in self.publish_jobs
+                            if item.publish_job_id == run.publish_job_id
+                        ),
+                        None,
+                    )
+                    if job is not None and job.workspace_id == workspace_id:
+                        hit = (run.publish_run_id, run.publish_job_id, run.status)
+                        break
+                return SimpleNamespace(
+                    first=lambda: hit,
+                    all=lambda: ([hit] if hit else []),
+                    scalar_one_or_none=lambda: hit,
+                )
+            if "collection_run_info" in sql_text:
+                # doc 8.1 §5.1.1：Rel 发布认领的反向检查（采集输入运行中）；
+                # doc 10.2 §5.2 准入查询（.first()）——本假件不建模采集运行
+                return SimpleNamespace(
+                    scalar_one_or_none=lambda: None,
+                    first=lambda: None,
+                    all=lambda: [],
+                )
+        if getattr(statement, "is_delete", False):
+            where = statement.whereclause
+            conditions = (
+                dict(
+                    (name, value)
+                    for name, (op, value) in self._clause_pairs(where)
+                    if op.__name__ != "ne"
+                )
+                if where is not None
+                else {}
+            )
+            table = statement.table.name
+            if table == "table_profile":
+                removed = [
+                    row
+                    for row in self.table_profiles
+                    if all(
+                        getattr(row, key, None) == value
+                        for key, value in conditions.items()
+                    )
+                ]
+                self.table_profiles[:] = [
+                    row for row in self.table_profiles if row not in removed
+                ]
+                keys = {
+                    (row.source_id, row.schema_name, row.object_name) for row in removed
+                }
+                self.table_column_profiles[:] = [
+                    row
+                    for row in self.table_column_profiles
+                    if (row.source_id, row.schema_name, row.object_name) not in keys
+                ]
+                return None
+            pool_name = self._TABLE_POOLS.get(table)
+            pool = getattr(self, pool_name) if pool_name else None
+            if pool is not None:
+                pool[:] = [
+                    row
+                    for row in pool
+                    if not all(
+                        getattr(row, key, None) == value
+                        for key, value in conditions.items()
+                    )
+                ]
+            return None
+        sql_text = str(statement)
+        if getattr(statement, "_setup_joins", None):
+            if "collection_run_info" in sql_text:
+                # doc 8.1 §5.1.1：Rel 发布认领的反向检查（采集输入运行中）；
+                # 本假件不建模采集运行 → 无冲突
+                return SimpleNamespace(scalar_one_or_none=lambda: None)
+            # _claim_publish_step 冲突查询：同名 running 步骤被其他运行占用
+            params = statement.compile().params
             step_name = params.get("step_name_1")
-            if source_id is not None:
-                rows = [row for row in rows if row.source_id == source_id]
-            if step_name is not None:
-                rows = [row for row in rows if row.step_name == step_name]
-            return rows
-        raise AssertionError(entity)
+            exclude_run = params.get("publish_run_id_1")
+            workspace_id = params.get("workspace_id_1")
+            hit = None
+            for step_row in self.run_steps:
+                if step_row.step_name != step_name or step_row.status != "running":
+                    continue
+                run = next(
+                    (
+                        row
+                        for row in self.runs
+                        if row.publish_run_id == step_row.publish_run_id
+                    ),
+                    None,
+                )
+                if run is None:
+                    continue
+                job = next(
+                    (
+                        row
+                        for row in self.publish_jobs
+                        if row.publish_job_id == run.publish_job_id
+                    ),
+                    None,
+                )
+                if (
+                    run.status == "running"
+                    and run.publish_run_id != exclude_run
+                    and job is not None
+                    and job.workspace_id == workspace_id
+                ):
+                    hit = run.publish_run_id
+                    break
+            return SimpleNamespace(scalar_one_or_none=lambda: hit)
+        rows = self._select_rows(statement)
+        return SimpleNamespace(
+            scalar_one_or_none=lambda: rows[0] if rows else None,
+            # doc 10.2 §5.3：count_active_publish_runs 的 func.count 查询
+            scalar_one=lambda: rows[0] if rows else 0,
+            scalars=lambda: rows,
+            all=lambda: rows,
+        )
+
+    def _apply_update(self, statement):
+        """doc 10.2 §5.3 条件状态更新（mark_*_running / finish_step）。
+
+        按 where 条件（等值 / in / ne）过滤对应池，应用字面量 values
+        （func.now() 以当前时间代替），返回 affected rowcount 语义。
+        """
+        table = statement.table.name
+        pool = {
+            "publish_run_info": self.runs,
+            "publish_run_step": self.run_steps,
+        }.get(table, [])
+        where = statement.whereclause
+
+        def _match(row, name, op, value):
+            actual = getattr(row, name, None)
+            op_name = getattr(op, "__name__", "")
+            if op_name == "ne":
+                return actual != value
+            if isinstance(value, (tuple, list, set, frozenset)):
+                return actual in value
+            return actual == value
+
+        matched = list(pool)
+        if where is not None:
+            for name, (op, value) in self._clause_pairs(where):
+                matched = [
+                    row for row in matched if _match(row, name, op, value)
+                ]
+        updates: dict[str, object] = {}
+        for column, clause in statement._values.items():
+            name = getattr(column, "key", None) or getattr(column, "name", None)
+            raw = getattr(clause, "value", None)
+            if isinstance(raw, (str, dict, list)):
+                updates[name] = raw
+            elif name in ("started_at", "finished_at"):
+                updates[name] = datetime.now(timezone.utc)
+        for row in matched:
+            for key, value in updates.items():
+                if hasattr(row, key):
+                    setattr(row, key, value)
+        return SimpleNamespace(rowcount=len(matched))
 
     def add(self, row):
         self.pending.append(row)
 
-    def flush(self):
-        """no-op：真实会话在 replace_db_profile 中间 flush 使 DELETE 先行下发。"""
-        self.flush_calls += 1
-
     def add_all(self, rows):
-        for row in rows:
-            self.add(row)
-
-    def execute(self, statement):
-        """受支持的最小 execute：按 source_id/define_type 删 table_definition。"""
-        if not getattr(statement, "is_delete", False):
-            raise AssertionError(type(statement).__name__)
-        params = statement.compile().params
-        self.definitions[:] = [
-            row
-            for row in self.definitions
-            if not (
-                row.source_id == params.get("source_id_1")
-                and row.define_type == params.get("define_type_1")
-            )
-        ]
-        return None
+        self.pending.extend(rows)
 
     def delete(self, row):
-        if row in self.profiles:
-            self.profiles.remove(row)
+        for pool_name in (
+            "profiles",
+            "definitions",
+            "table_profiles",
+            "table_domains",
+            "runs",
+            "run_steps",
+            "publish_jobs",
+        ):
+            pool = getattr(self, pool_name)
+            if row in pool:
+                pool.remove(row)
+                return
+
+    def flush(self):
+        self.flush_calls += 1
 
     def commit(self):
         if self.commit_errors:
             raise self.commit_errors.pop(0)
         for row in self.pending:
-            if isinstance(row, PublishInfo):
-                if row.created_at is None:
-                    row.created_at = self.tick()
-                if row.updated_at is None:
-                    row.updated_at = row.created_at
-                self.publishes.append(row)
+            if isinstance(row, PublishRunInfo):
+                self.runs.append(row)
+            elif isinstance(row, PublishRunStep):
+                self.run_steps.append(row)
             elif isinstance(row, DbProfile):
                 self.profiles.append(row)
             elif isinstance(row, TableDefinition):
-                if row.loaded_at is None:
-                    row.loaded_at = self.tick()
                 self.definitions.append(row)
+            elif isinstance(row, TableProfile):
+                self.table_profiles.append(row)
+            elif isinstance(row, TableColumnProfile):
+                self.table_column_profiles.append(row)
+            elif isinstance(row, TableDomain):
+                self.table_domains.append(row)
             else:
                 raise AssertionError(type(row))
         self.pending.clear()
-        self.snapshot = None
-        self._profiles_snapshot = None
-        self._definitions_snapshot = None
+        self.commits += 1
 
     def rollback(self):
         self.pending.clear()
-        if self.snapshot is not None:
-            for row, flag, updated in self.snapshot:
-                row.is_current_publish = flag
-                row.updated_at = updated
-            self.snapshot = None
-        if self._profiles_snapshot is not None:
-            self.profiles[:] = self._profiles_snapshot
-            self._profiles_snapshot = None
-        if self._definitions_snapshot is not None:
-            self.definitions[:] = self._definitions_snapshot
-            self._definitions_snapshot = None
-
-    def begin(self):
-        self.pending = []
-        self.snapshot = [
-            (row, row.is_current_publish, getattr(row, "updated_at", None))
-            for row in self.publishes
-        ]
-        self._profiles_snapshot = list(self.profiles)
-        self._definitions_snapshot = list(self.definitions)
+        self.rolled_back += 1
 
 
-def install_session(monkeypatch, tmp_path, session: FakePublishSession | None = None):
+def install(monkeypatch, tmp_path, session=None):
     monkeypatch.setattr("metaweave.utils.file_utils.get_project_root", lambda: tmp_path)
-    holder = session or FakePublishSession()
+    holder = session or FakeSession()
 
     @contextmanager
     def fake_platform_session(_settings):
-        holder.begin()
         try:
             yield holder
         except Exception:
@@ -280,510 +530,726 @@ def install_session(monkeypatch, tmp_path, session: FakePublishSession | None = 
             raise
 
     monkeypatch.setattr(publish_service, "platform_session", fake_platform_session)
-    monkeypatch.setattr(db_loader, "platform_session", fake_platform_session)
-    monkeypatch.setattr("backend.publishing.repository.func.now", holder.tick)
+    # doc 10.2 §5.1：rel 发布的 Neo4j 目标互斥——假件不建真连接；
+    # 目标锁恒可取得、保留记录恒为空（个别用例自行覆盖以测互斥语义）。
+    # publish_service 顶层 from-import 了这些名字，补丁打在其模块属性上。
+    from types import SimpleNamespace as _NS
+
+    monkeypatch.setattr(
+        publish_service, "acquire_target_lock",
+        lambda settings, key, *, wait_timeout_s: _NS(closed=False),
+    )
+    monkeypatch.setattr(
+        publish_service, "release_target_lock", lambda conn, key: None
+    )
+    monkeypatch.setattr(
+        publish_service, "ensure_target_lock_alive", lambda conn: None
+    )
+    monkeypatch.setattr(
+        publish_service,
+        "reserve_target_guard",
+        lambda session, target_key, owner_kind, owner_id: None,
+    )
+    def _record_guard_release(session, target_key, owner_kind, owner_id):
+        # doc 10.2 §5.1（Kimi R1 意见 3）：记录 guard 清除调用供断言
+        holder.guard_releases.append((target_key, owner_kind, owner_id))
+        holder.target_mutex_events.append("guard")
+        return True
+
+    def _record_lock_release(conn, key):
+        holder.target_mutex_events.append("lock")
+        return None
+
+    monkeypatch.setattr(
+        publish_service, "release_target_guard", _record_guard_release
+    )
+    monkeypatch.setattr(publish_service, "release_target_lock", _record_lock_release)
     return holder
 
 
-def write_profile(tmp_path, document=None, source_id=SOURCE_ID, job_id=JOB_ID):
-    db_dir = tmp_path / "output" / str(source_id) / str(job_id) / "db"
-    db_dir.mkdir(parents=True)
-    path = db_dir / "database.json"
-    path.write_text(json.dumps(document or profile_document()), encoding="utf-8")
-    return db_dir, path
-
-
-def test_conflict_predicates_use_sqlstate_and_constraint_name():
-    current = integrity_error("23505", "publish_info_current_idx")
-    publish_pk = integrity_error("23505", "publish_info_pkey")
-    profile_pk = integrity_error("23505", "db_profile_pkey")
-    check = integrity_error("23514", "publish_info_status_check")
-    assert is_current_index_conflict(current) is True
-    assert is_current_index_conflict(publish_pk) is False
-    assert is_current_index_conflict(check) is False
-    assert is_current_index_conflict(RuntimeError("x")) is False
-    assert is_primary_key_conflict(publish_pk) is True
-    assert is_primary_key_conflict(profile_pk) is True
-    assert is_primary_key_conflict(current) is False
-    assert is_primary_key_conflict(check) is False
-    assert is_primary_key_conflict(RuntimeError("x")) is False
-    missing = IntegrityError(LEAK_SQL, {}, SimpleNamespace(sqlstate="23505"))
-    assert is_current_index_conflict(missing) is False
-    assert is_primary_key_conflict(missing) is False
-
-
-def test_ready_profile_is_publishable(monkeypatch, tmp_path):
-    install_session(monkeypatch, tmp_path)
-    db_dir, path = write_profile(tmp_path)
-    before = path.read_text(encoding="utf-8")
-    result = check_publication(SETTINGS, SOURCE_ID, JOB_ID)
-    step = result["steps"][0]
-    assert result["source_id"] == str(SOURCE_ID)
-    assert step["job_status"] == "success"
-    assert step["output_ready"] is True
-    assert step["publishable"] is True
-    assert step["reason"] is None
-    assert path.read_text(encoding="utf-8") == before
-    assert db_dir.is_dir()
-
-
-@pytest.mark.parametrize(
-    ("status", "reason"),
-    [("failed", "最近一次采集失败"), ("running", "正在执行")],
-)
-def test_unsuccessful_job_is_not_publishable(monkeypatch, tmp_path, status, reason):
-    session = install_session(monkeypatch, tmp_path)
-    session.steps[0].last_status = status
+def make_ready_db(tmp_path):
+    write_marker(tmp_path, "db")
     write_profile(tmp_path)
-    step = check_publication(SETTINGS, SOURCE_ID, JOB_ID)["steps"][0]
-    assert step["publishable"] is False
-    assert step["job_status"] == status
-    assert step["reason"] == reason
-    assert step["output_ready"] is True
 
 
-def test_job_without_db_row_stays_a_check_result(monkeypatch, tmp_path):
-    session = install_session(monkeypatch, tmp_path)
-    session.steps = [
-        SimpleNamespace(
-            job_id=JOB_ID,
-            source_id=SOURCE_ID,
-            step_name="ddl",
-            last_status="success",
-            updated_at=RUN_MARKER,
+def run_step_row(session, run_id, step):
+    return next(
+        row
+        for row in session.run_steps
+        if row.publish_run_id == run_id and row.step_name == step
+    )
+
+
+# ---- 步骤白名单与固定顺序（doc 6.2 §8.1） ----
+
+
+class TestNormalizePublishSteps:
+    def test_orders_by_fixed_sequence_and_dedups(self):
+        assert normalize_publish_steps(["sql", "db", "sql"]) == ["db", "sql"]
+        assert normalize_publish_steps(
+            ["rel", "dim_value", "table_schema", "json", "domain", "ddl", "db"]
+        ) == ["db", "ddl", "json", "domain", "table_schema", "dim_value", "rel"]
+
+    def test_empty_selection_rejected(self):
+        with pytest.raises(ValueError, match="至少选择一个发布步骤"):
+            normalize_publish_steps([])
+
+    def test_unknown_step_lists_whitelist(self):
+        with pytest.raises(ValueError, match="仅支持"):
+            normalize_publish_steps(["md"])
+        with pytest.raises(ValueError, match="仅支持"):
+            normalize_publish_steps(["db", "nope"])
+
+    def test_step_order_constant(self):
+        assert PUBLISH_STEP_ORDER == (
+            "db",
+            "ddl",
+            "json",
+            "domain",
+            "table_schema",
+            "dim_value",
+            "rel",
+            "sql",
         )
-    ]
-    write_profile(tmp_path)
-    step = check_publication(SETTINGS, SOURCE_ID, JOB_ID)["steps"][0]
-    assert step["job_status"] is None
-    assert step["publishable"] is False
-    assert step["reason"] == "没有执行记录"
 
 
-@pytest.mark.parametrize(
-    "prepare",
-    ["missing", "empty", "subdir", "hidden", "directory", "symlink", "linked_dir"],
-)
-def test_output_not_ready_uses_fixed_reason(monkeypatch, tmp_path, prepare):
-    install_session(monkeypatch, tmp_path)
-    db_dir, path = write_profile(tmp_path)
-    if prepare == "missing":
-        path.unlink()
-        db_dir.rmdir()
-    elif prepare == "empty":
-        path.unlink()
-        assert db_dir.is_dir() and not any(db_dir.iterdir())
-    elif prepare == "subdir":
-        path.unlink()
-        (db_dir / "notes").mkdir()
-    elif prepare == "hidden":
-        path.unlink()
-        (db_dir / ".keep").write_text("x", encoding="utf-8")
-    elif prepare == "directory":
-        path.unlink()
-        path.mkdir()
-    elif prepare == "symlink":
-        other = db_dir / "other.json"
-        path.rename(other)
-        path.symlink_to(other)
-    else:
-        path.unlink()
-        outside = tmp_path / "outside"
-        outside.mkdir()
-        db_dir.rmdir()
-        db_dir.symlink_to(outside, target_is_directory=True)
-    step = check_publication(SETTINGS, SOURCE_ID, JOB_ID)["steps"][0]
-    assert step["output_ready"] is False
-    assert step["publishable"] is False
-    assert step["reason"] == "产物不存在或不可用"
-    assert not (tmp_path / "output" / str(SOURCE_ID) / str(JOB_ID) / "created-by-check").exists()
-    if prepare == "missing":
-        assert not db_dir.exists()
-    elif prepare == "empty":
-        assert db_dir.is_dir() and not any(db_dir.iterdir())
+# ---- 目录 marker 判定（doc 6 §4.1） ----
 
 
-def test_failed_status_reason_wins_over_missing_output(monkeypatch, tmp_path):
-    session = install_session(monkeypatch, tmp_path)
-    session.steps[0].last_status = "failed"
-    step = check_publication(SETTINGS, SOURCE_ID, JOB_ID)["steps"][0]
-    assert step["output_ready"] is False
-    assert step["reason"] == "最近一次采集失败"
-
-
-def test_precheck_logs_specific_input_reason(monkeypatch, tmp_path, caplog):
-    install_session(monkeypatch, tmp_path)
-    caplog.set_level(logging.WARNING, logger="backend.publishing")
-    check_db_output_ready(SOURCE_ID, JOB_ID)
-    missing = caplog.records[-1]
-    assert missing.levelno == logging.WARNING
-    assert str(SOURCE_ID) in missing.message and str(JOB_ID) in missing.message
-    assert "未找到可加载的普通文件" in missing.message
-    assert LEAK_PARAM not in missing.message
-
-    outside = tmp_path / "outside"
-    outside.mkdir()
-    linked = tmp_path / "output" / str(SOURCE_ID)
-    linked.parent.mkdir(parents=True)
-    linked.symlink_to(outside, target_is_directory=True)
-    check_db_output_ready(SOURCE_ID, JOB_ID)
-    linked_log = caplog.records[-1].message
-    assert "符号链接" in linked_log
-    assert "产物不存在或不可用" not in linked_log
-
-
-def test_shared_file_rule_rejects_the_same_inputs(monkeypatch, tmp_path):
-    monkeypatch.setattr("metaweave.utils.file_utils.get_project_root", lambda: tmp_path)
-    db_dir, path = write_profile(tmp_path)
-    assert resolve_db_profile_input_path(SOURCE_ID, JOB_ID) == path
-    assert check_db_output_ready(SOURCE_ID, JOB_ID) == (True, None)
-    fields, parent = read_db_profile_input(SOURCE_ID, JOB_ID)
-    assert parent == db_dir and fields["source_id"] == SOURCE_ID
-
-    path.unlink()
-    with pytest.raises(ProfileInputError):
-        resolve_db_profile_input_path(SOURCE_ID, JOB_ID)
-    assert check_db_output_ready(SOURCE_ID, JOB_ID)[0] is False
-    with pytest.raises(ProfileInputError):
-        read_db_profile_input(SOURCE_ID, JOB_ID)
-
-
-def test_invalid_json_is_publishable_then_fails_on_post(monkeypatch, tmp_path):
-    session = install_session(monkeypatch, tmp_path)
-    _db_dir, path = write_profile(tmp_path)
-    path.write_text("{", encoding="utf-8")
-    assert check_publication(SETTINGS, SOURCE_ID, JOB_ID)["steps"][0]["publishable"] is True
-    result = publish_steps(SETTINGS, SOURCE_ID, JOB_ID, ["db"])
-    assert result["results"][0]["status"] == "failed"
-    assert result["results"][0]["message"] == INPUT_SUMMARY
-    assert session.profiles == []
-    assert session.publishes[0].status == "failed"
-    assert session.publishes[0].error_summary == INPUT_SUMMARY
-    assert session.publishes[0].is_current_publish is False
-
-
-def test_mismatched_source_in_json_records_failure(monkeypatch, tmp_path):
-    session = install_session(monkeypatch, tmp_path)
-    write_profile(tmp_path, profile_document(OTHER_SOURCE_ID))
-    assert check_publication(SETTINGS, SOURCE_ID, JOB_ID)["steps"][0]["publishable"] is True
-    result = publish_steps(SETTINGS, SOURCE_ID, JOB_ID, ["db"])
-    assert result["results"][0]["status"] == "failed"
-    assert result["results"][0]["message"] == INPUT_SUMMARY
-    assert session.profiles == []
-    assert len(session.publishes) == 1
-    assert session.publishes[0].source_id == SOURCE_ID
-    assert session.publishes[0].error_summary == INPUT_SUMMARY
-
-
-@pytest.mark.parametrize("setup", ["missing", "unicode"])
-def test_input_failures_share_one_summary(monkeypatch, tmp_path, setup):
-    session = install_session(monkeypatch, tmp_path)
-    _db_dir, path = write_profile(tmp_path)
-    if setup == "missing":
-        path.unlink()
-    else:
-        path.write_bytes(b"\xff")
-    result = publish_steps(SETTINGS, SOURCE_ID, JOB_ID, ["db"])
-    assert result["results"][0]["message"] == INPUT_SUMMARY
-    assert session.publishes[0].error_summary == INPUT_SUMMARY
-
-
-def test_missing_source_job_or_disabled_does_not_publish(monkeypatch, tmp_path):
-    session = install_session(monkeypatch, tmp_path)
-    write_profile(tmp_path)
-    session.source = None
-    with pytest.raises(MetaLoadSourceNotFoundError):
-        publish_steps(SETTINGS, SOURCE_ID, JOB_ID, ["db"])
-    session.source = SimpleNamespace(source_id=SOURCE_ID, is_active=False)
-    with pytest.raises(MetaLoadSourceDisabledError):
-        check_publication(SETTINGS, SOURCE_ID, JOB_ID)
-    session.source.is_active = True
-    session.steps = []
-    with pytest.raises(WorkspaceMissingError):
-        publish_steps(SETTINGS, SOURCE_ID, JOB_ID, ["db"])
-    session.steps = [
-        SimpleNamespace(
-            job_id=JOB_ID,
-            source_id=OTHER_SOURCE_ID,
-            step_name="db",
-            last_status="success",
+class TestRequireSuccessMarkers:
+    def test_success_markers_by_directory(self, monkeypatch, tmp_path):
+        install(monkeypatch, tmp_path)
+        write_marker(tmp_path, "db")
+        write_marker(tmp_path, "json", run_id=RUN2)
+        markers, failure = require_success_markers(
+            SOURCE_ID, WORKSPACE_ID, ("db", "json")
         )
-    ]
-    with pytest.raises(WorkspaceSourceMismatchError):
-        publish_steps(SETTINGS, SOURCE_ID, JOB_ID, ["db"])
-    assert session.publishes == [] and session.profiles == []
+        assert failure is None
+        assert markers["db"].run_id == str(RUN)
+        assert markers["json"].run_id == str(RUN2)
 
-
-def test_duplicate_db_runs_once_and_unknown_steps_are_rejected(monkeypatch, tmp_path):
-    session = install_session(monkeypatch, tmp_path)
-    write_profile(tmp_path)
-    result = publish_steps(SETTINGS, SOURCE_ID, JOB_ID, ["db", "db"])
-    assert len(result["results"]) == 1
-    assert len(session.profiles) == 1
-    with pytest.raises(publish_service.UnsupportedPublicationStepError):
-        publish_steps(SETTINGS, SOURCE_ID, JOB_ID, [])
-    with pytest.raises(publish_service.UnsupportedPublicationStepError):
-        publish_steps(SETTINGS, SOURCE_ID, JOB_ID, ["DB"])
-    assert len(session.profiles) == 1
-
-
-def test_status_change_after_check_rejects_without_id(monkeypatch, tmp_path):
-    session = install_session(monkeypatch, tmp_path)
-    write_profile(tmp_path)
-    assert check_publication(SETTINGS, SOURCE_ID, JOB_ID)["steps"][0]["publishable"]
-    session.steps[0].last_status = "running"
-    with pytest.raises(PublicationStepNotReadyError):
-        publish_steps(SETTINGS, SOURCE_ID, JOB_ID, ["db"])
-    assert session.publishes == [] and session.profiles == []
-
-
-def test_deleted_file_after_check_records_failure(monkeypatch, tmp_path):
-    session = install_session(monkeypatch, tmp_path)
-    _db_dir, path = write_profile(tmp_path)
-    assert check_publication(SETTINGS, SOURCE_ID, JOB_ID)["steps"][0]["publishable"]
-    path.unlink()
-    result = publish_steps(SETTINGS, SOURCE_ID, JOB_ID, ["db"])
-    assert result["publish_id"]
-    assert result["results"][0]["status"] == "failed"
-    assert session.profiles == []
-    assert session.publishes[0].publish_id == UUID(result["publish_id"])
-
-
-def test_successful_publish_links_profile_and_keeps_job(monkeypatch, tmp_path):
-    session = install_session(monkeypatch, tmp_path)
-    _db_dir, path = write_profile(tmp_path)
-    result = publish_steps(SETTINGS, SOURCE_ID, JOB_ID, ["db"])
-    assert result["results"][0]["status"] == "success"
-    assert result["results"][0]["finished_at"].endswith("Z")
-    publish_id = UUID(result["publish_id"])
-    assert session.profiles[0].publish_id == publish_id
-    assert session.publishes[0].publish_id == publish_id
-    assert session.publishes[0].is_current_publish is True
-    assert session.publishes[0].created_by_user_id is None
-    assert session.publishes[0].error_summary is None
-    assert session.steps[0].last_status == "success"
-    assert path.exists()
-
-
-def test_repeat_publish_replaces_the_single_profile_row(monkeypatch, tmp_path):
-    """db_profile 每源一行：重复成功发布整行替换（doc 16 §3.1）。"""
-    session = install_session(monkeypatch, tmp_path)
-    write_profile(tmp_path)
-    first = publish_steps(SETTINGS, SOURCE_ID, JOB_ID, ["db"])
-    second = publish_steps(SETTINGS, SOURCE_ID, JOB_ID, ["db"])
-    assert first["publish_id"] != second["publish_id"]
-    # 每次整行替换都经过中间 flush（DELETE 先行下发），不被折叠成 UPDATE。
-    assert session.flush_calls == 2
-    assert len(session.profiles) == 1
-    assert session.profiles[0].publish_id == UUID(second["publish_id"])
-    current = [row for row in session.publishes if row.is_current_publish]
-    assert len(current) == 1
-    assert current[0].publish_id == UUID(second["publish_id"])
-    previous = session.publishes[0]
-    assert previous.is_current_publish is False
-    assert previous.updated_at > previous.created_at
-
-
-def test_later_failure_keeps_previous_current_and_profile(monkeypatch, tmp_path):
-    """失败尝试不清 current、不动画像（doc 16 §1 失败语义）。"""
-    session = install_session(monkeypatch, tmp_path)
-    _db_dir, path = write_profile(tmp_path)
-    first = publish_steps(SETTINGS, SOURCE_ID, JOB_ID, ["db"])
-    path.unlink()
-    second = publish_steps(SETTINGS, SOURCE_ID, JOB_ID, ["db"])
-    assert second["results"][0]["status"] == "failed"
-    current = [row for row in session.publishes if row.is_current_publish]
-    assert len(current) == 1
-    assert current[0].publish_id == UUID(first["publish_id"])
-    assert current[0].status == "success"
-    assert session.profiles[0].publish_id == UUID(first["publish_id"])
-
-
-def test_commit_rechecks_source_under_lock_and_skips_failure_row(
-    monkeypatch, tmp_path
-):
-    """锁下重查发现源已删除或禁用：直接抛错，不写失败记录（doc 16 §5）。"""
-    session = install_session(monkeypatch, tmp_path)
-    write_profile(tmp_path)
-    fields, _directory = read_db_profile_input(SOURCE_ID, JOB_ID)
-    session.source = None
-    with pytest.raises(MetaLoadSourceNotFoundError):
-        commit_db_current_state(
-            SETTINGS, SOURCE_ID, JOB_ID, UUID(int=1), fields, RUN_MARKER
+    def test_missing_marker_reports_directory(self, monkeypatch, tmp_path):
+        install(monkeypatch, tmp_path)
+        write_marker(tmp_path, "db")
+        markers, failure = require_success_markers(
+            SOURCE_ID, WORKSPACE_ID, ("db", "json")
         )
-    session.source = SimpleNamespace(source_id=SOURCE_ID, is_active=False)
-    with pytest.raises(MetaLoadSourceDisabledError):
-        commit_db_current_state(
-            SETTINGS, SOURCE_ID, JOB_ID, UUID(int=1), fields, RUN_MARKER
-        )
-    assert session.publishes == [] and session.profiles == []
+        assert failure == "json/ 目录没有采集 marker，产物不可用"
+        assert set(markers) == {"db"}
+
+    def test_failed_marker_blocks_directory(self, monkeypatch, tmp_path):
+        install(monkeypatch, tmp_path)
+        write_marker(tmp_path, "db", status="failed")
+        _markers, failure = require_success_markers(SOURCE_ID, WORKSPACE_ID, ("db",))
+        assert failure == "db/ 目录最近一次采集未成功，产物不可用"
+
+    def test_backup_markers_do_not_count(self, monkeypatch, tmp_path):
+        install(monkeypatch, tmp_path)
+        directory = step_dir(tmp_path, "db")
+        write_collection_marker(directory, RUN, "success", moment=MOMENT)
+        backup = directory / ".backup" / "bak_20260101_000000_000"
+        backup.mkdir(parents=True)
+        (backup / f".coll_run_id_{RUN}_20260101-000000000_success").touch()
+        markers, failure = require_success_markers(SOURCE_ID, WORKSPACE_ID, ("db",))
+        assert failure is None and markers["db"].run_id == str(RUN)
 
 
-@pytest.mark.parametrize(
-    "mutate",
-    ["rerun-running", "rerun-finished"],
-)
-def test_publish_db_step_rerun_during_execution_is_reported_per_step(
-    monkeypatch, tmp_path, mutate
-):
-    """读取输入与提交之间该作业步骤被重跑：按未就绪计入结果并写 failed 历史行。
-
-    执行期间被重跑不再整体抛 400（doc 16 §5 部分成功语义）：多步发布中
-    前面的步骤可能已提交，调用方需要 publish_id 追认已提交的当前态。
-    rerun-running：重跑进行中（状态翻回 running，目录正被清空重写）；
-    rerun-finished：重跑已完整走完 running→success，状态仍 success 但
-    运行标识已变——两次读取可能读到新旧混合内容，同样必须拒绝。
-    """
-    session = install_session(monkeypatch, tmp_path)
-    write_profile(tmp_path)
-    real_read = publish_service.read_db_profile_input
-
-    def racing_read(source_id, job_id):
-        result = real_read(source_id, job_id)
-        if mutate == "rerun-running":
-            session.steps[0].last_status = "running"
-        else:
-            session.steps[0].updated_at = RUN_MARKER + timedelta(seconds=5)
-        return result
-
-    monkeypatch.setattr(publish_service, "read_db_profile_input", racing_read)
-    result = publish_steps(SETTINGS, SOURCE_ID, JOB_ID, ["db"])
-    assert result["results"][0]["status"] == "failed"
-    # 审核修订后出口保留异常文本：db 发布器锁下本就传具体文案
-    assert result["results"][0]["message"] == "db 采集步骤已被重跑"
-    # 对外报告了失败尝试就留一条可凭 publish_id 查到的历史行；
-    # 不动画像，也不翻 current。
-    assert len(session.publishes) == 1
-    assert session.publishes[0].status == "failed"
-    assert session.publishes[0].publish_id == UUID(result["publish_id"])
-    assert session.publishes[0].is_current_publish is False
-    assert session.profiles == []
+# ---- check_step / precheck_steps（db、ddl 两步；其余步骤见各自文件） ----
 
 
-def test_commit_db_rejects_changed_run_marker(monkeypatch, tmp_path):
-    """直调提交：运行标识与快照不一致时拒绝，不产生任何写入。"""
-    session = install_session(monkeypatch, tmp_path)
-    write_profile(tmp_path)
-    fields, _directory = read_db_profile_input(SOURCE_ID, JOB_ID)
-    with pytest.raises(PublicationStepNotReadyError):
-        commit_db_current_state(
-            SETTINGS,
+class TestCheckStep:
+    def test_db_ready_lists_input_file_with_marker_run(self, monkeypatch, tmp_path):
+        install(monkeypatch, tmp_path)
+        make_ready_db(tmp_path)
+        result = check_step(None, SOURCE_ID, WORKSPACE_ID, "db", db_name=DB_NAME)
+        assert result.ready is True and result.reason is None
+        assert result.input_files == (("db/database.json", str(RUN)),)
+
+    def test_db_missing_file_reason(self, monkeypatch, tmp_path):
+        install(monkeypatch, tmp_path)
+        write_marker(tmp_path, "db")
+        result = check_step(None, SOURCE_ID, WORKSPACE_ID, "db", db_name=DB_NAME)
+        assert result.ready is False
+        assert result.reason == "db/database.json 缺失或不可读"
+        assert result.input_files == ()
+
+    def test_db_marker_missing_beats_file_check(self, monkeypatch, tmp_path):
+        install(monkeypatch, tmp_path)
+        write_profile(tmp_path)
+        result = check_step(None, SOURCE_ID, WORKSPACE_ID, "db", db_name=DB_NAME)
+        assert result.ready is False
+        assert result.reason == "db/ 目录没有采集 marker，产物不可用"
+
+    def test_precheck_steps_collects_all_failures(self, monkeypatch, tmp_path):
+        install(monkeypatch, tmp_path)
+        write_marker(tmp_path, "db")
+        write_profile(tmp_path)
+        results = precheck_steps(
+            None,
             SOURCE_ID,
-            JOB_ID,
-            UUID(int=1),
-            fields,
-            RUN_MARKER + timedelta(seconds=5),
+            WORKSPACE_ID,
+            ["db", "ddl"],
+            db_name=DB_NAME,
         )
-    assert session.publishes == [] and session.profiles == []
+        assert results["db"].ready is True
+        assert results["ddl"].ready is False
+        assert "ddl/" in results["ddl"].reason
 
 
-def test_commit_failure_rolls_back_then_records_failure(monkeypatch, tmp_path):
-    session = install_session(monkeypatch, tmp_path)
-    write_profile(tmp_path)
-    session.commit_errors.append(RuntimeError("database password should never be shown"))
-    result = publish_steps(SETTINGS, SOURCE_ID, JOB_ID, ["db"])
-    assert result["results"][0]["status"] == "failed"
-    assert result["results"][0]["message"] == WRITE_SUMMARY
-    assert session.profiles == []
-    assert len(session.publishes) == 1
-    assert session.publishes[0].status == "failed"
-    assert "password" not in (session.publishes[0].error_summary or "")
+# ---- check_publication（固定 8 步骤 + 输入目录时间，doc 6.2 §8.2.2） ----
 
 
-def test_current_conflict_on_success_does_not_record_failure(monkeypatch, tmp_path):
-    session = install_session(monkeypatch, tmp_path)
-    write_profile(tmp_path)
-    session.commit_errors.append(integrity_error("23505", "publish_info_current_idx"))
-    with pytest.raises(PublicationConflictError):
-        publish_steps(SETTINGS, SOURCE_ID, JOB_ID, ["db"])
-    assert session.profiles == [] and session.publishes == []
+class TestCheckPublication:
+    def _run(self, monkeypatch, tmp_path, session=None):
+        session = install(monkeypatch, tmp_path, session)
+        return session, check_publication(SETTINGS, WORKSPACE_ID)
+
+    def test_fixed_eight_steps_in_order(self, monkeypatch, tmp_path):
+        make_ready_db(tmp_path)
+        _session, result = self._run(monkeypatch, tmp_path)
+        assert result["workspace_id"] == WORKSPACE_ID
+        assert result["source_id"] == SOURCE_ID
+        assert [step["step_name"] for step in result["steps"]] == list(
+            PUBLISH_STEP_ORDER
+        )
+        by_name = {step["step_name"]: step for step in result["steps"]}
+        assert by_name["db"]["ready"] is True
+        assert by_name["db"]["reason"] is None
+        # 未采集目录：不可发布但不让整份预检 400
+        assert by_name["sql"]["ready"] is False
+        assert by_name["sql"]["reason"] is not None
+
+    def test_input_directories_report_marker_times(self, monkeypatch, tmp_path):
+        make_ready_db(tmp_path)
+        _session, result = self._run(monkeypatch, tmp_path)
+        directories = {item["directory"]: item for item in result["input_directories"]}
+        # 8 个发布步骤覆盖的全部采集目录（去重后按名称排序）
+        assert set(directories) == {
+            "db",
+            "ddl",
+            "dim",
+            "domain",
+            "json",
+            "md",
+            "rel",
+            "sql",
+        }
+        assert result["input_directories"] == sorted(
+            result["input_directories"], key=lambda item: item["directory"]
+        )
+        db_info = directories["db"]
+        assert db_info["marker_status"] == "success"
+        assert db_info["collection_run_id"] == str(RUN)
+        # 采集时间来自 marker 文件名时间戳（Asia/Shanghai → ISO 文本）
+        assert db_info["collected_at"] == MOMENT.isoformat()
+        assert directories["sql"]["marker_status"] == "none"
+        assert directories["sql"]["collection_run_id"] is None
+        assert directories["sql"]["collected_at"] is None
+
+    def test_missing_workspace_is_source_not_found(self, monkeypatch, tmp_path):
+        session = FakeSession()
+        session.workspace = None
+        install(monkeypatch, tmp_path, session)
+        with pytest.raises(MetaLoadSourceNotFoundError):
+            check_publication(SETTINGS, WORKSPACE_ID)
+
+    def test_disabled_source_rejected(self, monkeypatch, tmp_path):
+        session = FakeSession()
+        session.source.is_active = False
+        install(monkeypatch, tmp_path, session)
+        with pytest.raises(MetaLoadSourceDisabledError):
+            check_publication(SETTINGS, WORKSPACE_ID)
+
+    def test_platform_failure_is_unavailable(self, monkeypatch, tmp_path):
+        session = FakeSession()
+
+        def boom(*_args, **_kwargs):
+            raise SQLAlchemyError("db down")
+
+        session.get = boom
+        install(monkeypatch, tmp_path, session)
+        from backend.data_sources.registration_service import PlatformUnavailableError
+
+        with pytest.raises(PlatformUnavailableError):
+            check_publication(SETTINGS, WORKSPACE_ID)
+
+    def test_collect_input_dir_times_dedups_directories(self, monkeypatch, tmp_path):
+        install(monkeypatch, tmp_path)
+        make_ready_db(tmp_path)
+        info = collect_input_dir_times(SOURCE_ID, WORKSPACE_ID)
+        # rel/json/domain 等被多个步骤共享的目录只出现一次
+        assert len(info) == 8
+        assert info["db"]["marker_status"] == "success"
 
 
-def test_current_conflict_on_failure_record_does_not_retry(monkeypatch, tmp_path):
-    session = install_session(monkeypatch, tmp_path)
-    write_profile(tmp_path)
-    (tmp_path / "output" / str(SOURCE_ID) / str(JOB_ID) / "db" / "database.json").unlink()
-    session.commit_errors.append(integrity_error("23505", "publish_info_current_idx"))
-    with pytest.raises(PublicationConflictError):
-        publish_steps(SETTINGS, SOURCE_ID, JOB_ID, ["db"])
-    assert session.publishes == [] and session.profiles == []
+# ---- create_publish_run（集中预检 → 创建运行，doc 6.2 §6.3.2） ----
 
 
-@pytest.mark.parametrize("constraint", ["publish_info_pkey", "db_profile_pkey"])
-def test_primary_key_conflict_on_success_propagates(monkeypatch, tmp_path, constraint):
-    session = install_session(monkeypatch, tmp_path)
-    write_profile(tmp_path)
-    session.commit_errors.append(integrity_error("23505", constraint))
-    with pytest.raises(RuntimeError) as caught:
-        publish_steps(SETTINGS, SOURCE_ID, JOB_ID, ["db"])
-    assert_safe_primary_key_exception(caught.value)
-    assert session.profiles == [] and session.publishes == []
+def _create(monkeypatch, tmp_path, **kwargs):
+    session = install(monkeypatch, tmp_path)
+    result = create_publish_run(
+        SETTINGS,
+        PUBLISH_JOB_ID,
+        revision_no=1,
+        mode="custom",
+        steps=["db"],
+        step_config=None,
+        **kwargs,
+    )
+    return session, result
 
 
-@pytest.mark.parametrize("constraint", ["publish_info_pkey", "db_profile_pkey"])
-def test_primary_key_conflict_on_failure_record_propagates(
-    monkeypatch, tmp_path, constraint
-):
-    session = install_session(monkeypatch, tmp_path)
-    _db_dir, path = write_profile(tmp_path)
-    path.unlink()
-    session.commit_errors.append(integrity_error("23505", constraint))
-    with pytest.raises(RuntimeError) as caught:
-        publish_steps(SETTINGS, SOURCE_ID, JOB_ID, ["db"])
-    assert_safe_primary_key_exception(caught.value)
-    assert session.profiles == [] and session.publishes == []
+class TestCreatePublishRun:
+    def test_success_creates_pending_run_and_step_rows(self, monkeypatch, tmp_path):
+        make_ready_db(tmp_path)
+        session, result = _create(monkeypatch, tmp_path)
+        assert result["publish_job_id"] == PUBLISH_JOB_ID
+        assert result["revision_no"] == 1
+        assert result["steps"] == ["db"]
+        assert result["status"] == "pending"
+        run_id = UUID(result["publish_run_id"])
+        assert len(session.runs) == 1
+        assert session.runs[0].publish_run_id == run_id
+        assert session.runs[0].status == "pending"
+        assert session.runs[0].trigger_type == "manual"
+        assert [(row.step_name, row.status) for row in session.run_steps] == [
+            ("db", "pending")
+        ]
+        assert session.commits == 1
+
+    def test_precheck_failure_rejects_whole_request_without_records(
+        self, monkeypatch, tmp_path
+    ):
+        install(monkeypatch, tmp_path)
+        # db 目录没有任何产物：集中预检失败，不建运行、不写业务记录
+        with pytest.raises(PublishPrecheckError) as excinfo:
+            create_publish_run(
+                SETTINGS,
+                PUBLISH_JOB_ID,
+                revision_no=1,
+                mode="custom",
+                steps=["db"],
+                step_config=None,
+            )
+        failures = excinfo.value.failures
+        assert failures == [
+            {"step": "db", "reason": "db/ 目录没有采集 marker，产物不可用"}
+        ]
+        assert "db:" in str(excinfo.value)
+
+    def test_precheck_failure_leaves_no_business_records(self, monkeypatch, tmp_path):
+        session = install(monkeypatch, tmp_path)
+        with pytest.raises(PublishPrecheckError):
+            create_publish_run(
+                SETTINGS,
+                PUBLISH_JOB_ID,
+                revision_no=1,
+                mode="custom",
+                steps=["db"],
+                step_config=None,
+            )
+        assert session.runs == [] and session.run_steps == []
+        assert session.profiles == []
+        assert session.pending == []
+
+    def test_missing_job_or_revision(self, monkeypatch, tmp_path):
+        from backend.publishing.publish_service import PublishRunError
+
+        make_ready_db(tmp_path)
+        install(monkeypatch, tmp_path)
+        with pytest.raises(PublishRunError, match="发布作业不存在"):
+            create_publish_run(
+                SETTINGS,
+                "pub_job_9",
+                revision_no=1,
+                mode="custom",
+                steps=["db"],
+                step_config=None,
+            )
+        with pytest.raises(PublishRunError, match="版本不存在"):
+            create_publish_run(
+                SETTINGS,
+                PUBLISH_JOB_ID,
+                revision_no=7,
+                mode="custom",
+                steps=["db"],
+                step_config=None,
+            )
+
+    def test_step_outside_revision_rejected(self, monkeypatch, tmp_path):
+        from backend.publishing.publish_service import PublishRunError
+
+        make_ready_db(tmp_path)
+        install(monkeypatch, tmp_path)  # 版本 steps 只有 db、ddl
+        with pytest.raises(PublishRunError, match="超出引用版本允许的范围"):
+            create_publish_run(
+                SETTINGS,
+                PUBLISH_JOB_ID,
+                revision_no=1,
+                mode="custom",
+                steps=["sql"],
+                step_config=None,
+            )
+
+    def test_default_mode_rejects_nonempty_step_config(self, monkeypatch, tmp_path):
+        from backend.publishing.publish_service import PublishRunError
+
+        make_ready_db(tmp_path)
+        install(monkeypatch, tmp_path)
+        with pytest.raises(PublishRunError, match="default 模式不接受非空 step_config"):
+            create_publish_run(
+                SETTINGS,
+                PUBLISH_JOB_ID,
+                revision_no=1,
+                mode="default",
+                steps=None,
+                step_config={"db": {"x": 1}},
+            )
+
+    def test_disabled_source_rejected_before_run(self, monkeypatch, tmp_path):
+        make_ready_db(tmp_path)
+        session = FakeSession()
+        session.source.is_active = False
+        install(monkeypatch, tmp_path, session)
+        with pytest.raises(MetaLoadSourceDisabledError):
+            create_publish_run(
+                SETTINGS,
+                PUBLISH_JOB_ID,
+                revision_no=1,
+                mode="custom",
+                steps=["db"],
+                step_config=None,
+            )
+        assert session.runs == []
 
 
-def test_other_constraint_on_success_records_write_failure(monkeypatch, tmp_path):
-    session = install_session(monkeypatch, tmp_path)
-    write_profile(tmp_path)
-    session.commit_errors.append(integrity_error("23514", "publish_info_status_check"))
-    result = publish_steps(SETTINGS, SOURCE_ID, JOB_ID, ["db"])
-    assert result["results"][0]["status"] == "failed"
-    assert result["results"][0]["message"] == WRITE_SUMMARY
-    assert session.profiles == []
-    assert session.publishes[0].error_summary == WRITE_SUMMARY
+# ---- execute_publish_run 状态机（blocked / failed / partial，doc 6.2 §6.4） ----
 
 
-def test_other_constraint_on_failure_record_is_unavailable(monkeypatch, tmp_path):
-    session = install_session(monkeypatch, tmp_path)
-    write_profile(tmp_path)
-    path = tmp_path / "output" / str(SOURCE_ID) / str(JOB_ID) / "db" / "database.json"
-    path.unlink()
-    session.commit_errors.append(integrity_error("23514", "publish_info_status_check"))
-    with pytest.raises(PlatformUnavailableError):
-        publish_steps(SETTINGS, SOURCE_ID, JOB_ID, ["db"])
-    assert session.publishes == [] and session.profiles == []
+class TestExecutePublishRun:
+    def test_single_db_step_finalizes_run_and_step(self, monkeypatch, tmp_path):
+        """仅选 db 时也必须完整推进整体运行，不能遗留 pending + success。"""
+        make_ready_db(tmp_path)
+        session = install(monkeypatch, tmp_path)
+        result = create_publish_run(
+            SETTINGS,
+            PUBLISH_JOB_ID,
+            revision_no=1,
+            mode="custom",
+            steps=["db"],
+            step_config=None,
+        )
+        run_id = UUID(result["publish_run_id"])
+        execute_publish_run(SETTINGS, run_id)
+        run = session.runs[0]
+        step = run_step_row(session, run_id, "db")
+        assert run.status == step.status == "success"
+        assert run.started_at is not None and run.finished_at is not None
+        assert step.started_at is not None and step.finished_at is not None
+        assert session.profiles[0].publish_run_id == run_id
+
+    def test_all_success_finalizes_success(self, monkeypatch, tmp_path):
+        from tests.unit.test_ddl_publish import DEFAULT_FILES, ddl_ready
+
+        make_ready_db(tmp_path)
+        ddl_ready(tmp_path, DEFAULT_FILES)
+        session = install(monkeypatch, tmp_path)
+        result = create_publish_run(
+            SETTINGS,
+            PUBLISH_JOB_ID,
+            revision_no=1,
+            mode="default",
+            steps=None,
+            step_config=None,
+        )
+        run_id = UUID(result["publish_run_id"])
+        execute_publish_run(SETTINGS, run_id)
+
+        run = session.runs[0]
+        assert run.status == "success"
+        assert run.finished_at is not None and run.started_at is not None
+        db_step = run_step_row(session, run_id, "db")
+        ddl_step = run_step_row(session, run_id, "ddl")
+        assert db_step.status == "success"
+        assert db_step.message == "数据库画像发布完成"
+        assert db_step.input_manifest == {
+            "files": [{"path": "db/database.json", "collection_run_id": str(RUN)}]
+        }
+        assert db_step.target_manifest == {
+            "targets": [
+                {
+                    "type": "postgresql",
+                    "database": "metaweave",
+                    "schema": "public",
+                    "table": "db_profile",
+                }
+            ]
+        }
+        assert ddl_step.status == "success"
+        # 内容行与成功状态同一事务提交：行挂在本次运行上
+        assert session.profiles[0].publish_run_id == run_id
+        assert {row.publish_run_id for row in session.definitions} == {run_id}
+
+    def test_marker_removed_between_create_and_execute_is_blocked(
+        self, monkeypatch, tmp_path, caplog
+    ):
+        import logging
+
+        from tests.unit.test_ddl_publish import DEFAULT_FILES, ddl_ready
+
+        make_ready_db(tmp_path)
+        ddl_ready(tmp_path, DEFAULT_FILES)
+        session = install(monkeypatch, tmp_path)
+        result = create_publish_run(
+            SETTINGS,
+            PUBLISH_JOB_ID,
+            revision_no=1,
+            mode="default",
+            steps=None,
+            step_config=None,
+        )
+        run_id = UUID(result["publish_run_id"])
+        # 预检通过后、执行前：ddl 产物目录被清空（marker 一并消失）
+        for path in step_dir(tmp_path, "ddl").iterdir():
+            path.unlink()
+        with caplog.at_level(logging.WARNING):
+            execute_publish_run(SETTINGS, run_id)
+
+        run = session.runs[0]
+        assert run.status == "partial_success"
+        db_step = run_step_row(session, run_id, "db")
+        ddl_step = run_step_row(session, run_id, "ddl")
+        assert db_step.status == "success"
+        assert ddl_step.status == "blocked"
+        assert "ddl/" in ddl_step.message
+        # blocked 步骤未实际执行：没有开始时间，也没有输入清单
+        assert ddl_step.started_at is None
+        assert ddl_step.input_manifest is None
+        assert ddl_step.finished_at is not None
+        assert session.definitions == []  # ddl 未执行，不写定义行
+
+    def test_publisher_crash_is_failed_with_type_name(self, monkeypatch, tmp_path):
+        make_ready_db(tmp_path)
+        session = install(monkeypatch, tmp_path)
+        result = create_publish_run(
+            SETTINGS,
+            PUBLISH_JOB_ID,
+            revision_no=1,
+            mode="custom",
+            steps=["db"],
+            step_config=None,
+        )
+        run_id = UUID(result["publish_run_id"])
+
+        def crashing_publisher(*_args, **_kwargs):
+            raise RuntimeError("boom-with-detail")
+
+        monkeypatch.setitem(publish_service._PUBLISHERS, "db", crashing_publisher)
+        execute_publish_run(SETTINGS, run_id)
+
+        db_step = run_step_row(session, run_id, "db")
+        assert db_step.status == "failed"
+        assert db_step.message == "发布执行失败（RuntimeError）"
+        assert "boom-with-detail" not in db_step.message
+        assert session.runs[0].status == "failed"
+
+    def test_invalid_profile_file_fails_step_and_keeps_profiles(
+        self, monkeypatch, tmp_path
+    ):
+        write_marker(tmp_path, "db")
+        _directory, path = write_profile(tmp_path)
+        path.write_text("{", encoding="utf-8")
+        session = install(monkeypatch, tmp_path)
+        result = create_publish_run(
+            SETTINGS,
+            PUBLISH_JOB_ID,
+            revision_no=1,
+            mode="custom",
+            steps=["db"],
+            step_config=None,
+        )
+        run_id = UUID(result["publish_run_id"])
+        execute_publish_run(SETTINGS, run_id)
+        db_step = run_step_row(session, run_id, "db")
+        assert db_step.status == "failed"
+        assert db_step.message == "发布执行失败（JSONDecodeError）"
+        assert session.profiles == []
+
+    def test_mismatched_source_in_profile_fails_without_writes(
+        self, monkeypatch, tmp_path
+    ):
+        write_marker(tmp_path, "db")
+        write_profile(tmp_path, profile_document(OTHER_SOURCE_ID))
+        session = install(monkeypatch, tmp_path)
+        result = create_publish_run(
+            SETTINGS,
+            PUBLISH_JOB_ID,
+            revision_no=1,
+            mode="custom",
+            steps=["db"],
+            step_config=None,
+        )
+        execute_publish_run(SETTINGS, UUID(result["publish_run_id"]))
+        assert session.profiles == []
+        assert run_step_row(session, UUID(result["publish_run_id"]), "db").status == (
+            "failed"
+        )
+
+    def test_all_blocked_run_is_failed(self, monkeypatch, tmp_path):
+        from backend.publishing.precheck import PublishPrecheckError
+
+        write_profile(tmp_path)  # 只有文件，没有任何 marker
+        session = install(monkeypatch, tmp_path)
+        # 集中预检失败：不建运行；再模拟执行期才发现目录不可用的运行
+        with pytest.raises(PublishPrecheckError):
+            create_publish_run(
+                SETTINGS,
+                PUBLISH_JOB_ID,
+                revision_no=1,
+                mode="default",
+                steps=None,
+                step_config=None,
+            )
+        assert session.runs == []
+        from backend.jobs.run_repository import PUBLISH_RUN, create_run, new_run_id
+
+        run_id = new_run_id()
+        with publish_service.platform_session(SETTINGS) as hand_session:
+            create_run(
+                PUBLISH_RUN,
+                hand_session,
+                run_id=run_id,
+                job_id=PUBLISH_JOB_ID,
+                revision_no=1,
+                steps=["db"],
+                step_params={},
+            )
+            hand_session.commit()
+        execute_publish_run(SETTINGS, run_id)
+        run = session.runs[0]
+        assert run.status == "failed"
+        assert run_step_row(session, run_id, "db").status == "blocked"
+
+    def test_run_not_pending_is_skipped(self, monkeypatch, tmp_path):
+        make_ready_db(tmp_path)
+        session = install(monkeypatch, tmp_path)
+        from backend.jobs.run_repository import PUBLISH_RUN, create_run, new_run_id
+
+        run_id = new_run_id()
+        with publish_service.platform_session(SETTINGS) as hand_session:
+            create_run(
+                PUBLISH_RUN,
+                hand_session,
+                run_id=run_id,
+                job_id=PUBLISH_JOB_ID,
+                revision_no=1,
+                steps=["db"],
+                step_params={},
+            )
+            hand_session.commit()
+        session.runs[0].status = "running"
+        execute_publish_run(SETTINGS, run_id)
+        # 未执行任何步骤：步骤行保持 pending
+        assert run_step_row(session, run_id, "db").status == "pending"
+
+    def test_disabled_source_between_create_and_execute_blocks_step(
+        self, monkeypatch, tmp_path
+    ):
+        make_ready_db(tmp_path)
+        session = install(monkeypatch, tmp_path)
+        result = create_publish_run(
+            SETTINGS,
+            PUBLISH_JOB_ID,
+            revision_no=1,
+            mode="custom",
+            steps=["db"],
+            step_config=None,
+        )
+        run_id = UUID(result["publish_run_id"])
+        session.source.is_active = False
+        execute_publish_run(SETTINGS, run_id)
+        db_step = run_step_row(session, run_id, "db")
+        assert db_step.status == "blocked"
+        assert "禁用" in db_step.message
 
 
-def test_constraint_logs_omit_driver_text(monkeypatch, tmp_path, caplog):
-    session = install_session(monkeypatch, tmp_path)
-    write_profile(tmp_path)
-    caplog.set_level(logging.ERROR, logger="backend.publishing")
-    session.commit_errors.append(integrity_error("23505", "db_profile_pkey"))
-    with pytest.raises(RuntimeError) as caught:
-        publish_steps(SETTINGS, SOURCE_ID, JOB_ID, ["db"])
-    assert_safe_primary_key_exception(caught.value)
-    message = caplog.records[-1].message
-    assert str(SOURCE_ID) in message and str(JOB_ID) in message
-    assert "成功事务" in message
-    assert "IntegrityError" in message
-    assert "23505" in message and "db_profile_pkey" in message
-    assert LEAK_SQL not in message and LEAK_PARAM not in message
+# ---- _claim_publish_step：同名步骤被其他运行占用 → 阻断 ----
 
 
-def test_platform_read_failure_is_unavailable(monkeypatch, tmp_path):
-    session = install_session(monkeypatch, tmp_path)
-    write_profile(tmp_path)
-    session.read_error = RuntimeError("DRIVER-SECRET-XYZ")
-    with pytest.raises(PlatformUnavailableError):
-        publish_steps(SETTINGS, SOURCE_ID, JOB_ID, ["db"])
-    assert session.publishes == [] and session.profiles == []
+class TestClaimPublishStep:
+    def _claim(self, session, step_name="db", run_id=RUN):
+        return publish_service._claim_publish_step(
+            SETTINGS, WORKSPACE_ID, step_name, run_id
+        )
+
+    def test_no_conflict_marks_step_running(self, monkeypatch, tmp_path):
+        import backend.jobs.run_repository as run_repository
+
+        session = FakeSession()
+        install(monkeypatch, tmp_path, session)
+        from backend.jobs.run_repository import PUBLISH_RUN, create_run
+
+        with publish_service.platform_session(SETTINGS) as hand:
+            create_run(
+                PUBLISH_RUN,
+                hand,
+                run_id=RUN,
+                job_id=PUBLISH_JOB_ID,
+                revision_no=1,
+                steps=["db"],
+                step_params={},
+            )
+            hand.commit()
+        marked = []
+        monkeypatch.setattr(
+            # doc 10.2 §5.3：条件认领需返回 True 才继续执行 publisher
+            run_repository, "mark_step_running", lambda *a, **k: marked.append(a) or True
+        )
+        assert self._claim(session) is None
+        assert marked and marked[0][2] == RUN and marked[0][3] == "db"
+
+    def test_conflicting_running_step_blocks(self, monkeypatch, tmp_path):
+        session = FakeSession()
+        install(monkeypatch, tmp_path, session)
+        # 其他运行的同名步骤正在 running
+        session.runs.append(
+            SimpleNamespace(
+                publish_run_id=RUN2, publish_job_id=PUBLISH_JOB_ID, status="running"
+            )
+        )
+        session.run_steps.append(
+            SimpleNamespace(publish_run_id=RUN2, step_name="db", status="running")
+        )
+        reason = self._claim(session, step_name="db", run_id=RUN)
+        assert reason is not None
+        assert "正在执行" in reason
+        assert session.rolled_back == 1
+
+    def test_missing_workspace_blocks(self, monkeypatch, tmp_path):
+        session = FakeSession()
+        session.workspace = None
+        install(monkeypatch, tmp_path, session)
+        assert self._claim(session) == "工作区不存在"
 
 
-def test_new_publish_ids_differ_from_each_other(monkeypatch, tmp_path):
-    install_session(monkeypatch, tmp_path)
-    write_profile(tmp_path)
-    first = UUID(publish_steps(SETTINGS, SOURCE_ID, JOB_ID, ["db"])["publish_id"])
-    second = UUID(publish_steps(SETTINGS, SOURCE_ID, JOB_ID, ["db"])["publish_id"])
-    assert first != second
+def test_finish_success_rolls_back_when_row_already_terminal(monkeypatch, tmp_path):
+    """doc 10.2 §6.1（Kimi R2 发现 2）：步骤行已被并发终结时，_finish_success
+    抛错使 PG 内容写入随同一事务回滚，不产生"内容已写而状态未变"。"""
+    session = FakeSession()
+    install(monkeypatch, tmp_path, session)
+    import backend.publishing.publish_service as _ps
+    from backend.publishing.publish_service import _finish_success
+
+    monkeypatch.setattr(
+        _ps, "finish_step", lambda *args, **kwargs: "failed"
+    )  # 模拟条件 UPDATE 未生效（行已 failed）
+
+    with pytest.raises(RuntimeError, match="内容写入回滚"):
+        _finish_success(
+            session,
+            RUN,
+            "db",
+            "数据库画像发布完成",
+            input_manifest=None,
+            target_manifest=None,
+        )

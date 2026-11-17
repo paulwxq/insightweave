@@ -21,9 +21,7 @@ def test_llm_failure_saves_rule_document_once_and_marks_result_failed(tmp_path):
     output_path = tmp_path / "orders.public.orders.json"
     generator = MetadataGenerator.__new__(MetadataGenerator)
     generator.config = {}
-    generator._pending_json_documents = [
-        (rule_document, output_path, "public.orders")
-    ]
+    generator._pending_json_documents = [(rule_document, output_path, "public.orders")]
     generator.formatter = MagicMock()
     generator.formatter.save_json_document.return_value = output_path
     result = GenerationResult(success=True, processed_tables=1)
@@ -74,9 +72,7 @@ def test_successful_enhancement_is_saved_once_as_final_document(tmp_path):
     output_path = tmp_path / "orders.public.orders.json"
     generator = MetadataGenerator.__new__(MetadataGenerator)
     generator.config = {}
-    generator._pending_json_documents = [
-        ({"rule": True}, output_path, "public.orders")
-    ]
+    generator._pending_json_documents = [({"rule": True}, output_path, "public.orders")]
     generator.formatter = MagicMock()
     generator.formatter.save_json_document.return_value = output_path
     result = GenerationResult(success=True, processed_tables=1)

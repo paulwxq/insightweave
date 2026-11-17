@@ -1,0 +1,9 @@
+{"probe": "baseline", "versions": {"deepagents": "0.7.34", "langchain": "1.4.9", "langgraph": "1.2.20"}, "source_sha256": {"src/modules/db_deepagent/agent.py": "d67b7db1ceafc2ffa2ab288e620aa3da96e1f382e990cecbe1fd918612157136", "src/modules/db_deepagent/runner.py": "412effb7a46e6974eae6f0a724d5888ac9d7331c47bbbcb272c7b8f028759c24", "src/modules/db_deepagent/state.py": "a4c1cc00dc5f235523dc9ef287218972bae9e8fbe8f7d726e4f56cb9f57b772d", "src/modules/db_deepagent/tools/_envelope.py": "36e2c70ee186cd712f6b1bb9ecb10321296922a983e72e0102a875285830b8e0", "src/modules/db_deepagent/tools/final_answer.py": "ce91e8817f6963901477d8ed92efb7d7d67e9b11f1bd0acffe4521f2ea00b8f4", "src/modules/db_deepagent/services/sql_pipeline.py": "73ac75d137296608bebb8aaa4829151aa757aedbba4d9fd718b43c0102749e95", "src/modules/db_deepagent/services/time_resolver.py": "63c7ff7206efce100096243c2249651e0728699a88e77918e40bf6e28867dea8"}}
+{"probe": "large_json", "chars": 95713, "json_valid": true, "columns_preserved": 300}
+{"probe": "completion_without_task_ledger", "executions": 2, "cited": 1, "accepted_status": "completed"}
+{"probe": "sql_success_model_failure", "status": "failed", "answer": "", "evidence_count": 1}
+{"probe": "time_expression", "text": "前天", "accepted": false, "error": "time_params_mismatch"}
+{"probe": "time_expression", "text": "最近三周", "accepted": false, "error": "time_params_mismatch"}
+{"probe": "time_expression", "text": "最近三个月", "accepted": false, "error": "time_params_mismatch"}
+{"probe": "time_expression", "text": "最近一年", "accepted": false, "error": "time_params_mismatch"}
+{"probe": "tool_node_concurrency", "peak_active_calls": 2}

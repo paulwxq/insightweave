@@ -3,7 +3,7 @@
 将生成产物加载到向量库（Milvus）与图库（Neo4j）：
 - --type 必选（仅允许传入一次）：table_schema / cql 单类（dim_value 已随 doc 22.2
   移除、sql 已随 doc 25.2 移除，均由 Web 发布替代）
-- table_schema 仅供开发调试：必须同时传 --source_id / --job_id，直接读取该工作区的
+- table_schema 仅供开发调试：必须同时传 --source_id / --workspace_id，直接读取该工作区的
   JSON/MD 并按 source_id 替换共用集合中的记录；不访问平台库、不登记 publish_info、
   不改变正式 current（见 doc 20.1 §10.7）
 - 任一类型失败 → 退出码非 0
@@ -38,7 +38,7 @@ def _run_single_load(
     expected_clean_target: object = None,
     emit_clean_warning: bool = True,
     source_id: str | None = None,
-    job_id: str | None = None,
+    workspace_id: str | None = None,
 ) -> Dict[str, object]:
     """执行单个类型的完整加载（原 load 命令主体提取，契约见 docs/update/24 §3.1）。
 
@@ -80,7 +80,9 @@ def _run_single_load(
         # 不清理任何目标，任务失败（exit 1）
         # table_schema 不清空集合（doc 20.1 §10.7）：--clean 与否都只按当前 source_id 替换，
         # 因此既不解析 clean 目标，也不提示清空整张集合。
-        if clean and load_type != "table_schema":
+        # cql 同理（doc 4 §4.4）：普通发布按源替换，全库清空仅属一次性维护
+        # 操作，--clean 对 cql 无额外清理。
+        if clean and load_type not in ("table_schema", "cql"):
             from metaweave.core.clean_targets import resolve_clean_target
 
             try:
@@ -131,7 +133,7 @@ def _run_single_load(
 
                 if "loaders" not in full_config:
                     full_config["loaders"] = loaders_cfg
-                configure_managed_loader(loaders_cfg, source_id, job_id)
+                configure_managed_loader(loaders_cfg, source_id, workspace_id)
         except ValueError as e:
             click.echo(f"❌ 配置错误: {e}", err=True)
             return _fail_result(str(e), time.perf_counter() - start)
@@ -148,6 +150,11 @@ def _run_single_load(
             click.echo(
                 "ℹ️  table_schema 不会清空集合：将先写入本批记录，再仅删除当前 source_id "
                 "下不属于本批次的旧记录（--clean 对该类型无额外清理）"
+            )
+        elif clean and load_type == "cql":
+            click.echo(
+                "ℹ️  cql 不再清空整库（doc 4）：按脚本头 source_id 整源替换，"
+                "单一数据事务内删除→写入→按源核验（--clean 对该类型无额外清理）"
             )
         elif clean and emit_clean_warning:
             click.echo("")
@@ -170,8 +177,8 @@ def _run_single_load(
 
         # 支持 clean 参数的加载器（dim 别名已从 CLI 移除，doc 27 §3）
         if load_type == "table_schema":
-            # 调试批次 UUID 仅作 Milvus publish_id 标记，不登记平台库（doc 20.1 §10.7）
-            click.echo(f"🏷️  调试批次 UUID: {getattr(loader, 'publish_id', '')}")
+            # 调试批次 UUID 仅作 Milvus publish_run_id 标记，不登记平台库（doc 20.1 §10.7）
+            click.echo(f"🏷️  调试批次 UUID: {getattr(loader, 'publish_run_id', '')}")
             try:
                 if not loader.validate():
                     click.echo("❌ 验证失败", err=True)
@@ -184,7 +191,9 @@ def _run_single_load(
             if not loader.validate():
                 click.echo("❌ 验证失败", err=True)
                 return _fail_result("验证失败", time.perf_counter() - start)
-            result = loader.load(clean=clean)
+            # 按源替换加载（doc 4）：CLI 调试路径未传 source_id 时由脚本头
+            # ``// source_id:`` 决定删除范围；旧格式脚本会被拒绝
+            result = loader.load()
         else:
             result = loader.execute()
 
@@ -294,15 +303,15 @@ def _run_single_load(
 @click.option(
     "--clean",
     is_flag=True,
-    help="加载前先清空目标库（cql 清空 Neo4j 整库）；"
-    "table_schema 不清空共用集合，无论是否传入都只按当前 source_id 替换记录",
+    help="（已失效保留兼容）cql/table_schema 均按 source_id 替换，"
+    "不再清空整库或整集合",
 )
 @click.option(
     "--source_id",
-    type=click.UUID,
-    help="table_schema 数据源 UUID（必填，与 --job_id 同时传入）",
+    type=str,
+    help="table_schema 数据源短 ID db_src_N（必填，与 --workspace_id 同时传入）",
 )
-@click.option("--job_id", type=click.UUID, help="table_schema 采集作业 UUID（必填）")
+@click.option("--workspace_id", type=str, help="table_schema 工作区短 ID ws_N（必填）")
 @click.option("--debug", is_flag=True, help="启用调试模式")
 def rag_load_command(
     load_type: Tuple[str, ...],
@@ -310,7 +319,7 @@ def rag_load_command(
     clean: bool,
     debug: bool,
     source_id=None,
-    job_id=None,
+    workspace_id=None,
 ):
     """RAG 数据加载：将生成产物加载到向量库（Milvus）与图库（Neo4j）
 
@@ -318,7 +327,7 @@ def rag_load_command(
 
     \b
     - table_schema : 表结构语义（仅供调试）→ 共用向量集合（MD + 同名 JSON 产物），
-                     必须传 --source_id / --job_id，不访问平台库、不写发布记录
+                     必须传 --source_id / --workspace_id，不访问平台库、不写发布记录
     - cql          : Cypher 脚本   → Neo4j 图库（cql 产物）
 
     任一失败最终退出码非 0。
@@ -327,7 +336,7 @@ def rag_load_command(
 
     \b
         # 调试加载某个采集作业的 MD + JSON（按 source_id 替换共用集合中的记录）
-        metaweave rag_load --type table_schema --source_id <UUID> --job_id <UUID>
+        metaweave rag_load --type table_schema --source_id <db_src_N> --workspace_id <ws_N>
     """
     # 归一化与重复/缺省检查（doc 27 §2/§3.1：multiple 元组 → 单值，
     # 重复传入即报错，缺省中文提示；均先于任何加载动作）
@@ -338,13 +347,15 @@ def rag_load_command(
     selected_type = load_type[0] if load_type else None
     if not selected_type:
         raise click.UsageError("必须指定 --type（table_schema/cql）")
-    if (source_id is None) != (job_id is None):
-        raise click.UsageError("--source_id 和 --job_id 必须同时传入")
+    if (source_id is None) != (workspace_id is None):
+        raise click.UsageError("--source_id 和 --workspace_id 必须同时传入")
     if source_id is not None and selected_type != "table_schema":
-        raise click.UsageError("--source_id / --job_id 当前仅用于 --type table_schema")
+        raise click.UsageError(
+            "--source_id / --workspace_id 当前仅用于 --type table_schema"
+        )
     if source_id is None and selected_type == "table_schema":
         raise click.UsageError(
-            "--type table_schema 必须同时传入 --source_id 和 --job_id（不再读取全局 output/md、output/json）"
+            "--type table_schema 必须同时传入 --source_id 和 --workspace_id（不再读取全局 output/md、output/json）"
         )
 
     config_path = Path(config)
@@ -358,7 +369,7 @@ def rag_load_command(
             clean,
             debug,
             source_id=source_id,
-            job_id=job_id,
+            workspace_id=workspace_id,
         )
 
     # Abort 一律由命令函数发出（helper 只返回结果）；退出码 1

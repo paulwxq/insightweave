@@ -13,7 +13,10 @@ from pathlib import Path
 from metaweave.core.cql_generator.writer import CypherWriter
 from metaweave.core.cql_generator.models import (
     RelationshipFilterStats,
-    TableNode, ColumnNode, HASColumnRelation, JOINOnRelation
+    TableNode,
+    ColumnNode,
+    HASColumnRelation,
+    JOINOnRelation,
 )
 
 
@@ -23,7 +26,9 @@ def sample_data():
     db = "test_db"
     tables = [
         TableNode(full_name="public.users", schema="public", name="users", database=db),
-        TableNode(full_name="public.orders", schema="public", name="orders", database=db),
+        TableNode(
+            full_name="public.orders", schema="public", name="orders", database=db
+        ),
     ]
     columns = [
         ColumnNode(
@@ -63,7 +68,7 @@ def sample_data():
             dst_full_name="public.users",
             cardinality="N:1",
             source_columns=["user_id"],
-            target_columns=["id"]
+            target_columns=["id"],
         )
     ]
     return tables, columns, has_column_rels, join_on_rels
@@ -89,7 +94,7 @@ class TestCypherWriterMetadata:
                 candidate_count=len(join_on_rels),
                 threshold_passed_count=len(join_on_rels),
                 final_count=len(join_on_rels),
-            )
+            ),
         )
 
         # 验证文件已创建
@@ -113,7 +118,7 @@ class TestCypherWriterMetadata:
                 candidate_count=len(join_on_rels),
                 threshold_passed_count=len(join_on_rels),
                 final_count=len(join_on_rels),
-            )
+            ),
         )
 
         content = metadata_file.read_text(encoding="utf-8")
@@ -159,7 +164,7 @@ class TestCypherWriterMetadata:
                 candidate_count=len(join_on_rels),
                 threshold_passed_count=len(join_on_rels),
                 final_count=len(join_on_rels),
-            )
+            ),
         )
 
         content = metadata_file.read_text(encoding="utf-8")
@@ -193,7 +198,7 @@ class TestCypherWriterMetadata:
                 candidate_count=len(join_on_rels),
                 threshold_passed_count=len(join_on_rels),
                 final_count=len(join_on_rels),
-            )
+            ),
         )
         content_1 = metadata_file_1.read_text(encoding="utf-8")
         assert "/tmp/json_first" in content_1
@@ -211,7 +216,7 @@ class TestCypherWriterMetadata:
                 candidate_count=len(join_on_rels),
                 threshold_passed_count=len(join_on_rels),
                 final_count=len(join_on_rels),
-            )
+            ),
         )
         content_2 = metadata_file_2.read_text(encoding="utf-8")
 
@@ -233,7 +238,7 @@ class TestCypherWriterMetadata:
             step_name="cql",
             json_dir=Path("/tmp/json"),
             rel_dir=Path("/tmp/rel"),
-            filter_stats=RelationshipFilterStats()
+            filter_stats=RelationshipFilterStats(),
         )
 
         content = metadata_file.read_text(encoding="utf-8")
@@ -272,7 +277,7 @@ class TestCypherWriterMetadata:
                 candidate_count=len(join_on_rels),
                 threshold_passed_count=len(join_on_rels),
                 final_count=len(join_on_rels),
-            )
+            ),
         )
 
         content = metadata_file.read_text(encoding="utf-8")
@@ -297,7 +302,7 @@ class TestCypherWriterMetadata:
                 candidate_count=len(join_on_rels),
                 threshold_passed_count=len(join_on_rels),
                 final_count=len(join_on_rels),
-            )
+            ),
         )
 
         content = metadata_file.read_text(encoding="utf-8")

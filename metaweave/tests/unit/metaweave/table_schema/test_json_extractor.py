@@ -32,4 +32,3 @@ def test_time_columns_variants():
         )
         cols = extractor.get_time_columns()
         assert ("c" in cols) == expect_match
-

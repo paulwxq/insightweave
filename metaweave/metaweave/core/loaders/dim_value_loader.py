@@ -1,6 +1,6 @@
 """维度值加载器：将维表文本列向量化后写入 Milvus。
 
-doc 22.2 改造：集合 schema 换为 col_id 显式主键（四段拼接）+ source_id/publish_id，
+doc 22.2 改造：集合 schema 换为 col_id 显式主键（四段拼接）+ source_id/publish_run_id，
 字段改名 col_value_embedding / updated_at；写入走 upsert + 按源整份替换；
 发布链路以构造参数注入拦截时归一好的 DimTablesConfig（不重读文件）。
 CLI 入口已随 doc 22.2 移除，本加载器仅服务 Web 发布链路与测试。
@@ -56,7 +56,7 @@ class DimValueLoader(BaseLoader):
         embedding_service_cls: Type[EmbeddingService] = EmbeddingService,
         metadata_config: Optional[Dict[str, Any]] = None,
         source_id: Optional[str] = None,
-        publish_id: Optional[str] = None,
+        publish_run_id: Optional[str] = None,
         dim_tables: Optional[DimTablesConfig] = None,
     ):
         super().__init__(config)
@@ -66,13 +66,13 @@ class DimValueLoader(BaseLoader):
         self.pg_manager_cls = pg_manager_cls
         self.embedding_service_cls = embedding_service_cls
 
-        if not source_id or not publish_id:
+        if not source_id or not publish_run_id:
             # doc 22.2 §13.2：CLI 已移除，发布链路必传——显式要求注入
             raise ConfigurationError(
-                "DimValueLoader 需要 source_id 与 publish_id（Web 发布链路注入）"
+                "DimValueLoader 需要 source_id 与 publish_run_id（Web 发布链路注入）"
             )
         self.source_id = str(source_id)
-        self.publish_id = str(publish_id)
+        self.publish_run_id = str(publish_run_id)
         # doc 22.2 审核修订 19：注入拦截时归一好的配置，加载器不再重读文件
         self._injected_dim_tables = dim_tables
 
@@ -456,7 +456,7 @@ class DimValueLoader(BaseLoader):
             self._replacement_started = True  # 删除调用前确保已置位（审核修订 16）
             self._milvus_client.delete_by_expr(
                 self.collection_name,
-                f'source_id == "{self.source_id}" and publish_id != "{self.publish_id}"',
+                f'source_id == "{self.source_id}" and publish_run_id != "{self.publish_run_id}"',
             )
             result["replacement_started"] = True
 
@@ -513,7 +513,7 @@ class DimValueLoader(BaseLoader):
                 name="col_id", dtype=DataType.VARCHAR, max_length=2048, is_primary=True
             ),
             FieldSchema(name="source_id", dtype=DataType.VARCHAR, max_length=36),
-            FieldSchema(name="publish_id", dtype=DataType.VARCHAR, max_length=36),
+            FieldSchema(name="publish_run_id", dtype=DataType.VARCHAR, max_length=36),
             FieldSchema(name="table_name", dtype=DataType.VARCHAR, max_length=256),
             FieldSchema(name="col_name", dtype=DataType.VARCHAR, max_length=128),
             FieldSchema(name="col_value", dtype=DataType.VARCHAR, max_length=1024),
@@ -714,7 +714,7 @@ class DimValueLoader(BaseLoader):
                             f"{rec['col_name']}:{rec['col_value']}"
                         ),
                         "source_id": self.source_id,
-                        "publish_id": self.publish_id,
+                        "publish_run_id": self.publish_run_id,
                         "col_value_embedding": (
                             vec.tolist() if hasattr(vec, "tolist") else vec
                         ),

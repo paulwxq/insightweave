@@ -9,12 +9,8 @@ import logging
 import math
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from uuid import UUID
-
-from sqlalchemy.orm import Session
 
 from backend.data_sources.repository import get_db_source
-from backend.jobs.repository import assert_workspace_owner, get_step_row
 from backend.profile_loading.db_loader import (
     MetaLoadSourceDisabledError,
     MetaLoadSourceNotFoundError,
@@ -48,29 +44,7 @@ class RegistrationSnapshot:
     selected_schemas: tuple[str, ...]
 
 
-def inspect_json_profile_context(
-    session: Session, source_id: UUID, job_id: UUID
-) -> tuple[str | None, datetime | None]:
-    """检查数据源、工作区归属和 json 步骤状态；不读文件、不写库。
-
-    语义与 inspect_ddl_definition_context 一致：返回
-    (最近状态, 运行标识)。
-    """
-    source = get_db_source(session, source_id)
-    if source is None:
-        raise MetaLoadSourceNotFoundError("未找到指定 source_id 的数据源")
-    if not source.is_active:
-        raise MetaLoadSourceDisabledError("指定数据源已禁用，不能加载画像")
-    assert_workspace_owner(session, job_id, source_id)
-    step = get_step_row(session, job_id, JSON_STEP)
-    if step is None:
-        return None, None
-    return step.last_status, step.updated_at
-
-
-def read_registration_snapshot(
-    session: Session, source_id: UUID
-) -> RegistrationSnapshot:
+def read_registration_snapshot(session, source_id: str) -> RegistrationSnapshot:
     """读取启用状态登记行的库名、Schema 范围与版本标识（doc 19.2 §7.4）。"""
     source = get_db_source(session, source_id)
     if source is None:
@@ -128,13 +102,15 @@ def _verify_json_manifest(json_dir, database_name: str) -> list[str]:
     return files
 
 
-def read_managed_json_documents(source_id, job_id, database_name: str) -> list[dict]:
+def read_managed_json_documents(
+    source_id, workspace_id, database_name: str
+) -> list[dict]:
     """读取并校验受管目录中的全部对象 JSON，返回内存快照（doc 19.2 §7.2）。
 
     v3 校验经 MetadataDocument.from_dict，身份与文件名逐字核对；逐文件
     读取而非依赖 JsonLoader 的库名前缀枚举。错误只报文件名与类别。
     """
-    json_dir = resolve_json_output_dir(source_id, job_id)
+    json_dir = resolve_json_output_dir(source_id, workspace_id)
     files = _verify_json_manifest(json_dir, database_name)
     documents: list[dict] = []
     for name in files:
@@ -163,30 +139,29 @@ def read_managed_json_documents(source_id, job_id, database_name: str) -> list[d
     return documents
 
 
-def check_json_output_ready(source_id, job_id, database_name: str | None) -> bool:
+def check_json_output_ready(source_id, workspace_id, database_name: str | None) -> bool:
     """发布预检：受管 JSON 目录、清单与对象文件就绪（只读，不解析映射）。
 
-    步骤未成功时调用方传 None：产物核对对 publishable 已无影响，直接
-    返回 False，不读登记快照。
+    登记不可用时调用方传 None：直接返回 False，不读登记快照。
     """
     if database_name is None:
         return False
     try:
-        read_managed_json_documents(source_id, job_id, database_name)
+        read_managed_json_documents(source_id, workspace_id, database_name)
         return True
     except JsonPublishInputError as exc:
         logger.warning(
-            "JSON 预检清单核对未通过 source_id=%s job_id=%s reason=%s",
+            "JSON 预检清单核对未通过 source_id=%s workspace_id=%s reason=%s",
             source_id,
-            job_id,
+            workspace_id,
             str(exc),
         )
         return False
     except (ValueError, OSError) as exc:
         logger.warning(
-            "JSON 预检产物目录不可用 source_id=%s job_id=%s type=%s",
+            "JSON 预检产物目录不可用 source_id=%s workspace_id=%s type=%s",
             source_id,
-            job_id,
+            workspace_id,
             type(exc).__name__,
         )
         return False
@@ -403,7 +378,7 @@ def _parse_aware_timestamp(value):
     return parsed.astimezone(timezone.utc)
 
 
-def _table_row(document: dict, *, source_id, job_id, publish_id) -> dict:
+def _table_row(document: dict, *, source_id, publish_run_id) -> dict:
     """§7.3/§6.3 映射：显式空数组与缺失节点入库后仍可区分。"""
     info = document["object_info"]
     columns = document["column_profiles"]
@@ -467,8 +442,7 @@ def _table_row(document: dict, *, source_id, job_id, publish_id) -> dict:
         "object_name": info["object_name"],
         "db_name": info["database"],
         "object_type": info["object_type"],
-        "publish_id": publish_id,
-        "job_id": job_id,
+        "publish_run_id": publish_run_id,
         "metadata_version": document["metadata_version"],
         "generated_timestamp": _parse_aware_timestamp(
             document.get("generated_timestamp")
@@ -523,7 +497,7 @@ def _column_rows(document: dict, table_row: dict) -> list[dict]:
                 "source_id": table_row["source_id"],
                 "schema_name": table_row["schema_name"],
                 "object_name": table_row["object_name"],
-                "publish_id": table_row["publish_id"],
+                "publish_run_id": table_row["publish_run_id"],
                 "column_name": name,
                 "ordinal_position": column["ordinal_position"],
                 "data_type": column["data_type"],
@@ -548,12 +522,11 @@ def _column_rows(document: dict, table_row: dict) -> list[dict]:
 
 def build_profile_rows(
     source_id,
-    job_id,
-    publish_id,
+    publish_run_id,
     documents: list[dict],
     selected_schemas,
 ) -> tuple[list[dict], list[dict]]:
-    """校验并映射文档快照为两表行（doc 19.2 §7.2/§7.3）。
+    """校验并映射文档快照为两表行（doc 19.2 §7.2/§7.3、6.1 §10.1）。
 
     返回 (table_profile 行, table_column_profile 行)；任一对象校验失败
     整批拒绝。错误消息只含对象/字段与类别，不含 JSON 内容。
@@ -563,9 +536,7 @@ def build_profile_rows(
     for document in documents:
         _validate_document(document, selected_schemas)
     for document in documents:
-        row = _table_row(
-            document, source_id=source_id, job_id=job_id, publish_id=publish_id
-        )
+        row = _table_row(document, source_id=source_id, publish_run_id=publish_run_id)
         table_rows.append(row)
         column_rows.extend(_column_rows(document, row))
     return table_rows, column_rows

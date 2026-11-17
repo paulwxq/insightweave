@@ -19,6 +19,9 @@ from metaweave.core.metadata.connector import DatabaseConnector
 from metaweave.core.metadata.comment_utils import normalize_comment
 from metaweave.core.metadata.generation_config import MetadataGenerationConfig
 from metaweave.core.metadata.metadata_document import MetadataDocument
+from metaweave.core.dim_value.recommendation import (
+    validate_dimension_value_recommendation,
+)
 from metaweave.services.llm_service import LLMService
 from metaweave.core.metadata.formatter import validate_json_output_options
 from metaweave.utils.file_utils import atomic_write_json
@@ -558,6 +561,30 @@ class JsonLlmEnhancer:
         table_profile["table_category"] = llm_category
         table_profile["confidence"] = llm_confidence
         table_profile["inference_basis"] = ["llm_inferred"]
+        self._merge_dimension_value_recommendation(enhanced, llm_result)
+
+    def _merge_dimension_value_recommendation(
+        self,
+        enhanced: Dict,
+        llm_result: Dict,
+    ) -> None:
+        """分类成功后合并维度值字段推荐；非法推荐整组清空（doc 7.1 §5.2）。"""
+        table_profile = enhanced["table_profile"]
+        if table_profile["table_category"] != "dim":
+            # 非维表统一保存空列表与 null，避免残留与当前分类矛盾的推荐
+            table_profile["dimension_value_columns"] = []
+            table_profile["dimension_value_confidence"] = None
+            return
+        columns, confidence, reason = validate_dimension_value_recommendation(
+            llm_result.get("dimension_value_columns"),
+            llm_result.get("dimension_value_confidence"),
+            enhanced["column_profiles"].keys(),
+        )
+        if reason:
+            table_name = enhanced["object_info"]["object_name"]
+            logger.warning("维度值字段推荐整组清空（表 %s）: %s", table_name, reason)
+        table_profile["dimension_value_columns"] = columns
+        table_profile["dimension_value_confidence"] = confidence
 
     def _merge_table_comment(self, enhanced: Dict, llm_result: Dict):
         """合并表注释"""
@@ -704,6 +731,13 @@ class JsonLlmEnhancer:
 ## 任务二：{"重新生成并覆盖注释" if self.overwrite_existing else "补全缺失注释"}
 {chr(10).join(comment_tasks)}
 
+## 任务三：维度值字段推荐（仅当任务一判断为 dim）
+1) 仅当表类型为 dim 时，从已提供的字段中推荐**最多一个**最适合作为维度值检索入口的业务名称、标签或别名字段
+2) 优先选择能代表实体的业务名称，例如产品名称、地区名称、客户名称；不要因某字段是主键或技术标识就选它
+3) 多个字段都合适但无法择优时，返回空列表，不要返回多个候选
+4) 只能从已提供的字段中选择；无法判断时返回 `"dimension_value_columns": []` 和 `"dimension_value_confidence": null`
+5) dimension_value_confidence 是对该推荐的自评置信度（0-1 之间的小数），无推荐时为 null；不输出推荐理由
+
 **重要**：
 - 仅为上述明确列出的字段生成注释，不要生成其他字段的注释
 - 如果本次没有需要生成列注释的字段，请返回 `"column_comments": {{}}`（空对象）
@@ -716,6 +750,8 @@ class JsonLlmEnhancer:
   "table_category": "<fact|dim|bridge|unknown>",
   "confidence": 0.95,
   "reason": "判断理由",
+  "dimension_value_columns": ["<仅维表推荐一个字段名，非维表或无法判断时为空数组>"],
+  "dimension_value_confidence": 0.92,
   "table_comment": "表的业务含义（仅当任务二需要时）",
   "column_comments": {{
     "<col_name>": "列注释"
@@ -742,11 +778,20 @@ class JsonLlmEnhancer:
 3) bridge：桥接表，特征：用于多对多关系，通常只包含外键
 4) unknown：无法判断时选择，不要强行猜测
 
+## 任务：维度值字段推荐（仅当判断为 dim）
+1) 仅当表类型为 dim 时，从已提供的字段中推荐**最多一个**最适合作为维度值检索入口的业务名称、标签或别名字段
+2) 优先选择能代表实体的业务名称，例如产品名称、地区名称、客户名称；不要因某字段是主键或技术标识就选它
+3) 多个字段都合适但无法择优时，返回空列表，不要返回多个候选
+4) 只能从已提供的字段中选择；无法判断时返回 `"dimension_value_columns": []` 和 `"dimension_value_confidence": null`
+5) dimension_value_confidence 是对该推荐的自评置信度（0-1 之间的小数），无推荐时为 null；不输出推荐理由
+
 ## 输出格式（JSON）
 {{
   "table_category": "<fact|dim|bridge|unknown>",
   "confidence": 0.95,
-  "reason": "判断理由（1-2句话）"
+  "reason": "判断理由（1-2句话）",
+  "dimension_value_columns": ["<仅维表推荐一个字段名，非维表或无法判断时为空数组>"],
+  "dimension_value_confidence": 0.92
 }}
 
 请只返回 JSON，不要包含其他内容。

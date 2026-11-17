@@ -10,7 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from src.tests.db_deepagent.conftest import FakeStore
+from src.tests.db_deepagent.conftest import TEST_SOURCE_ID, FakeStore
 
 pytestmark = pytest.mark.unit
 
@@ -39,7 +39,9 @@ def _install_session_stubs(monkeypatch, persistence_obj):
     import src.modules.db_deepagent.services as services_mod
 
     fake_services = SimpleNamespace(config=None, close=lambda: None)
-    monkeypatch.setattr(services_mod, "build_services", lambda cfg: fake_services)
+    monkeypatch.setattr(
+        services_mod, "build_services", lambda cfg, source_id=None: fake_services
+    )
     monkeypatch.setattr(
         checkpoint_mod,
         "build_persistence",
@@ -65,7 +67,9 @@ class TestSessionRunnerWiring:
             checkpointer=object(), store=FakeStore(), close=lambda: None
         )
         _install_session_stubs(monkeypatch, persistence)
-        session = _Session(db_agent_config, session_id="s-wire")
+        session = _Session(
+            db_agent_config, session_id="s-wire", source_id=TEST_SOURCE_ID
+        )
         assert session.runner.persistence is persistence
         session.close()
 
@@ -78,7 +82,10 @@ class TestSessionRunnerWiring:
         )
         _install_session_stubs(monkeypatch, persistence)
         session = _Session(
-            db_agent_config, session_id="s-wire-mem", memory_persistence=True
+            db_agent_config,
+            session_id="s-wire-mem",
+            source_id=TEST_SOURCE_ID,
+            memory_persistence=True,
         )
         assert session.runner.persistence is None
         session.close()
@@ -102,10 +109,192 @@ class TestSessionRunnerWiring:
 
         _install_session_stubs(monkeypatch, persistence)
         monkeypatch.setattr(cli_mod._Session, "_open_platform_pool", _no_pool)
-        session = _Session(cfg, session_id="s-wire-cfg-mem")
+        session = _Session(cfg, session_id="s-wire-cfg-mem", source_id=TEST_SOURCE_ID)
         assert session.runner.persistence is None
         assert pool_calls == []
         session.close()
+
+
+# ============================================================================
+# _Session 后续构造失败的资源回收（doc 4 §4.7）
+
+
+class TestSessionConstructionCleanup:
+    def _stubs(self, monkeypatch, *, persistence, agent_raises=False):
+        import src.modules.db_deepagent.agent as agent_mod
+        import src.modules.db_deepagent.cli as cli_mod
+        import src.modules.db_deepagent.persistence.archive as archive_mod
+        import src.modules.db_deepagent.persistence.checkpoint as checkpoint_mod
+        import src.modules.db_deepagent.runner as runner_mod
+        import src.modules.db_deepagent.services as services_mod
+        from types import SimpleNamespace
+
+        services_closed = []
+        fake_services = SimpleNamespace(
+            config=None, close=lambda: services_closed.append("services")
+        )
+        monkeypatch.setattr(
+            services_mod,
+            "build_services",
+            lambda cfg, source_id=None: fake_services,
+        )
+        monkeypatch.setattr(
+            checkpoint_mod,
+            "build_persistence",
+            lambda cfg, platform_pool=None: persistence,
+        )
+
+        def fake_build_db_agent(*a, **k):
+            if agent_raises:
+                raise RuntimeError("agent 装配失败")
+            return SimpleNamespace(agent=object())
+
+        monkeypatch.setattr(agent_mod, "build_db_agent", fake_build_db_agent)
+        monkeypatch.setattr(archive_mod, "QaArchive", lambda store: SimpleNamespace())
+        monkeypatch.setattr(runner_mod, "DbAgentRunner", _RecordingRunner)
+        monkeypatch.setattr(
+            cli_mod._Session, "_open_platform_pool", staticmethod(lambda cfg: object())
+        )
+        _RecordingRunner.instances.clear()
+        return fake_services, services_closed
+
+    def test_agent_failure_closes_persistence_and_services(
+        self, monkeypatch, db_agent_config
+    ):
+        """services 建成后 agent 装配失败：persistence 与 services 均回收。"""
+        from types import SimpleNamespace
+
+        from src.modules.db_deepagent.cli import _Session
+
+        persistence = SimpleNamespace(
+            checkpointer=object(), store=FakeStore(), close=lambda: closed.append("p")
+        )
+        closed = []
+        _services, services_closed = self._stubs(
+            monkeypatch, persistence=persistence, agent_raises=True
+        )
+        with pytest.raises(RuntimeError, match="agent 装配失败"):
+            _Session(db_agent_config, session_id="s-x", source_id=TEST_SOURCE_ID)
+        assert services_closed == ["services"]
+        assert closed == ["p"]
+
+    def test_platform_pool_failure_closes_services(self, monkeypatch, db_agent_config):
+        """_open_platform_pool 失败（清理保护范围内）：services 必须回收。"""
+        import src.modules.db_deepagent.cli as cli_mod
+        import src.modules.db_deepagent.services as services_mod
+        from types import SimpleNamespace
+
+        from src.modules.db_deepagent.cli import _Session
+
+        services_closed = []
+        monkeypatch.setattr(
+            services_mod,
+            "build_services",
+            lambda cfg, source_id=None: SimpleNamespace(
+                config=None, close=lambda: services_closed.append("services")
+            ),
+        )
+
+        def pool_boom(_self_or_cfg, cfg=None):
+            raise RuntimeError("平台库连接失败")
+
+        monkeypatch.setattr(cli_mod._Session, "_open_platform_pool", pool_boom)
+        with pytest.raises(RuntimeError, match="平台库连接失败"):
+            _Session(
+                db_agent_config,
+                session_id="s-pool",
+                source_id=TEST_SOURCE_ID,
+            )
+        assert services_closed == ["services"]
+
+    def test_persistence_failure_closes_services(self, monkeypatch, db_agent_config):
+        """build_persistence 失败（平台池未被接管）：services 仍回收。"""
+        import src.modules.db_deepagent.cli as cli_mod
+        import src.modules.db_deepagent.persistence.checkpoint as checkpoint_mod
+        import src.modules.db_deepagent.services as services_mod
+        from types import SimpleNamespace
+
+        from src.modules.db_deepagent.cli import _Session
+
+        services_closed = []
+        monkeypatch.setattr(
+            services_mod,
+            "build_services",
+            lambda cfg, source_id=None: SimpleNamespace(
+                config=None, close=lambda: services_closed.append("services")
+            ),
+        )
+        pools_closed = []
+
+        def boom(cfg, platform_pool=None):
+            raise RuntimeError("平台池不可用")
+
+        monkeypatch.setattr(checkpoint_mod, "build_persistence", boom)
+        monkeypatch.setattr(
+            cli_mod._Session,
+            "_open_platform_pool",
+            staticmethod(
+                lambda cfg: SimpleNamespace(close=lambda: pools_closed.append("pool"))
+            ),
+        )
+        with pytest.raises(RuntimeError, match="平台池不可用"):
+            _Session(db_agent_config, session_id="s-y", source_id=TEST_SOURCE_ID)
+        assert services_closed == ["services"]
+        assert pools_closed == ["pool"]  # 未被 persistence 接管的池也关闭
+
+
+# ============================================================================
+# _open_platform_pool 自身的失败清理（打开/等待/表检查同一保护范围）
+
+
+class TestOpenPlatformPoolCleanup:
+    def _install_pool(self, monkeypatch, pool, *, check_raises=None):
+        import src.modules.db_deepagent.persistence.platform_pool as pool_mod
+
+        monkeypatch.setattr(pool_mod, "build_platform_pool", lambda cfg: pool)
+
+        def fake_check(p, schema_name):
+            if check_raises is not None:
+                raise check_raises
+            return []
+
+        monkeypatch.setattr(pool_mod, "check_platform_tables", fake_check)
+
+    def test_check_platform_tables_failure_closes_pool(self, monkeypatch):
+        """表检查抛异常：函数不返回，池必须关闭（调用方拿不到 pool）。"""
+        from src.modules.db_deepagent.cli import _Session
+
+        closed = []
+        pool = SimpleNamespace(
+            open=lambda wait=False: None,
+            wait=lambda: None,
+            close=lambda: closed.append("pool"),
+        )
+        self._install_pool(monkeypatch, pool, check_raises=RuntimeError("目录查询失败"))
+        cfg = SimpleNamespace(platform_db=SimpleNamespace(schema_name="app"))
+        with pytest.raises(RuntimeError, match="目录查询失败"):
+            _Session._open_platform_pool(cfg)
+        assert closed == ["pool"]
+
+    def test_wait_failure_still_closes_pool_and_wraps(self, monkeypatch):
+        """既有清理保持：等待失败关池并以"平台库连接失败"上抛。"""
+        from src.modules.db_deepagent.cli import _Session
+
+        closed = []
+
+        def wait_boom():
+            raise TimeoutError("connect timeout")
+
+        pool = SimpleNamespace(
+            open=lambda wait=False: None,
+            wait=wait_boom,
+            close=lambda: closed.append("pool"),
+        )
+        self._install_pool(monkeypatch, pool)
+        cfg = SimpleNamespace(platform_db=SimpleNamespace(schema_name="app"))
+        with pytest.raises(RuntimeError, match="平台库连接失败"):
+            _Session._open_platform_pool(cfg)
+        assert closed == ["pool"]
 
 
 # ============================================================================
@@ -122,7 +311,9 @@ class TestCleanupWiring:
         import src.modules.db_deepagent.services as services_mod
 
         fake_services = SimpleNamespace(config=cfg, close=lambda: None)
-        monkeypatch.setattr(services_mod, "build_services", lambda c: fake_services)
+        monkeypatch.setattr(
+            services_mod, "build_services", lambda c, source_id=None: fake_services
+        )
         monkeypatch.setattr(
             cli_mod._Session, "_open_platform_pool", staticmethod(lambda c: pool)
         )
@@ -153,6 +344,7 @@ class TestCleanupWiring:
                     errors=[],
                     result_dirs=[],
                     archives=[],
+                    snapshot_deleted=0,
                 )
 
         monkeypatch.setattr(maintenance_mod, "MaintenanceService", FakeMaintenance)
@@ -251,3 +443,16 @@ class TestCleanupConnectionAutocommit:
         report = service.cleanup(apply=False)
         assert report.ok
         assert captured.get("autocommit") is True
+
+
+class TestPlaceholderSourceId:
+    def test_placeholder_passes_real_source_validation(self):
+        """doc 12.2 M-1 回归防护：doctor/cleanup 占位来源必须能通过
+        build_services 的真实短 ID 校验——占位改回 UUID 时此处失败，
+        且本断言不 mock build_services（区别于 TestCleanupWiring）。"""
+        import src.modules.db_deepagent.cli as cli_mod
+        from src.modules.db_deepagent.services import _normalized_source_id
+
+        assert _normalized_source_id(cli_mod._PLACEHOLDER_SOURCE_ID) == (
+            cli_mod._PLACEHOLDER_SOURCE_ID
+        )

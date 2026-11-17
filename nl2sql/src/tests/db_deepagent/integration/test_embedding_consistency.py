@@ -12,6 +12,9 @@ from src.modules.db_deepagent.errors import EmbeddingConsistencyError
 
 pytestmark = [pytest.mark.unit, pytest.mark.integration]
 
+# 一致性检查不依赖具体来源，用占位短 ID 满足构造绑定（doc 4 §3 + doc 5.1 §1）
+_TEST_SOURCE_ID = "db_src_1"
+
 
 @pytest.fixture()
 def _release_info(db_agent_config: DbAgentConfig):
@@ -54,7 +57,7 @@ def test_consistency_passes_against_live_milvus(
         api_key=api_key,
         request_timeout_s=db_agent_config.embedding.request_timeout_seconds,
     )
-    milvus = DbMilvusRetrieval(db_agent_config, embedding)
+    milvus = DbMilvusRetrieval(db_agent_config, embedding, source_id=_TEST_SOURCE_ID)
     try:
         release = check_embedding_consistency(
             db_agent_config, profile, embedding, milvus

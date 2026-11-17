@@ -30,260 +30,120 @@ from metaweave.utils.file_utils import (
     resolve_domains_yaml_path,
     resolve_project_path,
 )
-from metaweave.utils.source_id import normalize_source_id
+from metaweave.utils.source_id import (
+    normalize_source_id,
+    normalize_workspace_id,
+)
+
+# 受管采集/发布步骤目录名（doc 6 §2）：dim_config/ 更名 dim/，sql-rag/ 更名 sql/。
+STEP_DIR_NAMES = {
+    "db": "db",
+    "ddl": "ddl",
+    "json": "json",
+    "md": "md",
+    "domain": "domain",
+    "dim": "dim",
+    "rel": "rel",
+    "sql": "sql",
+    "cql": "cql",
+}
 
 
-def resolve_db_output_dir(source_id, job_id) -> Path:
-    """db 产物与 clean 共用的唯一作业目录（doc 9 §4）。
+def resolve_workspace_root(source_id, workspace_id) -> Path:
+    """工作区根目录 `output/<source_id>/<workspace_id>/`（doc 6 §2）。
 
-    两级 UUID 都按规范 UUID 解析：`output/<source_id>/<job_id>/db/`。
+    `source_id` 为 `db_src_1` 等 text 短 ID，`workspace_id` 为 `ws_1` 等
+    短 ID。逐级拒绝符号链接、项目根边界与预期路径核对。
     """
-    source_uuid = normalize_source_id(source_id)
-    job_uuid = normalize_source_id(job_id)
-    target = resolve_project_path(
-        Path("output") / str(source_uuid) / str(job_uuid) / "db"
-    )
-    # 仅检查“仍在项目根内”不能阻止工作区目录链接到另一个数据源。
-    # 必须在 resolve() 消去符号链接之前，检查每个可由用户工作区控制的层级。
+    source = normalize_source_id(source_id)
+    workspace = normalize_workspace_id(workspace_id)
+    target = resolve_project_path(Path("output") / source / workspace)
     for part in (target.parents[2], target.parents[1], target.parent, target):
         if part.is_symlink():
-            raise ValueError("db 作业目录路径包含符号链接")
+            raise ValueError("工作区目录路径包含符号链接")
     guarded = ensure_path_in_project_root(target)
-    expected = (
-        file_utils.get_project_root().resolve()
-        / "output"
-        / str(source_uuid)
-        / str(job_uuid)
-        / "db"
-    )
+    expected = file_utils.get_project_root().resolve() / "output" / source / workspace
     if guarded != expected:
-        raise ValueError("db 作业目录路径与预期不一致")
+        raise ValueError("工作区目录路径与预期不一致")
     return guarded
 
 
-def resolve_ddl_output_dir(source_id, job_id) -> Path:
-    """受管 DDL 作业目录（doc 16 §4）：`output/<source_id>/<job_id>/ddl/`。
+def resolve_step_output_dir(source_id, workspace_id, step_name: str) -> Path:
+    """受管步骤产物目录 `output/<source_id>/<workspace_id>/<step>/`。
 
-    与 `resolve_db_output_dir` 同一套规范化：两级 UUID、逐级拒绝符号链接、
-    项目根边界与预期路径核对；受管清理与写入共用本函数。
+    各步骤 resolver 的共用实现：短 ID 校验、逐级拒绝符号链接、项目根
+    边界与预期路径核对；受管清理、写入、marker 与 manifest 共用。
     """
-    source_uuid = normalize_source_id(source_id)
-    job_uuid = normalize_source_id(job_id)
-    target = resolve_project_path(
-        Path("output") / str(source_uuid) / str(job_uuid) / "ddl"
-    )
-    for part in (target.parents[2], target.parents[1], target.parent, target):
+    if step_name not in STEP_DIR_NAMES:
+        raise ValueError(f"未知的受管步骤目录: {step_name!r}")
+    root = resolve_workspace_root(source_id, workspace_id)
+    target = root / STEP_DIR_NAMES[step_name]
+    for part in (target.parent, target):
         if part.is_symlink():
-            raise ValueError("DDL 作业目录路径包含符号链接")
+            raise ValueError("步骤产物目录路径包含符号链接")
     guarded = ensure_path_in_project_root(target)
-    expected = (
-        file_utils.get_project_root().resolve()
-        / "output"
-        / str(source_uuid)
-        / str(job_uuid)
-        / "ddl"
-    )
-    if guarded != expected:
-        raise ValueError("DDL 作业目录路径与预期不一致")
+    if guarded != target.resolve() or guarded.parent != root:
+        raise ValueError("步骤产物目录路径与预期不一致")
     return guarded
 
 
-def resolve_json_output_dir(source_id, job_id) -> Path:
-    """受管 JSON 作业目录（doc 18 §4）：`output/<source_id>/<job_id>/json/`。
+def resolve_db_output_dir(source_id, workspace_id) -> Path:
+    """db 产物目录：`output/<source_id>/<workspace_id>/db/`。"""
+    return resolve_step_output_dir(source_id, workspace_id, "db")
 
-    与 `resolve_db_output_dir()` / `resolve_ddl_output_dir()` 同一套规范化：
-    两级 UUID、逐级拒绝符号链接、项目根边界与预期路径核对；受管清理、
-    配置快照与输出核验共用本函数。
+
+def resolve_ddl_output_dir(source_id, workspace_id) -> Path:
+    """受管 DDL 目录：`output/<source_id>/<workspace_id>/ddl/`。"""
+    return resolve_step_output_dir(source_id, workspace_id, "ddl")
+
+
+def resolve_json_output_dir(source_id, workspace_id) -> Path:
+    """受管 JSON 目录：`output/<source_id>/<workspace_id>/json/`。"""
+    return resolve_step_output_dir(source_id, workspace_id, "json")
+
+
+def resolve_md_output_dir(source_id, workspace_id) -> Path:
+    """受管 MD 目录：`output/<source_id>/<workspace_id>/md/`。"""
+    return resolve_step_output_dir(source_id, workspace_id, "md")
+
+
+def resolve_domain_output_dir(source_id, workspace_id) -> Path:
+    """受管 Domain 目录：`output/<source_id>/<workspace_id>/domain/`。"""
+    return resolve_step_output_dir(source_id, workspace_id, "domain")
+
+
+def resolve_dim_output_dir(source_id, workspace_id) -> Path:
+    """受管 Dim 目录（原 dim_config 更名）：`.../dim/`，产物 dim_tables.yaml。"""
+    return resolve_step_output_dir(source_id, workspace_id, "dim")
+
+
+def resolve_rel_output_dir(source_id, workspace_id) -> Path:
+    """受管 Rel 目录：`output/<source_id>/<workspace_id>/rel/`。"""
+    return resolve_step_output_dir(source_id, workspace_id, "rel")
+
+
+def resolve_sql_output_dir(source_id, workspace_id) -> Path:
+    """受管 SQL 样例目录（原 sql-rag 更名）：`.../sql/`。"""
+    return resolve_step_output_dir(source_id, workspace_id, "sql")
+
+
+def resolve_cql_output_dir(source_id, workspace_id) -> Path:
+    """受管 cql 产物目录：`output/<source_id>/<workspace_id>/cql/`。
+
+    cql 产物由 rel 发布过程创建，无采集步骤行；受管清理与发布生成共用。
     """
-    source_uuid = normalize_source_id(source_id)
-    job_uuid = normalize_source_id(job_id)
-    target = resolve_project_path(
-        Path("output") / str(source_uuid) / str(job_uuid) / "json"
-    )
-    for part in (target.parents[2], target.parents[1], target.parent, target):
-        if part.is_symlink():
-            raise ValueError("JSON 作业目录路径包含符号链接")
-    guarded = ensure_path_in_project_root(target)
-    expected = (
-        file_utils.get_project_root().resolve()
-        / "output"
-        / str(source_uuid)
-        / str(job_uuid)
-        / "json"
-    )
-    if guarded != expected:
-        raise ValueError("JSON 作业目录路径与预期不一致")
-    return guarded
-
-
-def resolve_md_output_dir(source_id, job_id) -> Path:
-    """受管 MD 作业目录（doc 19.1 §3）：`output/<source_id>/<job_id>/md/`。
-
-    与其他受管 resolver 同一套规范化：两级 UUID、逐级拒绝符号链接、
-    项目根边界与预期路径核对；受管清理、配置快照与输出核验共用。
-    """
-    source_uuid = normalize_source_id(source_id)
-    job_uuid = normalize_source_id(job_id)
-    target = resolve_project_path(
-        Path("output") / str(source_uuid) / str(job_uuid) / "md"
-    )
-    for part in (target.parents[2], target.parents[1], target.parent, target):
-        if part.is_symlink():
-            raise ValueError("MD 作业目录路径包含符号链接")
-    guarded = ensure_path_in_project_root(target)
-    expected = (
-        file_utils.get_project_root().resolve()
-        / "output"
-        / str(source_uuid)
-        / str(job_uuid)
-        / "md"
-    )
-    if guarded != expected:
-        raise ValueError("MD 作业目录路径与预期不一致")
-    return guarded
-
-
-def resolve_domain_output_dir(source_id, job_id) -> Path:
-    """受管 Domain 作业目录（doc 21.1 §5.5）：`output/<source_id>/<job_id>/domain/`。
-
-    与 `resolve_md_output_dir()` 同一套规范化：两级 UUID、逐级拒绝符号链接、
-    项目根边界与预期路径核对；受管清理与写入共用。
-    """
-    source_uuid = normalize_source_id(source_id)
-    job_uuid = normalize_source_id(job_id)
-    target = resolve_project_path(
-        Path("output") / str(source_uuid) / str(job_uuid) / "domain"
-    )
-    for part in (target.parents[2], target.parents[1], target.parent, target):
-        if part.is_symlink():
-            raise ValueError("Domain 作业目录路径包含符号链接")
-    guarded = ensure_path_in_project_root(target)
-    expected = (
-        file_utils.get_project_root().resolve()
-        / "output"
-        / str(source_uuid)
-        / str(job_uuid)
-        / "domain"
-    )
-    if guarded != expected:
-        raise ValueError("Domain 作业目录路径与预期不一致")
-    return guarded
-
-
-def resolve_dim_config_output_dir(source_id, job_id) -> Path:
-    """受管 Dim Config 作业目录（doc 22.1 §5.4）：`output/<source_id>/<job_id>/dim_config/`。
-
-    与 `resolve_domain_output_dir()` 同一套规范化：两级 UUID、逐级拒绝符号链接、
-    项目根边界与预期路径核对；受管清理与写入共用。
-    """
-    source_uuid = normalize_source_id(source_id)
-    job_uuid = normalize_source_id(job_id)
-    target = resolve_project_path(
-        Path("output") / str(source_uuid) / str(job_uuid) / "dim_config"
-    )
-    for part in (target.parents[2], target.parents[1], target.parent, target):
-        if part.is_symlink():
-            raise ValueError("Dim Config 作业目录路径包含符号链接")
-    guarded = ensure_path_in_project_root(target)
-    expected = (
-        file_utils.get_project_root().resolve()
-        / "output"
-        / str(source_uuid)
-        / str(job_uuid)
-        / "dim_config"
-    )
-    if guarded != expected:
-        raise ValueError("Dim Config 作业目录路径与预期不一致")
-    return guarded
-
-
-def resolve_rel_output_dir(source_id, job_id) -> Path:
-    """受管 Rel 作业目录（doc 23.1 §5.4）：`output/<source_id>/<job_id>/rel/`。
-
-    与 `resolve_domain_output_dir()` 同一套规范化：两级 UUID、逐级拒绝符号
-    链接、项目根边界与预期路径核对；受管清理、配置快照与输出核验共用。
-    """
-    source_uuid = normalize_source_id(source_id)
-    job_uuid = normalize_source_id(job_id)
-    target = resolve_project_path(
-        Path("output") / str(source_uuid) / str(job_uuid) / "rel"
-    )
-    for part in (target.parents[2], target.parents[1], target.parent, target):
-        if part.is_symlink():
-            raise ValueError("Rel 作业目录路径包含符号链接")
-    guarded = ensure_path_in_project_root(target)
-    expected = (
-        file_utils.get_project_root().resolve()
-        / "output"
-        / str(source_uuid)
-        / str(job_uuid)
-        / "rel"
-    )
-    if guarded != expected:
-        raise ValueError("Rel 作业目录路径与预期不一致")
-    return guarded
-
-
-def resolve_sql_rag_output_dir(source_id, job_id) -> Path:
-    """受管 SQL 样例目录：output/<source_id>/<job_id>/sql-rag/。"""
-    source_uuid = normalize_source_id(source_id)
-    job_uuid = normalize_source_id(job_id)
-    target = resolve_project_path(
-        Path("output") / str(source_uuid) / str(job_uuid) / "sql-rag"
-    )
-    for part in (target.parents[2], target.parents[1], target.parent, target):
-        if part.is_symlink():
-            raise ValueError("SQL-RAG 作业目录路径包含符号链接")
-    guarded = ensure_path_in_project_root(target)
-    expected = (
-        file_utils.get_project_root().resolve()
-        / "output"
-        / str(source_uuid)
-        / str(job_uuid)
-        / "sql-rag"
-    )
-    if guarded != expected:
-        raise ValueError("SQL-RAG 作业目录路径与预期不一致")
-    return guarded
-
-
-def resolve_cql_output_dir(source_id, job_id) -> Path:
-    """受管 cql 产物目录（doc 23.2 §5.1）：`output/<source_id>/<job_id>/cql/`。
-
-    与 `resolve_rel_output_dir()` 同一套规范化：两级 UUID、逐级拒绝符号
-    链接、项目根边界与预期路径核对。cql 产物由 rel 发布过程创建，无采集
-    步骤行；受管清理与发布生成共用本目录。
-    """
-    source_uuid = normalize_source_id(source_id)
-    job_uuid = normalize_source_id(job_id)
-    target = resolve_project_path(
-        Path("output") / str(source_uuid) / str(job_uuid) / "cql"
-    )
-    for part in (target.parents[2], target.parents[1], target.parent, target):
-        if part.is_symlink():
-            raise ValueError("cql 产物目录路径包含符号链接")
-    guarded = ensure_path_in_project_root(target)
-    expected = (
-        file_utils.get_project_root().resolve()
-        / "output"
-        / str(source_uuid)
-        / str(job_uuid)
-        / "cql"
-    )
-    if guarded != expected:
-        raise ValueError("cql 产物目录路径与预期不一致")
-    return guarded
+    return resolve_step_output_dir(source_id, workspace_id, "cql")
 
 
 def resolve_source_workspace_dir(source_id) -> Path:
-    """数据源工作区 output/<uuid>/。符号链接或真实路径偏离该目录时拒绝。"""
-    source_uuid = normalize_source_id(source_id)
-    located = resolve_project_path(Path("output") / str(source_uuid))
+    """数据源全部工作区的根 `output/<source_id>/`。符号链接时拒绝。"""
+    source = normalize_source_id(source_id)
+    located = resolve_project_path(Path("output") / source)
     output_dir = located.parent
     if output_dir.is_symlink() or located.is_symlink():
         raise ValueError("数据源工作区路径包含符号链接")
     guarded = ensure_path_in_project_root(located)
-    expected = output_dir.parent.resolve() / "output" / located.name
+    expected = output_dir.parent.resolve() / "output" / source
     if guarded != expected:
         raise ValueError("数据源工作区路径与预期不一致")
     return guarded

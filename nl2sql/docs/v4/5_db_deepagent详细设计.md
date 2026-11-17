@@ -2,9 +2,13 @@
 
 创建日期：2026-10-14  
 设计依据：[3_db_deepagent概要设计](3_db_deepagent概要设计.md)（下称“概要设计”）、[4_db_deepagent固定验收题集与通过标准](4_db_deepagent固定验收题集与通过标准.md)（下称“验收题集”）。  
-本篇状态：详细设计，尚未实施。现有代码与 SDK 行为已按下文“核对基准”静态核对；模型、数据库、Milvus 与 Neo4j 的实际调用尚未验证。
+本篇状态：详细设计，尚未实施。现有代码与 SDK 行为已按下文"核对基准"静态核对；模型、数据库、Milvus 与 Neo4j 的实际调用尚未验证。
+
+> **实施状态补记（2026-11-13）**：本篇保留早期详细设计及历史基线措辞，不代表当前工作区状态。[doc 6.2](../6.2_db_deepagent最终答案兜底问题与补齐建议.md) 已于 `50067ce` 完成实施收尾；[doc 6.3](../6.3_db_deepagent已登记任务终态与答案覆盖门控方案.md) 在该基线之后的工作区**代码实现**，并经 Codex 独立审核 **R6 PASS**（[审核报告](../reviews/codex_doc63_impl_review_r6.md)、[收尾记录](../reviews/doc63_implementation_closeout.md)）。下文受影响章节通过「实施同步」注记说明旧描述与实际实现的差异；**doc 6.3 新增的任务账本、登记/完成门控、运行来源快照、清理依赖删除及必要 API/历史契约，统一在文末 §22 综合同步**。「代码已实现、离线审核通过」不等于已上线或真实 PG、模型题集、仓库外消费者、浏览器人工验收通过，外部边界见收尾记录。已批准 doc 6.3 方案保持固定哈希（SHA256 `c393d2ea…`），其 §1/§2 的「尚未实施」等措辞描述 `50067ce` 分析基线，不改写批准稿。
 
 > 本篇把概要设计的决策落实为可直接编码的模块、接口、数据结构、调用时序和测试清单。概要设计已确定的方向不再讨论；凡与概要设计不一致之处，以本篇“§20 对概要设计的细化与补充”列出的条目为准，其余一律服从概要设计。
+>
+> **SDK 版本注记（2026-11-09 依赖升级）：** 本篇设计时按 `deepagents==0.7.25`、LangChain `1.4.5`、LangGraph `1.2.15` 基线逐项核对（K1–K 系列事实、§15.3 版本断言等）。项目已于 2026-11-09 升级到 `deepagents==0.7.34`、LangChain `1.4.9`、LangGraph `1.2.20`（见 [docs/1_DeepAgents_0.7.34升级评估与实施建议.md](../1_DeepAgents_0.7.34升级评估与实施建议.md) §6 与其引用的实施记录）；下文出现的 `0.7.25`/`1.4.5`/`1.2.15` 字样保留为旧基线实测范围，当前版本行为以模块 `.venv` 内安装源码为准。已按新版本复核的适配点在 §10.2 表中标注。
 
 ## 0. 核对基准
 
@@ -327,9 +331,12 @@ thread:
   rotate_after_messages: 400             # 线程消息数超过该值时，下一轮前轮换线程
   carry_max_evidence: 200                # 轮换时携带的证据条数上限（§13.4）
   carry_recent_executions: 3             # 轮换时携带的最近执行／分析记录条数（0 关闭，§7.12.1、§13.4）
-  checkpoint_retention_days: 30
-  archive_retention_days: 180
-  result_retention_days: 30              # 结果保留期；同时是复用保留期（§7.12.1，沿用登记不续期）
+  checkpoint_retention_days: 30          # 执行家族：至少 30 天，具体以配置为准（§13.5）
+  archive_retention_days: 365            # 对话家族（web_turns＋qa/run_errors）：至少 365 天，
+                                         #   具体以配置为准（2026-10-19 由 180 调整，docs/3.1 §7）
+  result_retention_days: 30              # 执行家族：全量原始明细的下载/审计窗口，至少 30 天，
+                                         #   具体以配置为准；到期即删，无引用保护（2026-10-19 修订，
+                                         #   docs/3.1 §7）；同时是复用保留期（§7.12.1，沿用登记不续期）
 
 workspace:
   root: ${DB_DEEPAGENT_WORKSPACE:var/db_deepagent}
@@ -433,6 +440,8 @@ class DbAgentContext:
 
 ### 5.2 扩展状态 `DbDeepAgentState`（`state.py`）
 
+> 实施同步：本节的字段清单为设计基线；doc 6.3 已新增 `db_sub_tasks` 业务任务账本字段及专用 reducer（`merge_task_records` 等），见 §22.2。本节仍为 `50067ce` 基线描述。
+
 按概要设计 §9.3 与 K11，继承 `DeepAgentState`，不覆盖 `messages`。新增字段全部标注 `PrivateStateAttr`（K13）：调用方不能通过 `invoke` 输入注入，模型也看不到；Runner 通过 `get_state().values` 读取。
 
 ```python
@@ -457,6 +466,8 @@ class DbDeepAgentState(DeepAgentState):
 - 只有本模块的工具通过返回 `Command(update={...})` 写这些字段；没有任何工具参数能直接写入它们。
 
 ### 5.3 账本记录结构（`schemas.py`）
+
+> 实施同步：doc 6.3 为 `ExecutionRecord` / `AnalysisRecord` 增加完整来源身份（`session_id` / `thread_id` 等），并新增任务记录结构（`TaskFailureRef` / `TerminationContext` / `DependencyStateSnapshot` / `blocked_by` 等终止审计字段），见 §22.2、§22.3。本节 TypedDict 清单为 `50067ce` 基线描述。
 
 ```python
 class ValidationRecord(TypedDict):
@@ -995,6 +1006,8 @@ class RuntimeToolArgs(StrictToolArgs):
 
 ### 7.11 `submit_final_answer`
 
+> 实施同步：doc 6.3 在提交工具中加入共享任务完成门控（任务终态、finding 合法覆盖、证据资格、未选成果消费等），与 Runner 用同一 `eligible_submission` 判定，见 §22.4。本节「只约束交付格式」为 `50067ce` 基线描述。
+
 用途：提交本运行的最终答案。只约束交付格式；何时提交、之前调用哪些工具仍由 Agent 自主决定。
 
 | 参数 | 说明 |
@@ -1041,6 +1054,8 @@ class RuntimeToolArgs(StrictToolArgs):
 
 #### 7.12.1 执行／分析证据沿用（历史结果作为最终答案引用）
 
+> 实施同步：doc 6.3 把沿用来源资格核验统一到 `reuse_qualification.EvidenceGraphVerifier`（完整身份、快照权威、递归 direct/input 边、缺源/冲突/环、角色键缓存），并把任务身份贯穿授权/执行/分析/沿用；见 §22.3。本节的链首解析与检查顺序为 `50067ce` 基线描述，共享规则以此为准。
+
 `evidence_ids` 额外接受两类 ID：`E-`（执行记录，仅 `purpose="query"`）与 `A-`（分析记录）；同批输入先按 ID 去重。可沿用来源同上两类：本线程账本（`run_id` 不等于当前运行）与 `carried_evidence`（`kind` 扩为 `time｜dim｜execution｜analysis`）。沿用只支持**引用型**（引用历史结果说明结论、口径与截断情况）；重新计算（如“再按 X 分组”）须走 `analyze_result` 或新查询，沿用本身不产生新数据；允许引用截断结果，但不代表可据已保存样本推断完整总体（§12.1 第 7 点仍适用）。
 
 **链首解析（不回查原线程）**：沿用源本身可能是沿用登记。“解析链首”只是身份解析——沿 `reused_from` 链取最初的原始 `evidence_id` 与 `EvidenceOrigin`，不要求原线程 checkpoint 或原账本仍存在；登记使用**当前服务端持有的完整记录副本**（本线程账本记录或 `carried_evidence` 副本）＋该副本已有的 `reused_from` ＋原结果元数据（`ResultMeta`）完成。`EvidenceOrigin.evidence_id` 取链首解析结果（`ResultMeta` 无此字段）；thread_id／request_id／run_id／datasource_id 以 `ResultMeta` 为准。连续沿用保留链首 `reused_from`，不改写为上一运行的登记。
@@ -1060,6 +1075,8 @@ class RuntimeToolArgs(StrictToolArgs):
 **统计与归档解耦**：本轮有效回答证据允许含受控沿用（`submit_final_answer` 引用、`EvidenceItem`、状态判定的“有成功证据”均认沿用记录）；**本轮实际执行次数只统计真实执行**（`reused_from` 为空）——沿用不调 `run_readonly`、不占 `db_execute` 预算，任何执行耗时汇总不得计入沿用记录的 `elapsed_ms`（历史事实转录）。
 
 ## 8. SQL 校验与执行管线（`services/sql_pipeline.py`）
+
+> 实施同步：doc 6.3 在占位符解析（`resolve_placeholder_lineage`）中加入完整祖先与选定成果的副作用前置共享核验（EXPLAIN/授权/执行前）、有效运行 guard（`require_session_lease`）及任务归属；见 §22.3。本节为 `50067ce` 基线描述。
 
 ### 8.1 规范化
 
@@ -1420,10 +1437,10 @@ SDK 私有依赖集中在 `agent.py` 的 `_sdk_adapter` 小节。装配与 Runne
 | 私有适配点 | 唯一入口 | 约定 |
 | --- | --- | --- |
 | `deepagents._models` 的模型标识函数、`_harness_profile_for_model` | `register_and_verify_harness_profile(model, cfg)` | 按实际模型标识注册并验证精确匹配键 |
-| `FilesystemMiddleware` 的 `_permissions` 构造参数 | `build_filesystem_middleware(backend, permissions, cfg)` | 构造 §10.1 的白名单实例，显式传 `_permissions=permissions` 与配置的转存阈值，避免替换默认 middleware 后权限丢失 |
+| `FilesystemMiddleware` 的 `_permissions` 构造参数 | `build_filesystem_middleware(backend, permissions, cfg)` | 构造 §10.1 的白名单实例，显式传 `permissions=permissions` 与配置的转存阈值，避免替换默认 middleware 后权限丢失。0.7.25 基线用 `_permissions=`；**0.7.31 起弃用，0.7.34 已改为公开 `permissions=`，且必须与 `create_deep_agent(permissions=...)` 同一组规则**（2026-11-09 升级时复核，graph.py 对覆盖实例做 Agent 权限继承与冲突检查） |
 | `_summarization_event` 及其 `summary_message`／`cutoff_index`／`file_path` 结构；`_summarization_session_id` | `read_summary_for_handoff(state_values) -> str \| None` | 只读解析 `get_state().values`，返回可交接的摘要文本；不向 Runner 暴露 SDK 状态结构，不复制这些私有字段到新线程 |
 
-上述约定按 `deepagents==0.7.25` 源码核对。SDK 升级时须先核对这些适配点，并通过 §18 的对应测试，再更新锁版。
+上述约定按 `deepagents==0.7.25` 源码核对；2026-11-09 升级到 `0.7.34` 时已复核本表适配点（公开 `permissions=` 已替换 `_permissions=`，其余入口签名未变，§18 对应测试随升级回归）。SDK 升级时须先核对这些适配点，并通过 §18 的对应测试，再更新锁版。
 
 HarnessProfile 适配函数：
 
@@ -1812,6 +1829,8 @@ pool = ConnectionPool(conninfo, min_size=..., max_size=...,
 
 ### 13.3 Store 归档（`persistence/archive.py`）
 
+> 实施同步：doc 6.3 新增「运行来源快照」命名空间（`run_snapshots`，`RUN_SNAPSHOT_SCHEMA_VERSION`、`write/read/list/delete_run_snapshot`、`refs_of_record()`），读路径严格校验完整作用域身份；见 §22.5。下表命名空间清单为 `50067ce` 基线描述；归档 v2 契约（本节的 v2 表）仍有效。
+
 `PostgresStore(pool)`，命名空间：
 
 | 命名空间 | key | 内容 |
@@ -1829,6 +1848,24 @@ pool = ConnectionPool(conninfo, min_size=..., max_size=...,
 - 纯沿用请求只有满足 b 才进 `qa`；仅时间／维度沿用、没有最终答案、或引用无效 → `run_errors`。
 - **`qa` 的 `status` 字段直接保存 Runner 判定的真实运行状态**（与 `DbAgentResult.status` 同一七值枚举），不另设 qa 专用枚举、不为凑枚举改写状态：SQL 成功后预算耗尽（满足 a、状态 `budget_exhausted`）、查询成功但空结果（`no_data`）、待澄清（`needs_clarification`）均按真实状态入 `qa`；`persistence_error` 按 §14.3 P3 规则归档本身失败、不写 `qa`。预算耗尽但无成功真实执行的请求不满足 a → `run_errors`。
 - `qa` 的 evidence 摘要保留 `reused_from` 来源标记（§14.2 `EvidenceItem`）。
+
+**最终答案兜底的归档契约 v2（已实施，2026-11-12）**：以下是 [doc 6.2 §7.4](../6.2_db_deepagent最终答案兜底问题与补齐建议.md) 定义的契约，已由 `Runner._archive_run()` 落地（`ARCHIVE_SCHEMA_VERSION=2` 写入与 `QaArchive.read_delivery_answer()` 读取），经 doc 6.2 实施审核闭环与离线回归验证；详见 [实施收尾记录](../reviews/doc62_implementation_closeout.md)。读取兼容边界（浅投影不做内容校验）、仓库外消费者未核查等限制继续有效。
+
+| 字段 | 旧记录（v1） | 新记录（v2，QA／run_errors） |
+| --- | --- | --- |
+| `archive_schema_version` | 缺失时按 LEGACY_ARCHIVE_SCHEMA_VERSION（1）解释 | 写读共用 ARCHIVE_SCHEMA_VERSION（当前为 2） |
+| `answer` | QA 中原模型提交 payload | 仅缺失 answer 键或外层记录时为 `{}`；原键的 None、空串、列表等非法值仍按原类型和值保存，不替换为兜底或资格视图 |
+| `delivery_answer` | 缺失 | 实际交付 payload，正文用于实时、历史、CLI；其中 status 是 P3 写入时的 Runner 状态 |
+| `answer_source` | 缺失，历史来源未标注 | `model`／`system_fallback`／`none`，描述 delivery_answer 来源 |
+| 顶层 `status` | Runner 状态 | 继续为 Runner 状态；P3 部分写入失败仍不承诺事务回滚或历史原子一致 |
+| `read_delivery_answer()` 的状态字段 | 视图将模型 status 改名为 submitted_status，不返回 status | 视图保留 delivery_answer.status，表示 Runner 写入时状态 |
+
+- 不新增与原 `answer` 重复的 `submitted_answer`。需要模型原始提交的读者继续读取 `answer`；需要历史交付浅投影的新读者经 `QaArchive.read_delivery_answer()` 按版本读取。v1 返回副本时将原 status 改名为 submitted_status，防止与 v2 Runner 状态同名异义，不补造 Runner 状态；跨版本展示/统计统一读取归档顶层 status，不能以 submitted_status 替代。除此改名外，该函数只检查版本及字典容器，不验证字段内容；不得据此认定归档合法。旧 v1 原 answer 非字典时可返回空视图，不重写原值；未知版本或非字典 v2 容器显式报错。
+- 版本常量集中定义于 persistence/archive.py，由 Runner 与读取函数导入；新增格式须保留旧版本读取路径及兼容测试。
+- 同步强化条件 b：除既有状态、有效 E／A 沿用引用外，按当前 run_id 键取得的记录，其外层 run_id、request_id 还必须与 Runner 本轮参数精确一致，且 payload 通过结构及非空白正文检查；缺失或不一致均无效，不从字典键补齐。`_finalize()` 通过 `normalize_final_answer_record()` 一次生成归一字典或 None，供评估、交付与归档复用，后两者不重新解析。空白或归属不符的提交即使存在 FinalAnswerRecord 也不满足 b；有真实执行时仍可按条件 a 归档。原 answer 保留供审计，不因归属不符而改写，也不能据此把交付判为成功。这不扩大历史浅投影的校验职责。
+- 提取原值统一使用 `extract_raw_final_answer_payload()`；资格判断只读取通过验证并归一后的 eligible_payload，无效时为 `{}`。不能在检查为无效后仍遍历原始 findings 或调用其 `.get()`，否则无效提交会在 P3 触发二次异常。
+- 当前运行的有效正文检查同时在提交参数模型、Runner `_evaluate()` 和条件 b 使用；归档读取兼容不意味着历史记录自动满足当前有效性规则。
+- 实施前登记并核查已知仓库内外消费者，不能以仓库内搜索未命中证明没有外部读者。保留原字段用于降低兼容风险，新增版本和交付字段仍须验收；新旧记录读取、正常答案原文保留、系统兜底、前置拒绝来源 none 均须测试。
 
 同一线程的模型上下文来自 checkpoint，不从 Store 读取问答再注入（F12“历史不重复注入”）。
 
@@ -1856,12 +1893,14 @@ pool = ConnectionPool(conninfo, min_size=..., max_size=...,
 
 ### 13.5 清理（`persistence/maintenance.py`）
 
-命令：`cli maintenance cleanup [--dry-run|--apply] [--before YYYY-MM-DD]`，默认 `--dry-run`；显式传 `--apply` 才执行清理，两个模式互斥。`--before` 为可选日期筛选参数，不绕过活动线程、待恢复任务与结果引用的保护检查。命令参数与 §15.1 保持一致。
+> 实施同步：doc 6.3 把运行快照纳入与 Runner 共用的会话 guard / advisory lock 互斥，并在锁内重读归属、保留闭包与来源图；孤儿运行快照按依赖一致的删除集合回收（TTL 规划、递归延迟、消费者先于来源排序、第一次删除/排序失败即保守停止），见 §22.5。本节线程级清理为 `50067ce` 基线描述，二者并存、共用同一把会话锁。
+
+命令：`cli maintenance cleanup [--dry-run|--apply] [--before YYYY-MM-DD]`，默认 `--dry-run`；显式传 `--apply` 才执行清理，两个模式互斥。`--before` 为可选日期筛选参数，不绕过活动线程与待恢复任务的保护检查（结果目录引用保护已于 2026-10-19 移除，docs/3.1 §7）。命令参数与 §15.1 保持一致。
 
 1. **线程级判定（doc 7 §2 折入）**：候选＝序号推导（`dbda:<session_id>:<seq>`，按 `sessions.thread_seq` 反推）＋ checkpoint 枚举兜底（参数化＋LIKE 通配符转义 `\`/`%`/`_`，`ESCAPE '\'`）。逐线程：① 当前线程（`== sessions.current_thread_id`）保护；② `get_state(config).next` 非空保护待恢复任务，**`get_state` 异常时跳过该线程并报告"状态读取失败"**（时间兜底不替代待恢复检查）；③ 过期判定 `effective_at = max(last_active_at, retired_at, 最新 checkpoint 时间)`——checkpoint 时间优先公开 `StateSnapshot.created_at`，已确认无待恢复任务但 `created_at` 缺失时以 `checkpoints.checkpoint->>'ts'` 最大值兜底，统一 UTC 忽略空值，三来源全空不清理；`retired` 只作清理优先级排序；`--before` 只收紧不放宽。**会话归属复核**：候选 `thread_id` 经 `parse_thread_id(thread_id) -> tuple[str, int] | None` 解析（`rsplit(":", 1)`，`dbda:` 前缀＋正整数序号），调用方比较返回会话 ID 与预期会话精确一致才保留；会话 ID 字符集限制 `^[A-Za-z0-9_-]+$`（禁冒号）。
 2. 预览列出线程数、checkpoint 行数估计、待删结果目录。
 3. 执行时对每个线程调用 `PostgresSaver.delete_thread(thread_id)`（K16）。
-4. 结果目录：早于 `result_retention_days`，且不被保留中的线程状态、`qa` 归档引用时才删除。
+4. 结果目录：早于 `result_retention_days`（30 天）即删除，**无引用保护**。——2026-10-19 修订：原"不被保留中的线程状态、`qa` 归档引用时才删除"条款移除，历史展示改由结果快照表承接（docs/3.1 §7）。保留期语义为下限口径，具体以配置为准。
 5. `qa` 与 `run_errors` 按 `archive_retention_days` 独立清理；checkpoint 过期不删除问答档案。
 
 **运行与清理互斥（doc 7 §2.3 折入）**：会话级 advisory lock `pg_try_advisory_lock(hashtext('dbda_session:' || session_id))`。Runner **进入 P0 读取 sessions／checkpoint 之前**取锁（专用连接持有）至 P2 读取、P3 归档与轨迹写入完成，外层 `finally` 释放；取锁失败按 runtime 失败返回且**不做任何 sessions／threads／qa 写入**（防覆盖运行中进程指针），仍写 P4 本地记录。清理逐会话 `pg_try_advisory_lock`，拿不到跳过该会话（报告"运行中"），拿到后**重新核对**上述资格再删除，完成或异常后解锁。memory 持久化模式无 PG，跳过互斥。
@@ -1872,7 +1911,7 @@ pool = ConnectionPool(conninfo, min_size=..., max_size=...,
 - 每个线程建立一个显式事务，事务内以 `SET LOCAL` 设置 `maintenance.statement_timeout_ms`（初始 60000 ms）与 `maintenance.lock_timeout_ms`（初始 5000 ms），然后调用绑定**该连接**的 `PostgresSaver(conn).delete_thread(thread_id)`。不能改用绑定共享池的 Saver，否则删除可能发生在另一连接、脱离当前事务和超时设置。
 - SDK 对 `checkpoints`、`checkpoint_blobs`、`checkpoint_writes` 的删除均在该事务内完成；事务提交后才报告该线程清理成功、更新其清理状态。任一句超时、锁等待超时或其他数据库错误，回滚该线程全部删除并记录失败；不把部分删除或未提交结果标为成功。
 - 按线程独立提交，不将整个批次包在一个大事务中。已成功线程保留提交结果，失败线程可在后续维护命令中重试；连接失效时先关闭并重建同样配置的连接。批次有失败时维护命令以非零码结束，并列出成功／失败线程及原因。
-- 每线程操作前重新核对活动状态与待恢复任务，结果文件和归档删除仍须满足引用与保留规则。时间限制是每条语句及锁等待的限制，不承诺整个批次 60 秒内结束；线程体量与删除耗时需实测，不能由消息数直接推算。
+- 每线程操作前重新核对活动状态与待恢复任务；归档删除仍须满足保留期与引用规则，结果文件按到期即删（无引用保护，2026-10-19 修订）。时间限制是每条语句及锁等待的限制，不承诺整个批次 60 秒内结束；线程体量与删除耗时需实测，不能由消息数直接推算。
 
 ## 14. Runner 与结果协议
 
@@ -1951,6 +1990,8 @@ class DbAgentResult(BaseModel):
 ```
 
 ### 14.3 Runner 流程（`runner.py`）
+
+> 实施同步：doc 6.3 在 P2/P3 之间加入共享任务完成门控（`_finalize` / `_task_completion_decision` / `eligible_submission` 一次归一，贯穿状态/交付正文/归档条件 b），并把最终来源装配/门控 I/O 纳入受控异常边界（`is_persistence_error` 分类：persistence 最高优先级 / runtime 收敛 / `SourceUnqualified` 受控业务拒绝）；归档新增 `_seal_run_snapshot` 运行来源快照封存。见 §22.4、§22.5。本节五阶段与异常优先级为 `50067ce` 基线描述，6.2 的优先级保证保留。
 
 Runner 把一次请求分成五个阶段。每个阶段的异常都被捕获，按发生顺序记入 `RunFailures`，不会被后续处理覆盖。最终状态按下文的**优先级**判定；`primary` 标在“决定最终状态的那一类失败中最早发生的一条”上，不一定是全部失败中的第一条：
 
@@ -2072,6 +2113,8 @@ DbAgentRunner.run(question, session_id, thread_id=None, request_id=None) -> DbAg
 交互模式命令：`/rotate`（轮换线程）、`/trace`（显示上一轮工具调用轨迹）、`/result <ref> [offset]`（经 `ResultStore` 分页查看，同样做会话检查）、`/exit`。
 
 ### 15.2 显示
+
+> 实施同步：doc 6.3 在 Web 历史/快照侧新增 `WebTurn.open_questions` 合并问题列表（旧记录 `None` 与新 `[]` 区分）与 `snapshotTurn()` 安全投影（不安全终态不带回 SQL/结果引用与问题），WebStore 保存同一合并列表；见 §22.6。CLI 显示仍按本节，状态七值与 `archived` 契约不变。
 
 - Rich 模式（默认，检测到 TTY 时）：答案面板；发现列表（附 `evidence_id`）；证据表（SQL、行数、两种截断标记、`result_ref`；`reused_from` 非空的行标注“沿用（原 run_id、原结果生成时间）”，§7.12.1）；限制与待澄清事项；统计行（耗时、主 Agent 模型步骤数、摘要调用尝试数、总调用尝试数、工具调用、Token）。用量不完整时显示“未知／不完整”，不显示为零；总调用尝试不标成 HTTP 请求数。`--show-trace` 额外显示工具调用顺序、参数摘要与状态。
 - `--plain`：同样内容的纯文本。
@@ -2340,3 +2383,58 @@ src/tests/db_deepagent/
 | ~~实施顺序中的完整装配验收~~（**已按选项二收口**：完整工具集合验收移到步骤 5，见 §10.6／§15.3／§19） | 已收口 | 步骤 4 按阶段清单常量核对 13 件；步骤 5 切换 15 件；清单在代码中定义，装配检查与运行期审计同源 |
 | ~~本地计算与 SQL 下推的一致性~~（**已补齐**，2026-10-15 折入 §7.10.1，设计见 doc 7） | 已收口 | NULL/空集镜像 PG、类型白名单（文本族仅下推）、指数跨度动态精度、聚合前 `::numeric`、三步路由决策（数据源检查最优先） |
 | ~~`--json` 的 stdout 隔离~~（**已补齐**，折入 §15.2） | 已收口 | 预扫描 `argv`（尊重 `--`）→`redirect_stdout` 包初始化运行（覆盖 `ConfigLoader` 的 `print`）→范围外单次序列化；argparse 错误出口输出单 JSON 文档；子进程测试断言分组 |
+
+## 22. doc 6.3 实施后实际契约同步（2026-11-13 补记）
+
+本节只同步 [doc 6.3](../6.3_db_deepagent已登记任务终态与答案覆盖门控方案.md) 实施后**实际受影响**的契约，不大规模改写无关设计；各节开头的小字「实施同步」是到本节的导航。权威方案与逐轮审核证据见 [doc 6.3 方案](../6.3_db_deepagent已登记任务终态与答案覆盖门控方案.md)、[收尾记录](../reviews/doc63_implementation_closeout.md) 与 [R6 审核报告](../reviews/codex_doc63_impl_review_r6.md)。
+
+> **状态口径**：以下均为 `50067ce` 之后工作区的**代码实现**并经 Codex R1–R6 离线审核（**R6 PASS**）的实际契约；**不等于已上线或真实环境已验收**。真实 PG 跨进程锁/DELETE、真实模型题集与预算余量、仓库外归档消费者、浏览器人工验收仍未执行，边界见收尾记录。批准 doc 6.3 方案文件保持固定哈希（SHA256 `c393d2ea…`），其中 §1/§2「当前代码没有…」「尚未实施」等措辞是 `50067ce` 分析基线历史描述，不改写批准稿。
+
+### 22.1 与 6.1 清单的对应
+
+对应 [6.1 清单](../6.1_db_deepagent能力补齐问题清单与实施建议.md) **02—04**：02 已登记任务终态与答案覆盖门控、03 任务范围内 SQL 授权与证据归属、04 任务修订/依赖失效/历史沿用规则。01（最终答案兜底）、05（主模型单层重试）由 doc 6.2 实现并保留；06—13（SQL 修正上限、表结构硬门控、防重复执行、自动批次调度、时间表达、独立 SQL 模式、旧入口去留、性能复用）**不在本次范围**，状态不变。
+
+### 22.2 状态、计划/版本与专用 reducer（对应 §5.2 / §5.3）
+
+- `state.py` 新增 `db_sub_tasks`：键按 `(run_id, sub_task_id, revision)` 规范编码（`task_ledger_key` / `parse_task_ledger_key`），一条任务记录携带完整身份、`content` / `dependencies` / `status` / 终止字段与审计时间。
+- 专用 reducer `merge_task_records`：不可变事实字段（`content` / `dependencies` / `creation_operation` 等）一致性强校验，同 ID 异事实拒绝；`task_record_update_allowed` / `is_legal_void_transition` 约束同版本状态转移，允许 completed/failed/needs_clarification 合法转 voided、禁止非法覆盖与幂等重放外的改写。
+- `services/task_ledger.py` 的 `TaskLedger.apply()`：`expected_plan_version` 版本先检做整批幂等；候选计划深拷贝、不原地改写输入；`add/status/revise/void` 操作（`replacement` 是 `void` 的可选替代目标参数）、固定直接依赖、`blocked_by` 整批复核、`termination_context` 服务端生成。历史决策用决策时事实规则 `terminal_facts` / `derive_decision_root`，不随目标后续状态重写、不按当前候选重验。
+- `schemas.py`：`ExecutionRecord` / `AnalysisRecord` 携带 `session_id` / `thread_id` 等完整来源身份；新增 `TaskFailureRef` / `TerminationContext` / `DependencyStateSnapshot` / `blocked_by` 等终止审计字段。
+
+### 22.3 任务登记、任务身份与来源血缘（对应 §5.2 / §7.11 前 / §7.12 / §8 / §9）
+
+- `tools/task_tools.py` 的 `make_record_sub_tasks_tool` / `record_sub_tasks`：单条 AIMessage 只能有一次登记且不能与其它工具同批；`agent.py` 的 `_TASK_TOOLS` / 装配把 `record_sub_tasks` 与 `submit_final_answer` 纳入工具集。
+- 任务身份贯穿 SQL 授权、执行、分析、占位符、E/A 沿用：`sub_task_id` / `revision` / `purpose` 写入记录，`services/sql_pipeline.py` 的 `resolve_placeholder_lineage()` 在 EXPLAIN/授权/实际执行之前共享核验选定成果与完整祖先；`require_session_lease()` / `make_ledger_view` 统一装配并校验有效运行 guard、任务归属、沿用注册与失败引用归属。删除裸 `evidence_id` 的另一套递归。
+- `services/reuse_qualification.py` 为统一证据图核验入口：`EvidenceGraphVerifier`（完整身份解析、快照权威、递归 direct/input 边、缺源/冲突/环、按 `(完整身份, 角色)` 实例级缓存、命中仍逐边校验 expected task/result 约束）、`evidence_edges()`、`verify_input_edges()` / `verify_consumed_edges()` / `unqualified_reuse_evidence()`、`SourceUnqualified`、`TASK_LEDGER_PROTOCOL_VERSION`。畸形 direct/input 容器与必需引用严格解析、受控拒绝；正常空输入允许。
+- 工具、`completed` 登记、提交门控、Runner、清理复用同一解析/核验/分类规则，不各写一套算法。
+
+### 22.4 共享完成门控与 Runner 交付资格（对应 §7.11 / §14.1 / §14.3）
+
+- `services/task_completion.py`：`CompletionSnapshot` / `CompletionDecision` / `evaluate_submission()`，`TASK_COMPLETION_RULES_VERSION`；快照装配函数 `build_completion_snapshot()` 位于 `tools/final_answer.py`，供提交工具与 Runner 共用。门控核验：任务终态、每个 completed 至少一条合法 finding 覆盖、全部选定成果资格、未选成果消费、派生结果绕过、缺源与快照身份、确定性分项正文（展示合法 finding 实际结论）、权威/补充问题合并顺序、`dependency_blocked` 必填阻塞依据逐项核验（全部 `blocked_by` 的固定身份、决策时依赖快照、可推导根因；`blocked_by_root` 仅作首项主要根因摘要，不要求多个独立根相同）。
+- 提交工具 `tools/final_answer.py` 与 Runner `runner.py` 的 `_finalize()` / `_task_completion_decision()` 用一次结构归一得到的 `eligible_submission`，贯穿状态判定、交付正文与归档条件 b；非空坏提交走系统兜底，原始提交保真。无最终提交时不把 `expected_status` 当成果已核验标志。
+- `errors.py` 的 `is_persistence_error()` / `persistence_error_types()` 供 Runner 收尾受控 I/O 异常边界与 `final_answer` 共用：已识别持久化故障（psycopg.Error / PoolTimeout / PlatformSchemaError）记 persistence、最高优先级，令提交无交付资格、生成系统兜底、保留证据、返回 `persistence_error` / `archived=False`、不对失败后端继续归档、不追加模型调用；`SourceUnqualified` 与确定性协议损坏仍为受控业务拒绝；未知运行错误按 runtime 收敛，不穿透破坏 6.2 兜底。
+- 保留 6.2 的状态优先级、单层重试、预算/异常优先级、归档 v2（`delivery_answer` / `answer_source` / `read_delivery_answer()`）、提交归一、原始/交付归档分离。
+
+### 22.5 运行来源快照、保留根、清理互斥与依赖删除（对应 §13.3 / §13.5 / §14.3）
+
+- `persistence/archive.py`：`run_snapshots` 命名空间、`RUN_SNAPSHOT_SCHEMA_VERSION`、`write/read/list/delete_run_snapshot()`、`refs_of_record()`；读路径严格校验完整 `(session_id, thread_id, run_id)` 作用域身份。Runner 在 P3 经 `_seal_run_snapshot()` 封存本轮完整运行来源（任务/执行/分析/协议版本），按固定 revision 与最终派生原因封存。
+- `persistence/maintenance.py`：
+  - `_retained_snapshot_roots()` 以仍在保留期 QA/run_errors 的公开引用 + `snapshot_ref` + 轮换携带引用为保护根；
+  - `_protected_closure()` 分离「图合法性检查」与「保护标记」——阶段 1 校验协议/作用域/保护根存在性、全部 direct/input 来源存在性、重复冲突与环（任何问题保守停止该会话全部实删），阶段 2 保护集合只从最终根递归扩展；`edge_out` 暴露阶段 1 已核验的快照级来源图；
+  - `_plan_orphan_snapshot_deletions()` 规划依赖一致的 TTL 删除集合：仅到期孤儿入候选，本轮保留快照引用的到期来源递归延迟，全部到期一起回收，不刷新 `created_at`、不延长沿用有效期；
+  - `_order_orphan_deletions()` 对待删子图做「消费者先于来源」的稳定拓扑排序（共享来源等全部 consumer 处理完才入列），无法覆盖整个删除集时抛局部专用 `OrphanDeletionOrderError`（R6/M2 防御，不返回含未满足依赖节点的部分顺序）；
+  - `_cleanup_session_resources()` 在会话锁（PG advisory lock / memory guard，与 Runner 共用）内重读归属、年龄与来源图，按依赖顺序执行孤儿快照删除，严格区分「已确认不存在 / 仍存在需保留或状态未知 / 删除失败」；第一次删除失败、锁内复核需保留或排序失败即停止该会话本轮剩余孤儿快照删除并记录原因、等待下次重试，绝不把未知/失败当删除成功、不继续删仍被引用来源。dry-run 只报告不实删。
+- `persistence/session_guard.py` 提供进程内 guard；PG 模式用会话级 advisory lock 覆盖来源检查到 P3，拿不到锁跳过该会话，锁内重读闭包、未知归属/后端故障跳过。
+
+### 22.6 API / 历史展示契约（对应 §14.2 / §15.2 / §13.3）
+
+- `DbAgentResult` 状态七值、`archived`、`errors` 与归档 v2 契约不变；`WebQueryResult` / `EvidenceItem` 的证据、截断标记、`result_ref` 投影不变。
+- `frontend/src/modules/nl2sql/api/types.ts` 的 `WebTurn.open_questions`（doc 6.3 §8.3 保存的合并权威/补充问题列表，旧记录缺字段为 `None` 与新 `[]` 区分）；`useChat.ts` 的 `snapshotTurn()` 安全投影——`knowledge_changed` / `dependency_unavailable` 等不安全终态不带回 SQL、结果引用与问题（三态、快照/历史一致与安全投影由 `openQuestionsBehavior.test.cjs` 等行为测试覆盖）。WebStore 保存同一合并列表，Runner finalize hook、CLI 与前端历史读取保持一致。
+
+### 22.7 审核索引与验证边界
+
+- 逐轮审核 R1–R6 与结论（**R6 PASS**）见 [收尾记录 §3](../reviews/doc63_implementation_closeout.md) 与 `docs/reviews/codex_doc63_impl_review_rN.md`、`doc63_impl_review_request_rN.md`。
+- R6 后的文档收尾与排序失败防御增量已获 [R7 PASS](../reviews/codex_doc63_impl_review_r7.md)，不改写 R6 的已通过事实；本节所述 M2 异常边界也计入 R7 增量审核。
+- 已验证：离线单测 / 装配 / 真实 Runner 控制流、真实 `TaskLedger→reducer`、实际清理控制流、完整 `query→A→completed→reuse A→completed→submit→Runner` 路径、真实 Runner I/O 故障边界；后端全量与维护专项命令与结果见收尾记录 §5、R7 请求报告。
+- 用户已通过 Vue 完成简单查询、双任务查询、同会话跨轮沿用三次正常真实验证，Codex 核对日志及运行结果通过；沿用轮没有再次执行业务 SQL。具体范围及调用成本见收尾记录 §5.1，不把正常路径当作故障/维护验收。
+- 未验证边界（真实 PG 跨进程清理锁/DELETE、完整真实模型题集与预算、仓库外消费者、全面浏览器人工验收、生产上线）见收尾记录 §6；R6 PASS 不表述为已部署或全部外部集成验收完成。

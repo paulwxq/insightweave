@@ -1,9 +1,8 @@
-"""采集首页：把一个数据源的 job_info 行收成条目和三张统计卡。"""
+"""工作区首页数据：最近运行与状态统计（新模型，doc 6.2 §9.1.7）。"""
 
-from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
-from uuid import UUID
+from datetime import timedelta
 
+from sqlalchemy import func, select
 from sqlalchemy.exc import SQLAlchemyError
 
 from backend.data_sources.registration_service import (
@@ -11,88 +10,109 @@ from backend.data_sources.registration_service import (
     SourceNotFoundError,
 )
 from backend.data_sources.repository import get_db_source
-from backend.jobs.repository import list_source_step_rows, rollup_job_status
-from backend.persistence.models import JobInfo
+from backend.jobs.listing import (
+    list_workspace_collection_runs,
+    list_workspace_publish_runs,
+)
+from backend.paging import DEFAULT_LIMIT
+from backend.persistence.models import (
+    CollectionJobInfo,
+    CollectionRunInfo,
+    PublishJobInfo,
+    PublishRunInfo,
+)
 from backend.persistence.platform_db import PlatformSettings, platform_session
-from metaweave.utils.time_utils import utc_isoformat
+from backend.workspaces.repository import get_workspace
+from backend.workspaces.service import WorkspaceNotFoundError
 
 _RECENT_DAYS = 30
 
 
-@dataclass(frozen=True)
-class CollectionHomeStep:
-    job_id: UUID
-    step_name: str
-    last_status: str
-    created_at: datetime
-    updated_at: datetime
-
-
-def _rollup(statuses: list[str]) -> str:
-    # 与作业列表、发布准入共用同一汇总口径（doc 20.1 §11.2）
-    return rollup_job_status(statuses)
-
-
-def assemble_collection_home(rows: list[CollectionHomeStep], *, now: datetime) -> dict:
-    """同一 job_id 收成一条。running 优先于 failed，再否则为 success。
-
-    成功卡只计执行时间落在 now 往前 30 天（含边界）内的作业。失败不限窗口。
-    """
-    moment = now
-    cutoff = moment - timedelta(days=_RECENT_DAYS)
-    grouped: dict[UUID, list[CollectionHomeStep]] = {}
-    for row in rows:
-        grouped.setdefault(row.job_id, []).append(row)
-
-    items = []
-    counts = {"running": 0, "success_recent": 0, "failed": 0}
-    for job_id, steps in grouped.items():
-        ordered = sorted(steps, key=lambda item: (item.created_at, item.step_name))
-        executed_at = max(item.updated_at for item in ordered)
-        status = _rollup([item.last_status for item in ordered])
-        if status == "running":
-            counts["running"] += 1
-        elif status == "failed":
-            counts["failed"] += 1
-        elif cutoff <= executed_at <= moment:
-            counts["success_recent"] += 1
-        items.append(
-            {
-                "job_id": str(job_id),
-                "publish_id": None,
-                "executed_at": utc_isoformat(executed_at),
-                "steps": [item.step_name for item in ordered],
-                "status": status,
-            }
-        )
-    return {"counts": counts, "items": items}
-
-
-def _record(row: JobInfo) -> CollectionHomeStep:
-    return CollectionHomeStep(
-        job_id=row.job_id,
-        step_name=row.step_name,
-        last_status=row.last_status,
-        created_at=row.created_at,
-        updated_at=row.updated_at,
-    )
-
-
-def get_collection_home(
-    settings: PlatformSettings, source_id: UUID, *, now: datetime | None = None
+def get_workspace_home(
+    settings: PlatformSettings, workspace_id: str, *, now=None
 ) -> dict:
+    """工作区概览：来源信息、采集/发布运行计数与最近运行。"""
+    from datetime import datetime, timezone
+
+    from metaweave.utils.source_id import normalize_workspace_id
+
+    workspace_id = normalize_workspace_id(workspace_id)
     moment = now or datetime.now(timezone.utc)
     try:
         with platform_session(settings) as session:
-            source = get_db_source(session, source_id)
+            workspace = get_workspace(session, workspace_id)
+            if workspace is None:
+                raise WorkspaceNotFoundError("工作区不存在")
+            source = get_db_source(session, workspace.source_id)
             if source is None:
                 raise SourceNotFoundError("数据源不存在")
-            home = assemble_collection_home(
-                [_record(row) for row in list_source_step_rows(session, source_id)],
-                now=moment,
-            )
-            return {"is_active": source.is_active, **home}
-    except SourceNotFoundError:
-        raise
+            source_view = {
+                "source_id": source.source_id,
+                "display_name": source.display_name,
+                "db_name": source.db_name,
+                "is_active": source.is_active,
+            }
+            cutoff = moment - timedelta(days=_RECENT_DAYS)
+            collection_stats = session.execute(
+                select(
+                    CollectionRunInfo.status,
+                    func.count(),
+                )
+                .join(
+                    CollectionJobInfo,
+                    CollectionJobInfo.collection_job_id
+                    == CollectionRunInfo.collection_job_id,
+                )
+                .where(
+                    CollectionJobInfo.workspace_id == workspace_id,
+                    CollectionRunInfo.created_at >= cutoff,
+                )
+                .group_by(CollectionRunInfo.status)
+            ).all()
+            publish_stats = session.execute(
+                select(
+                    PublishRunInfo.status,
+                    func.count(),
+                )
+                .join(
+                    PublishJobInfo,
+                    PublishJobInfo.publish_job_id == PublishRunInfo.publish_job_id,
+                )
+                .where(
+                    PublishJobInfo.workspace_id == workspace_id,
+                    PublishRunInfo.created_at >= cutoff,
+                )
+                .group_by(PublishRunInfo.status)
+            ).all()
     except SQLAlchemyError:
         raise PlatformUnavailableError("平台库暂不可用") from None
+
+    def _count_rows(rows, status):
+        return sum(count for row_status, count in rows if row_status == status)
+
+    recent_collection = list_workspace_collection_runs(
+        settings, workspace_id, limit=DEFAULT_LIMIT, offset=0
+    )
+    recent_publish = list_workspace_publish_runs(
+        settings, workspace_id, limit=DEFAULT_LIMIT, offset=0
+    )
+    return {
+        "workspace_id": workspace_id,
+        "source": source_view,
+        "collection_runs": {
+            "pending": _count_rows(collection_stats, "pending"),
+            "running": _count_rows(collection_stats, "running"),
+            "success": _count_rows(collection_stats, "success"),
+            "partial_success": _count_rows(collection_stats, "partial_success"),
+            "failed": _count_rows(collection_stats, "failed"),
+            "recent": recent_collection["items"],
+        },
+        "publish_runs": {
+            "pending": _count_rows(publish_stats, "pending"),
+            "running": _count_rows(publish_stats, "running"),
+            "success": _count_rows(publish_stats, "success"),
+            "partial_success": _count_rows(publish_stats, "partial_success"),
+            "failed": _count_rows(publish_stats, "failed"),
+            "recent": recent_publish["items"],
+        },
+    }

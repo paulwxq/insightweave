@@ -80,6 +80,7 @@ class LoaderFactory:
         lazy = cls._lazy_loaders.get(load_type)
         if lazy:
             import importlib
+
             module = importlib.import_module(lazy[0])
             loader_class = getattr(module, lazy[1])
             cls.register(load_type, loader_class)

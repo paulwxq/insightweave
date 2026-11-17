@@ -1,0 +1,65 @@
+{
+  "baseline": {
+    "collected": 1166,
+    "passed": 1152,
+    "failed": 10,
+    "skipped": 4,
+    "failed_test_ids": [
+      "tests.unit.api.test_api_routes.TestHealthCheck::test_health_returns_ok",
+      "tests.unit.api.test_api_routes.TestQueryEndpoint::test_query_success",
+      "tests.unit.api.test_api_routes.TestQueryEndpoint::test_query_system_exception",
+      "tests.unit.api.test_api_routes.TestQueryEndpoint::test_query_too_long",
+      "tests.unit.api.test_api_routes.TestQueryEndpoint::test_query_with_error",
+      "tests.unit.api.test_api_routes.TestSessionsEndpoint::test_list_sessions",
+      "tests.unit.api.test_api_routes.TestSessionsEndpoint::test_list_sessions_empty",
+      "tests.unit.api.test_api_routes.TestTurnsEndpoint::test_get_turns",
+      "tests.unit.api.test_api_routes.TestTurnsEndpoint::test_get_turns_missing_thread_id",
+      "tests.unit.api.test_api_routes.TestTurnsEndpoint::test_get_turns_with_colon_in_thread_id"
+    ]
+  },
+  "candidate": {
+    "collected": 1166,
+    "passed": 1152,
+    "failed": 10,
+    "skipped": 4,
+    "failed_test_ids": [
+      "tests.unit.api.test_api_routes.TestHealthCheck::test_health_returns_ok",
+      "tests.unit.api.test_api_routes.TestQueryEndpoint::test_query_success",
+      "tests.unit.api.test_api_routes.TestQueryEndpoint::test_query_system_exception",
+      "tests.unit.api.test_api_routes.TestQueryEndpoint::test_query_too_long",
+      "tests.unit.api.test_api_routes.TestQueryEndpoint::test_query_with_error",
+      "tests.unit.api.test_api_routes.TestSessionsEndpoint::test_list_sessions",
+      "tests.unit.api.test_api_routes.TestSessionsEndpoint::test_list_sessions_empty",
+      "tests.unit.api.test_api_routes.TestTurnsEndpoint::test_get_turns",
+      "tests.unit.api.test_api_routes.TestTurnsEndpoint::test_get_turns_missing_thread_id",
+      "tests.unit.api.test_api_routes.TestTurnsEndpoint::test_get_turns_with_colon_in_thread_id"
+    ]
+  },
+  "identical_failure_ids": true,
+  "test_paths": [
+    "src/tests/db_deepagent/unit",
+    "src/tests/unit/api/v2",
+    "src/tests/unit/nl2sql_father",
+    "src/tests/unit/subgraph/test_question_parsing.py",
+    "src/tests/unit/subgraph/test_sql_generation.py",
+    "src/tests/unit/subgraph/test_state.py",
+    "src/tests/unit/services/test_llm_factory.py",
+    "src/tests/unit/services/test_embedding_client.py",
+    "src/tests/unit/services/test_chat_history_reader.py",
+    "tests/unit/vector_adapter",
+    "tests/unit/tools",
+    "tests/unit/api/test_api_routes.py",
+    "tests/unit/test_checkpoint_config.py",
+    "tests/unit/modules/test_sql_generation_prompt.py"
+  ],
+  "checkpoint_probe": [
+    "write-old passed",
+    "read-and-write-new passed",
+    "read-old passed"
+  ],
+  "notes": [
+    "No real model, database, Agent Server, or browser validation.",
+    "Old API tests use testserver, rejected by existing HostAllowlistGuard in both environments.",
+    "CLI doctor still pins sqlglot==30.22.0 and needs an implementation-time update."
+  ]
+}

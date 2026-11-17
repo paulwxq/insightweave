@@ -11,8 +11,14 @@ import type {
 import SchemaSelector from './SchemaSelector.vue'
 
 const props = withDefaults(
-  defineProps<{ mode?: FormMode; sourceId?: string; initial?: DataSourceListItem | null }>(),
-  { mode: 'create', sourceId: '', initial: null },
+  defineProps<{
+    mode?: FormMode
+    sourceId?: string
+    initial?: DataSourceListItem | null
+    /** doc 9 §7.7：取消按钮的返回目标——新建模式为数据源列表，修改模式为该数据源详情 */
+    cancelTo?: string
+  }>(),
+  { mode: 'create', sourceId: '', initial: null, cancelTo: '/data-sources' },
 )
 const emit = defineEmits<{ saved: [item: DataSourceListItem] }>()
 
@@ -283,6 +289,6 @@ async function save(confirmDuplicate = false) {
       <ul v-if="duplicateDetails.length"><li v-for="item in duplicateDetails" :key="item.source_id">{{ item.display_name }} · {{ item.source_id }}</li></ul>
       <button v-if="duplicateDetails.length" type="button" class="button button-outline" :disabled="saving" @click="save(true)">{{ mode === 'edit' ? '确认仍保存到当前数据源' : '确认仍创建独立数据源' }}</button>
     </div>
-    <div class="form-actions"><RouterLink to="/data-sources" class="button button-outline">取消</RouterLink><button type="submit" class="button button-primary" :disabled="!canSave"><svg v-if="mode === 'edit' && !saving" viewBox="0 0 24 24" aria-hidden="true"><ellipse cx="12" cy="5" rx="9" ry="3" /><path d="M3 5v14a9 3 0 0 0 18 0V5" /><path d="M3 12a9 3 0 0 0 18 0" /></svg>{{ saving ? (mode === 'edit' ? '保存中…' : '创建中…') : (mode === 'edit' ? '保存修改' : '▤  创建数据源') }}</button></div>
+    <div class="form-actions"><RouterLink :to="cancelTo" class="button button-outline">取消</RouterLink><button type="submit" class="button button-primary" :disabled="!canSave"><svg v-if="mode === 'edit' && !saving" viewBox="0 0 24 24" aria-hidden="true"><ellipse cx="12" cy="5" rx="9" ry="3" /><path d="M3 5v14a9 3 0 0 0 18 0V5" /><path d="M3 12a9 3 0 0 0 18 0" /></svg>{{ saving ? (mode === 'edit' ? '保存中…' : '创建中…') : (mode === 'edit' ? '保存修改' : '创建数据源') }}</button></div>
   </form>
 </template>

@@ -1,16 +1,8 @@
 """数据源登记路由；不直接连接数据库或执行 SQL。"""
 
-from fastapi import APIRouter, Depends, Request
-from fastapi.responses import Response
-
-from uuid import UUID
+from fastapi import APIRouter, BackgroundTasks, Depends, Request
 
 from backend.api.schemas import (
-    CollectionHomeResponse,
-    CollectionJobCreateRequest,
-    CollectionJobCreateResponse,
-    CollectionJobListResponse,
-    SqlReadinessResponse,
     ConnectionCheckRequest,
     ConnectionCheckResponse,
     DataSourceActivationRequest,
@@ -18,12 +10,9 @@ from backend.api.schemas import (
     DataSourceListItem,
     DataSourceListResponse,
     DataSourceUpdateRequest,
+    DeletionConfirmRequest,
+    DeletionTaskItem,
 )
-from backend.data_sources.domain_step_service import _UNSET
-from backend.data_sources.sql_step_service import get_sql_readiness
-from backend.jobs.collection_run import start_collection_job
-from backend.jobs.home import get_collection_home
-from backend.jobs.listing import list_collection_jobs
 from backend.data_sources.connection_check import (
     SourceConnectionInput,
     check_connection,
@@ -87,72 +76,23 @@ def list_sources(settings: PlatformSettings = Depends(get_platform_settings)):
     return {"items": list_registered_sources(settings)}
 
 
-@router.post(
-    "/{source_id}/collection-jobs",
-    response_model=CollectionJobCreateResponse,
-)
-async def create_source_collection_job(
-    source_id: UUID,
-    payload: CollectionJobCreateRequest,
-    settings: PlatformSettings = Depends(get_platform_settings),
-):
-    return await start_collection_job(
-        settings,
-        source_id,
-        payload.steps,
-        payload.job_id,
-        domain_description=(
-            payload.domain_description
-            if "domain_description" in payload.model_fields_set
-            else _UNSET
-        ),
-        sync_domain_description=payload.sync_domain_description,
-    )
-
-
-@router.get(
-    "/{source_id}/collection-jobs/{job_id}/sql-readiness",
-    response_model=SqlReadinessResponse,
-)
-def sql_readiness(
-    source_id: UUID,
-    job_id: UUID,
-    settings: PlatformSettings = Depends(get_platform_settings),
-):
-    return get_sql_readiness(settings, source_id, job_id)
-
-
-@router.get("/{source_id}/collection-home", response_model=CollectionHomeResponse)
-def get_source_collection_home(
-    source_id: UUID, settings: PlatformSettings = Depends(get_platform_settings)
-):
-    return get_collection_home(settings, source_id)
-
-
-@router.get("/{source_id}/collection-jobs", response_model=CollectionJobListResponse)
-def list_source_collection_jobs(
-    source_id: UUID, settings: PlatformSettings = Depends(get_platform_settings)
-):
-    return list_collection_jobs(settings, source_id)
-
-
 @router.get("/{source_id}", response_model=DataSourceListItem)
 def get_source(
-    source_id: UUID, settings: PlatformSettings = Depends(get_platform_settings)
+    source_id: str, settings: PlatformSettings = Depends(get_platform_settings)
 ):
     return get_registered_source(settings, source_id)
 
 
 @router.post("/{source_id}/connection-check", response_model=ConnectionCheckResponse)
 def check_saved_source_connection(
-    source_id: UUID, settings: PlatformSettings = Depends(get_platform_settings)
+    source_id: str, settings: PlatformSettings = Depends(get_platform_settings)
 ):
     return check_saved_connection(settings, source_id)
 
 
 @router.patch("/{source_id}/activation", response_model=DataSourceListItem)
 def set_activation(
-    source_id: UUID,
+    source_id: str,
     payload: DataSourceActivationRequest,
     settings: PlatformSettings = Depends(get_platform_settings),
 ):
@@ -162,7 +102,7 @@ def set_activation(
 
 @router.patch("/{source_id}", response_model=DataSourceListItem)
 def update_source(
-    source_id: UUID,
+    source_id: str,
     payload: DataSourceUpdateRequest,
     settings: PlatformSettings = Depends(get_platform_settings),
 ):
@@ -182,11 +122,55 @@ def update_source(
     return update_registered_source(settings, source_id, fields)
 
 
-@router.delete("/{source_id}", status_code=204)
+@router.get("/{source_id}/deletion-preview")
+def source_deletion_preview(
+    source_id: str, settings: PlatformSettings = Depends(get_platform_settings)
+):
+    """源删除范围、阻断运行与目标存储（doc 8.1 §7）。"""
+    from backend.deletion.service import preview_source_deletion
+
+    return preview_source_deletion(settings, source_id)
+
+
+@router.delete("/{source_id}", status_code=202, response_model=DeletionTaskItem)
 def delete_source(
-    source_id: UUID,
-    delete_output: bool = False,
+    source_id: str,
+    request: Request,
+    background: BackgroundTasks,
+    payload: DeletionConfirmRequest,
     settings: PlatformSettings = Depends(get_platform_settings),
 ):
-    delete_registered_source(settings, source_id, delete_output=delete_output)
-    return Response(status_code=204)
+    """提交数据源删除任务（doc 8.1 §2.4：异步逻辑删除，替换旧 204 契约）。"""
+    from backend.deletion.errors import DeletionInvalidRequestError
+    from backend.deletion.service import execute_task
+
+    # 废止的 delete_output 查询参数显式拒绝，不由 FastAPI 默默忽略
+    if "delete_output" in request.query_params:
+        raise DeletionInvalidRequestError("delete_output 参数已废止")
+    if payload.confirm_id != source_id:
+        raise DeletionInvalidRequestError("确认 ID 与目标数据源不一致")
+    task = delete_registered_source(settings, source_id)
+    background.add_task(execute_task, settings, task["task_id"])
+    return task
+
+
+@router.post(
+    "/{source_id}/published-data/clear",
+    status_code=202,
+    response_model=DeletionTaskItem,
+)
+def clear_published_data(
+    source_id: str,
+    background: BackgroundTasks,
+    payload: DeletionConfirmRequest,
+    settings: PlatformSettings = Depends(get_platform_settings),
+):
+    """源级知识清理（doc 8.1 §3.2）：五张内容表 + 三类向量 + 该源图。"""
+    from backend.deletion.errors import DeletionInvalidRequestError
+    from backend.deletion.service import execute_task, submit_knowledge_clear
+
+    if payload.confirm_id != source_id:
+        raise DeletionInvalidRequestError("确认 ID 与目标数据源不一致")
+    task = submit_knowledge_clear(settings, source_id)
+    background.add_task(execute_task, settings, task["task_id"])
+    return task

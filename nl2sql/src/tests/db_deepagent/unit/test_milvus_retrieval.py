@@ -17,6 +17,11 @@ from src.modules.db_deepagent.services.milvus_retrieval import DbMilvusRetrieval
 
 pytestmark = pytest.mark.unit
 
+# doc 5.1 §1 短 ID 夹具（doc 12.2 M-1：合法来源为 db_src_N；UUID 输入非法）
+SOURCE_A = "db_src_1"
+SOURCE_B = "db_src_2"
+UUID_SOURCE = "11111111-1111-4111-8111-111111111111"
+
 
 class _FakeHit:
     def __init__(self, distance: float, entity: dict):
@@ -51,11 +56,15 @@ class _FakeCollection:
     schema = _FakeSchema([_FakeField("embedding", {"dim": 1024})])
     search_hits: list[_FakeHit] = []
     query_rows: list[dict] = []
+    last_search_kwargs: dict = {}
+    last_query_kwargs: dict = {}
 
     def search(self, **kwargs):
+        type(self).last_search_kwargs = kwargs
         return _FakeSearchResult(list(self.search_hits))
 
     def query(self, **kwargs):
+        type(self).last_query_kwargs = kwargs
         return list(self.query_rows)
 
 
@@ -102,7 +111,7 @@ def retrieval(monkeypatch, db_agent_config: DbAgentConfig) -> DbMilvusRetrieval:
         mr, "utility", _FakeUtility(_config_collections(db_agent_config))
     )
     monkeypatch.setattr(mr, "Collection", lambda name, using: fake)
-    return DbMilvusRetrieval(db_agent_config, embedding=None)
+    return DbMilvusRetrieval(db_agent_config, embedding=None, source_id=SOURCE_A)
 
 
 def _table_hit(distance, entity=None):
@@ -128,7 +137,7 @@ class TestConnect:
         )
         monkeypatch.setattr(mr, "Collection", lambda name, using: _FakeCollection())
         with pytest.raises(RetrievalBackendError, match="不存在"):
-            DbMilvusRetrieval(db_agent_config, embedding=None)
+            DbMilvusRetrieval(db_agent_config, embedding=None, source_id=SOURCE_A)
 
     def test_missing_collection_rejected(self, monkeypatch, db_agent_config):
         utility = _FakeUtility(set())
@@ -137,7 +146,7 @@ class TestConnect:
         monkeypatch.setattr(mr, "utility", utility)
         monkeypatch.setattr(mr, "Collection", lambda name, using: _FakeCollection())
         with pytest.raises(RetrievalBackendError, match="集合不存在"):
-            DbMilvusRetrieval(db_agent_config, embedding=None)
+            DbMilvusRetrieval(db_agent_config, embedding=None, source_id=SOURCE_A)
 
 
 class TestSearchTables:
@@ -242,3 +251,121 @@ class TestVectorFieldDim:
         monkeypatch.setattr(mr, "Collection", lambda name, using: no_vector)
         with pytest.raises(RetrievalBackendError, match="不是向量字段"):
             retrieval.vector_field_dim("t", "object_id")
+
+
+class TestSourceFilter:
+    """doc 4 §3.1：六个入口统一按绑定 source_id 过滤（精确回查同样过滤）。"""
+
+    def test_search_tables_expr_includes_source(self, retrieval):
+        retrieval.search_tables([0.1], top_k=1, similarity_threshold=0.0)
+        expr = _FakeCollection.last_search_kwargs["expr"]
+        assert f'source_id == "{SOURCE_A}"' in expr
+        assert 'object_type == "table"' in expr
+
+    def test_search_columns_expr_includes_source(self, retrieval):
+        retrieval.search_columns([0.1], top_k=1, similarity_threshold=0.0)
+        expr = _FakeCollection.last_search_kwargs["expr"]
+        assert f'source_id == "{SOURCE_A}"' in expr
+        assert 'object_type == "column"' in expr
+
+    def test_search_dim_values_expr_includes_source(self, retrieval):
+        class _Emb:
+            def embed_query(self, text):
+                return [0.0]
+
+        retrieval._embedding = _Emb()
+        retrieval.search_dim_values("x", top_k=1, min_score=0.0)
+        assert (
+            _FakeCollection.last_search_kwargs["expr"] == f'source_id == "{SOURCE_A}"'
+        )
+
+    def test_search_similar_sqls_expr_includes_source(self, retrieval):
+        retrieval.search_similar_sqls([0.1], top_k=1, similarity_threshold=0.0)
+        assert (
+            _FakeCollection.last_search_kwargs["expr"] == f'source_id == "{SOURCE_A}"'
+        )
+
+    def test_fetch_table_cards_expr_includes_source(self, retrieval):
+        retrieval.fetch_table_cards(["orders.public.orders"])
+        expr = _FakeCollection.last_query_kwargs["expr"]
+        assert f'source_id == "{SOURCE_A}"' in expr
+        assert 'object_id in ["orders.public.orders"]' in expr
+        assert 'object_type == "table"' in expr
+
+    def test_fetch_table_categories_expr_includes_source(self, retrieval):
+        retrieval.fetch_table_categories(["orders.public.orders"])
+        expr = _FakeCollection.last_query_kwargs["expr"]
+        assert f'source_id == "{SOURCE_A}"' in expr
+
+    def test_other_source_never_matches_bound_filter(self, retrieval):
+        """表达式按绑定源构造：B 源前缀不出现在任何入口的表达式中。"""
+        retrieval.search_tables([0.1], top_k=1, similarity_threshold=0.0)
+        assert SOURCE_B not in _FakeCollection.last_search_kwargs["expr"]
+
+    def test_missing_source_id_rejected(self, monkeypatch, db_agent_config):
+        monkeypatch.setattr(mr, "connections", _FakeConnections())
+        monkeypatch.setattr(mr, "milvus_db", _FakeMilvusDb())
+        monkeypatch.setattr(
+            mr, "utility", _FakeUtility(_config_collections(db_agent_config))
+        )
+        monkeypatch.setattr(mr, "Collection", lambda name, using: _FakeCollection())
+        with pytest.raises(ValueError, match="source_id"):
+            DbMilvusRetrieval(db_agent_config, embedding=None)
+
+    def test_invalid_source_id_rejected(self, monkeypatch, db_agent_config):
+        monkeypatch.setattr(mr, "connections", _FakeConnections())
+        monkeypatch.setattr(mr, "milvus_db", _FakeMilvusDb())
+        monkeypatch.setattr(
+            mr, "utility", _FakeUtility(_config_collections(db_agent_config))
+        )
+        monkeypatch.setattr(mr, "Collection", lambda name, using: _FakeCollection())
+        with pytest.raises(ValueError, match="短 ID"):
+            DbMilvusRetrieval(db_agent_config, embedding=None, source_id="abc")
+
+    def test_uuid_source_id_rejected(self, monkeypatch, db_agent_config):
+        """doc 12.2 M-1：UUID 属非法来源（合法身份为 db_src_N 短 ID）。"""
+        monkeypatch.setattr(mr, "connections", _FakeConnections())
+        monkeypatch.setattr(mr, "milvus_db", _FakeMilvusDb())
+        monkeypatch.setattr(
+            mr, "utility", _FakeUtility(_config_collections(db_agent_config))
+        )
+        monkeypatch.setattr(mr, "Collection", lambda name, using: _FakeCollection())
+        with pytest.raises(ValueError, match="短 ID"):
+            DbMilvusRetrieval(db_agent_config, embedding=None, source_id=UUID_SOURCE)
+
+    def test_constructor_failure_disconnects_own_alias(
+        self, monkeypatch, db_agent_config
+    ):
+        """连接成功但集合缺失（构造抛错、对象未返回）：自行断开本实例
+        alias，不残留连接（doc 4 §4.7 构造失败资源回收）。"""
+        monkeypatch.setattr(mr, "connections", _FakeConnections())
+        monkeypatch.setattr(mr, "milvus_db", _FakeMilvusDb())
+        # 集合全部缺失 → _connect 在连接建立后抛 RetrievalBackendError
+        monkeypatch.setattr(mr, "utility", _FakeUtility(set()))
+
+        disconnected = []
+        import unittest.mock as _mock
+
+        with _mock.patch.object(
+            mr.connections, "disconnect", side_effect=lambda a: disconnected.append(a)
+        ):
+            with pytest.raises(RetrievalBackendError, match="集合不存在"):
+                DbMilvusRetrieval(db_agent_config, embedding=None, source_id=SOURCE_A)
+
+        assert len(disconnected) == 1  # 本实例 alias 已断开，无残留
+        assert disconnected[0].startswith(db_agent_config.milvus.alias + "_")
+
+    def test_alias_unique_per_instance(self, retrieval, monkeypatch, db_agent_config):
+        """doc 4 §3.3：每实例独立 alias（含配置前缀 + 唯一后缀），close 只断开自身。"""
+        assert retrieval._alias.startswith(db_agent_config.milvus.alias + "_")
+        disconnected = []
+        monkeypatch.setattr(
+            mr.connections,
+            "disconnect",
+            lambda alias: disconnected.append(alias),
+        )
+        second = DbMilvusRetrieval(db_agent_config, embedding=None, source_id=SOURCE_A)
+        assert second._alias != retrieval._alias
+        retrieval.close()
+        assert disconnected == [retrieval._alias]
+        second.close()

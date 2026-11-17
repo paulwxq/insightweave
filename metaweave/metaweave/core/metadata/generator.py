@@ -29,6 +29,7 @@ from metaweave.core.metadata.models import (
 )
 from metaweave.core.metadata.profiler import MetadataProfiler
 from metaweave.services.llm_service import LLMService
+from services.logging_manager import submit_with_context
 from metaweave.utils.file_utils import get_project_root
 from metaweave.utils.data_utils import (
     dataframe_to_sample_dict,
@@ -481,9 +482,11 @@ class MetadataGenerator:
     ) -> GenerationResult:
         """并行处理表"""
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            # 提交所有任务
+            # 提交所有任务；表级任务经 submit_with_context 复制提交者上下文，
+            # 使 ContextVar 化的步骤日志标签（doc 10.1 §4.4）在线程池内可继承
             future_to_table = {
-                executor.submit(
+                submit_with_context(
+                    executor,
                     self._process_table,
                     schema,
                     table,

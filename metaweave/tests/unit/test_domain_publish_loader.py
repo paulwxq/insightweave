@@ -1,25 +1,29 @@
-"""受管 Domain 发布加载器（doc 21.2 §4）：加固读取、解析规则与 MD 清单校验。"""
+"""受管 Domain 发布加载器（doc 21.2 §4）：加固读取、解析规则与 MD 清单校验。
+
+断代改造后按 (source_id, workspace_id, registration) 定位；旧的
+`inspect_domain_context`（job_info 行检查）已删除，准入统一走目录 marker。
+"""
 
 import json
 import os
 from datetime import datetime, timezone
-from types import SimpleNamespace
-from uuid import UUID
 
 import pytest
 import yaml
 
-from backend.profile_loading import domain_loader
 from backend.profile_loading.domain_loader import (
     DomainPublishInputError,
     check_domain_output_ready,
-    inspect_domain_context,
     read_domain_rows,
 )
 from backend.profile_loading.json_loader import RegistrationSnapshot
+from tests.unit.test_publish_service import (
+    SOURCE_ID,
+    WORKSPACE_ID,
+    install,
+    step_dir,
+)
 
-SOURCE_ID = UUID("b9a4943d-44d6-4f35-b553-d25207f9d8c1")
-JOB_ID = UUID("550e8400-e29b-41d4-a716-446655440000")
 DB_NAME = "orders"
 RUN_MARKER = datetime(2026, 10, 3, 10, 0, 0, tzinfo=timezone.utc)
 
@@ -60,15 +64,8 @@ SAMPLE_MD_FILES = (
 )
 
 
-def workspace(tmp_path):
-    return (
-        tmp_path / "output" / str(SOURCE_ID) / str(JOB_ID) / "domain",
-        tmp_path / "output" / str(SOURCE_ID) / str(JOB_ID) / "md",
-    )
-
-
 def write_yaml(tmp_path, payload="default", text=None):
-    domain_dir, _ = workspace(tmp_path)
+    domain_dir = step_dir(tmp_path, "domain")
     domain_dir.mkdir(parents=True, exist_ok=True)
     if text is None:
         if payload == "default":
@@ -79,99 +76,31 @@ def write_yaml(tmp_path, payload="default", text=None):
 
 
 def write_md(tmp_path, names=SAMPLE_MD_FILES, manifest_files="default", manifest=True):
-    _, md_dir = workspace(tmp_path)
+    md_dir = step_dir(tmp_path, "md")
     md_dir.mkdir(parents=True, exist_ok=True)
     for name in names:
         (md_dir / name).write_text("# 表\n", encoding="utf-8")
     if manifest:
         files = list(names) if manifest_files == "default" else manifest_files
         (md_dir / "manifest.json").write_text(
-            json.dumps(
-                {"files": files, "source_json_updated_at": "2026-10-03T10:00:00+00:00"}
-            ),
-            encoding="utf-8",
+            json.dumps({"files": files}), encoding="utf-8"
         )
     return md_dir
 
 
 @pytest.fixture(autouse=True)
-def project_root(tmp_path, monkeypatch):
-    from metaweave.utils import file_utils
-
-    monkeypatch.setattr(file_utils, "get_project_root", lambda: tmp_path)
-
-
-def _patch_context(monkeypatch, *, active=True, exists=True, workspace_ok=True):
-    source = (
-        SimpleNamespace(
-            is_active=active,
-            updated_at=RUN_MARKER,
-            db_name=DB_NAME,
-            selected_schemas=["public"],
-        )
-        if exists
-        else None
-    )
-    monkeypatch.setattr(domain_loader, "get_db_source", lambda session, sid: source)
-
-    def _owner(session, jid, sid):
-        if not workspace_ok:
-            from backend.jobs.repository import WorkspaceMissingError
-
-            raise WorkspaceMissingError("指定的 job_id 不存在: %s" % jid)
-
-    monkeypatch.setattr(domain_loader, "assert_workspace_owner", _owner)
-
-
-class TestInspector:
-    def test_source_missing_raises(self, monkeypatch):
-        from backend.profile_loading.db_loader import MetaLoadSourceNotFoundError
-
-        _patch_context(monkeypatch, exists=False)
-        with pytest.raises(MetaLoadSourceNotFoundError):
-            inspect_domain_context(SimpleNamespace(), SOURCE_ID, JOB_ID)
-
-    def test_source_disabled_raises(self, monkeypatch):
-        from backend.profile_loading.db_loader import MetaLoadSourceDisabledError
-
-        _patch_context(monkeypatch, active=False)
-        with pytest.raises(MetaLoadSourceDisabledError):
-            inspect_domain_context(SimpleNamespace(), SOURCE_ID, JOB_ID)
-
-    def test_workspace_mismatch_raises(self, monkeypatch):
-        from backend.jobs.repository import WorkspaceMissingError
-
-        _patch_context(monkeypatch, workspace_ok=False)
-        with pytest.raises(WorkspaceMissingError):
-            inspect_domain_context(SimpleNamespace(), SOURCE_ID, JOB_ID)
-
-    def test_missing_step_row_returns_none(self, monkeypatch):
-        _patch_context(monkeypatch)
-        monkeypatch.setattr(domain_loader, "get_step_row", lambda s, jid, name: None)
-        assert inspect_domain_context(SimpleNamespace(), SOURCE_ID, JOB_ID) == (
-            None,
-            None,
-        )
-
-    def test_success_row_returns_status_and_marker(self, monkeypatch):
-        _patch_context(monkeypatch)
-        row = SimpleNamespace(last_status="success", updated_at=RUN_MARKER)
-        monkeypatch.setattr(domain_loader, "get_step_row", lambda s, jid, name: row)
-        assert inspect_domain_context(SimpleNamespace(), SOURCE_ID, JOB_ID) == (
-            "success",
-            RUN_MARKER,
-        )
+def project_root(monkeypatch, tmp_path):
+    install(monkeypatch, tmp_path)
 
 
 class TestCheckOutputReady:
     def test_ready(self, tmp_path):
         write_yaml(tmp_path)
-        assert check_domain_output_ready(SOURCE_ID, JOB_ID) is True
+        assert check_domain_output_ready(SOURCE_ID, WORKSPACE_ID) is True
 
     def test_yaml_missing(self, tmp_path):
-        domain_dir, _ = workspace(tmp_path)
-        domain_dir.mkdir(parents=True)
-        assert check_domain_output_ready(SOURCE_ID, JOB_ID) is False
+        step_dir(tmp_path, "domain").mkdir(parents=True)
+        assert check_domain_output_ready(SOURCE_ID, WORKSPACE_ID) is False
 
     def test_yaml_symlink_rejected(self, tmp_path):
         domain_dir = write_yaml(tmp_path)
@@ -180,30 +109,30 @@ class TestCheckOutputReady:
         real.write_text("database: {name: orders}\ndomains: []\n", encoding="utf-8")
         target.unlink()
         target.symlink_to(real)
-        assert check_domain_output_ready(SOURCE_ID, JOB_ID) is False
+        assert check_domain_output_ready(SOURCE_ID, WORKSPACE_ID) is False
 
     def test_directory_symlink_rejected(self, tmp_path):
-        _, md_dir = workspace(tmp_path)
+        _, _md_dir = (step_dir(tmp_path, "domain"), step_dir(tmp_path, "md"))
         outside = tmp_path / "outside_domain"
         outside.mkdir(parents=True)
         (outside / "db_domains.yaml").write_text("{}", encoding="utf-8")
-        domain_dir = tmp_path / "output" / str(SOURCE_ID) / str(JOB_ID) / "domain"
+        domain_dir = step_dir(tmp_path, "domain")
         domain_dir.parent.mkdir(parents=True, exist_ok=True)
         domain_dir.symlink_to(outside)
-        assert check_domain_output_ready(SOURCE_ID, JOB_ID) is False
+        assert check_domain_output_ready(SOURCE_ID, WORKSPACE_ID) is False
 
     def test_yaml_fifo_rejected(self, tmp_path):
-        domain_dir, _ = workspace(tmp_path)
+        domain_dir = step_dir(tmp_path, "domain")
         domain_dir.mkdir(parents=True)
         os.mkfifo(domain_dir / "db_domains.yaml")
-        assert check_domain_output_ready(SOURCE_ID, JOB_ID) is False
+        assert check_domain_output_ready(SOURCE_ID, WORKSPACE_ID) is False
 
 
 class TestReadDomainRows:
     def test_valid_mapping_rows(self, tmp_path):
         write_yaml(tmp_path)
         write_md(tmp_path)
-        rows = read_domain_rows(SOURCE_ID, JOB_ID, registration())
+        rows = read_domain_rows(SOURCE_ID, WORKSPACE_ID, registration())
         # 行序按文件顺序（确定性），一张表属于多个 domain 时留多行
         assert rows == [
             {
@@ -234,7 +163,7 @@ class TestReadDomainRows:
         payload["domains"] = [payload["domains"][0]]  # 只有空的 _未分类_
         write_yaml(tmp_path, payload)
         write_md(tmp_path)
-        assert read_domain_rows(SOURCE_ID, JOB_ID, registration()) == []
+        assert read_domain_rows(SOURCE_ID, WORKSPACE_ID, registration()) == []
 
     def test_strip_applied_to_segments_and_texts(self, tmp_path):
         payload = {
@@ -249,7 +178,7 @@ class TestReadDomainRows:
         }
         write_yaml(tmp_path, payload)
         write_md(tmp_path, names=("orders.public.users.md",))
-        rows = read_domain_rows(SOURCE_ID, JOB_ID, registration())
+        rows = read_domain_rows(SOURCE_ID, WORKSPACE_ID, registration())
         assert rows == [
             {
                 "schema_name": "public",
@@ -273,7 +202,7 @@ class TestReadDomainRows:
         }
         write_yaml(tmp_path, payload)
         write_md(tmp_path, names=("orders.public.my table.md",))
-        rows = read_domain_rows(SOURCE_ID, JOB_ID, registration())
+        rows = read_domain_rows(SOURCE_ID, WORKSPACE_ID, registration())
         assert rows[0]["table_name"] == "my table"
 
     def test_duplicate_triple_kept_once(self, tmp_path):
@@ -289,7 +218,7 @@ class TestReadDomainRows:
         }
         write_yaml(tmp_path, payload)
         write_md(tmp_path, names=("orders.public.users.md",))
-        rows = read_domain_rows(SOURCE_ID, JOB_ID, registration())
+        rows = read_domain_rows(SOURCE_ID, WORKSPACE_ID, registration())
         assert len(rows) == 1
 
     def test_same_name_same_description_merges(self, tmp_path):
@@ -310,7 +239,7 @@ class TestReadDomainRows:
         }
         write_yaml(tmp_path, payload)
         write_md(tmp_path)
-        rows = read_domain_rows(SOURCE_ID, JOB_ID, registration())
+        rows = read_domain_rows(SOURCE_ID, WORKSPACE_ID, registration())
         assert {(row["table_name"], row["domain_name"]) for row in rows} == {
             ("users", "用户管理"),
             ("products", "用户管理"),
@@ -331,47 +260,47 @@ class TestReadDomainRows:
         write_yaml(tmp_path, payload)
         write_md(tmp_path)
         with pytest.raises(DomainPublishInputError):
-            read_domain_rows(SOURCE_ID, JOB_ID, registration())
+            read_domain_rows(SOURCE_ID, WORKSPACE_ID, registration())
 
     def test_top_level_not_object(self, tmp_path):
         write_yaml(tmp_path, text="- a\n- b\n")
         write_md(tmp_path)
         with pytest.raises(DomainPublishInputError):
-            read_domain_rows(SOURCE_ID, JOB_ID, registration())
+            read_domain_rows(SOURCE_ID, WORKSPACE_ID, registration())
 
     def test_domains_not_list(self, tmp_path):
         write_yaml(tmp_path, {"database": {"name": DB_NAME}, "domains": {}})
         write_md(tmp_path)
         with pytest.raises(DomainPublishInputError):
-            read_domain_rows(SOURCE_ID, JOB_ID, registration())
+            read_domain_rows(SOURCE_ID, WORKSPACE_ID, registration())
 
     def test_database_missing_or_not_object(self, tmp_path):
         write_yaml(tmp_path, {"domains": []})
         write_md(tmp_path, names=())
         with pytest.raises(DomainPublishInputError):
-            read_domain_rows(SOURCE_ID, JOB_ID, registration())
+            read_domain_rows(SOURCE_ID, WORKSPACE_ID, registration())
 
         write_yaml(tmp_path, {"database": "orders", "domains": []})
         with pytest.raises(DomainPublishInputError):
-            read_domain_rows(SOURCE_ID, JOB_ID, registration())
+            read_domain_rows(SOURCE_ID, WORKSPACE_ID, registration())
 
     def test_database_name_blank(self, tmp_path):
         write_yaml(tmp_path, {"database": {"name": "   "}, "domains": []})
         write_md(tmp_path, names=())
         with pytest.raises(DomainPublishInputError):
-            read_domain_rows(SOURCE_ID, JOB_ID, registration())
+            read_domain_rows(SOURCE_ID, WORKSPACE_ID, registration())
 
     def test_database_name_mismatch(self, tmp_path):
         write_yaml(tmp_path, {"database": {"name": "otherdb"}, "domains": []})
         write_md(tmp_path, names=())
         with pytest.raises(DomainPublishInputError):
-            read_domain_rows(SOURCE_ID, JOB_ID, registration())
+            read_domain_rows(SOURCE_ID, WORKSPACE_ID, registration())
 
     def test_domain_item_not_object(self, tmp_path):
         write_yaml(tmp_path, {"database": {"name": DB_NAME}, "domains": ["用户管理"]})
         write_md(tmp_path, names=())
         with pytest.raises(DomainPublishInputError):
-            read_domain_rows(SOURCE_ID, JOB_ID, registration())
+            read_domain_rows(SOURCE_ID, WORKSPACE_ID, registration())
 
     @pytest.mark.parametrize(
         "item",
@@ -386,7 +315,7 @@ class TestReadDomainRows:
         write_yaml(tmp_path, {"database": {"name": DB_NAME}, "domains": [item]})
         write_md(tmp_path, names=())
         with pytest.raises(DomainPublishInputError):
-            read_domain_rows(SOURCE_ID, JOB_ID, registration())
+            read_domain_rows(SOURCE_ID, WORKSPACE_ID, registration())
 
     def test_tables_not_list_or_entry_not_string(self, tmp_path):
         write_yaml(
@@ -400,7 +329,7 @@ class TestReadDomainRows:
         )
         write_md(tmp_path, names=())
         with pytest.raises(DomainPublishInputError):
-            read_domain_rows(SOURCE_ID, JOB_ID, registration())
+            read_domain_rows(SOURCE_ID, WORKSPACE_ID, registration())
 
         write_yaml(
             tmp_path,
@@ -410,7 +339,7 @@ class TestReadDomainRows:
             },
         )
         with pytest.raises(DomainPublishInputError):
-            read_domain_rows(SOURCE_ID, JOB_ID, registration())
+            read_domain_rows(SOURCE_ID, WORKSPACE_ID, registration())
 
     @pytest.mark.parametrize(
         "name",
@@ -431,7 +360,7 @@ class TestReadDomainRows:
         )
         write_md(tmp_path, names=())
         with pytest.raises(DomainPublishInputError):
-            read_domain_rows(SOURCE_ID, JOB_ID, registration())
+            read_domain_rows(SOURCE_ID, WORKSPACE_ID, registration())
 
     def test_first_segment_must_match_db(self, tmp_path):
         write_yaml(
@@ -449,7 +378,7 @@ class TestReadDomainRows:
         )
         write_md(tmp_path, names=("otherdb.public.users.md",))
         with pytest.raises(DomainPublishInputError):
-            read_domain_rows(SOURCE_ID, JOB_ID, registration())
+            read_domain_rows(SOURCE_ID, WORKSPACE_ID, registration())
 
     def test_schema_outside_selected_schemas(self, tmp_path):
         write_yaml(
@@ -463,10 +392,10 @@ class TestReadDomainRows:
         )
         write_md(tmp_path, names=("orders.sales.users.md",))
         with pytest.raises(DomainPublishInputError):
-            read_domain_rows(SOURCE_ID, JOB_ID, registration())
+            read_domain_rows(SOURCE_ID, WORKSPACE_ID, registration())
 
     def test_yaml_symlink_rejected(self, tmp_path):
-        domain_dir, _ = workspace(tmp_path)
+        domain_dir = step_dir(tmp_path, "domain")
         domain_dir.mkdir(parents=True)
         real = tmp_path / "real.yaml"
         real.write_text(
@@ -475,21 +404,21 @@ class TestReadDomainRows:
         (domain_dir / "db_domains.yaml").symlink_to(real)
         write_md(tmp_path)
         with pytest.raises(DomainPublishInputError):
-            read_domain_rows(SOURCE_ID, JOB_ID, registration())
+            read_domain_rows(SOURCE_ID, WORKSPACE_ID, registration())
 
     def test_yaml_fifo_rejected(self, tmp_path):
-        domain_dir, _ = workspace(tmp_path)
+        domain_dir = step_dir(tmp_path, "domain")
         domain_dir.mkdir(parents=True)
         os.mkfifo(domain_dir / "db_domains.yaml")
         write_md(tmp_path)
         with pytest.raises(DomainPublishInputError):
-            read_domain_rows(SOURCE_ID, JOB_ID, registration())
+            read_domain_rows(SOURCE_ID, WORKSPACE_ID, registration())
 
     def test_yaml_unparsable(self, tmp_path):
         write_yaml(tmp_path, text="domains: [\n")
         write_md(tmp_path)
         with pytest.raises(DomainPublishInputError):
-            read_domain_rows(SOURCE_ID, JOB_ID, registration())
+            read_domain_rows(SOURCE_ID, WORKSPACE_ID, registration())
 
     def test_manifest_missing_fails_even_with_zero_rows(self, tmp_path):
         payload = {
@@ -500,21 +429,21 @@ class TestReadDomainRows:
         md_dir = write_md(tmp_path, manifest=False)
         assert md_dir.exists()
         with pytest.raises(DomainPublishInputError):
-            read_domain_rows(SOURCE_ID, JOB_ID, registration())
+            read_domain_rows(SOURCE_ID, WORKSPACE_ID, registration())
 
     def test_manifest_shape_invalid(self, tmp_path):
         write_yaml(tmp_path)
         write_md(tmp_path, manifest_files=[])
         with pytest.raises(DomainPublishInputError):
-            read_domain_rows(SOURCE_ID, JOB_ID, registration())
+            read_domain_rows(SOURCE_ID, WORKSPACE_ID, registration())
 
         write_md(tmp_path, manifest_files=["orders.public.users.txt"])
         with pytest.raises(DomainPublishInputError):
-            read_domain_rows(SOURCE_ID, JOB_ID, registration())
+            read_domain_rows(SOURCE_ID, WORKSPACE_ID, registration())
 
         write_md(tmp_path, manifest_files="orders.public.users.md")
         with pytest.raises(DomainPublishInputError):
-            read_domain_rows(SOURCE_ID, JOB_ID, registration())
+            read_domain_rows(SOURCE_ID, WORKSPACE_ID, registration())
 
     def test_manifest_symlink_rejected(self, tmp_path):
         write_yaml(tmp_path)
@@ -525,20 +454,20 @@ class TestReadDomainRows:
         manifest.unlink()
         manifest.symlink_to(real)
         with pytest.raises(DomainPublishInputError):
-            read_domain_rows(SOURCE_ID, JOB_ID, registration())
+            read_domain_rows(SOURCE_ID, WORKSPACE_ID, registration())
 
     def test_table_not_in_manifest(self, tmp_path):
         write_yaml(tmp_path)
         write_md(tmp_path, names=("orders.public.users.md",))
         with pytest.raises(DomainPublishInputError):
-            read_domain_rows(SOURCE_ID, JOB_ID, registration())
+            read_domain_rows(SOURCE_ID, WORKSPACE_ID, registration())
 
     def test_manifest_listed_file_missing_on_disk(self, tmp_path):
         write_yaml(tmp_path)
         write_md(tmp_path)
-        (workspace(tmp_path)[1] / "orders.public.products.md").unlink()
+        (step_dir(tmp_path, "md") / "orders.public.products.md").unlink()
         with pytest.raises(DomainPublishInputError):
-            read_domain_rows(SOURCE_ID, JOB_ID, registration())
+            read_domain_rows(SOURCE_ID, WORKSPACE_ID, registration())
 
     def test_manifest_listed_file_symlink_rejected(self, tmp_path):
         write_yaml(tmp_path)
@@ -549,7 +478,7 @@ class TestReadDomainRows:
         target.unlink()
         target.symlink_to(real)
         with pytest.raises(DomainPublishInputError):
-            read_domain_rows(SOURCE_ID, JOB_ID, registration())
+            read_domain_rows(SOURCE_ID, WORKSPACE_ID, registration())
 
     def test_directory_symlink_rejected(self, tmp_path):
         outside = tmp_path / "outside_domain"
@@ -557,19 +486,20 @@ class TestReadDomainRows:
         (outside / "db_domains.yaml").write_text(
             yaml.safe_dump(sample_payload(), allow_unicode=True), encoding="utf-8"
         )
-        domain_dir = tmp_path / "output" / str(SOURCE_ID) / str(JOB_ID) / "domain"
+        domain_dir = step_dir(tmp_path, "domain")
         domain_dir.parent.mkdir(parents=True, exist_ok=True)
         domain_dir.symlink_to(outside)
         write_md(tmp_path)
         with pytest.raises(DomainPublishInputError):
-            read_domain_rows(SOURCE_ID, JOB_ID, registration())
+            read_domain_rows(SOURCE_ID, WORKSPACE_ID, registration())
 
 
 def test_manifest_name_matches_collection_side():
-    """清单文件名与采集侧 md 步骤常量一致（测试锁定，同 json_loader 先例）。"""
+    """清单文件名与采集侧 md 步骤常量一致（测试锁定，同 ddl_loader 先例）。"""
     from backend.data_sources.md_step_service import MD_MANIFEST_NAME as COLLECTION_NAME
+    from backend.profile_loading.domain_loader import MD_MANIFEST_NAME
 
-    assert domain_loader.MD_MANIFEST_NAME == COLLECTION_NAME
+    assert MD_MANIFEST_NAME == COLLECTION_NAME
 
 
 class TestTablesFieldBoundary:
@@ -588,7 +518,7 @@ class TestTablesFieldBoundary:
         }
         write_yaml(tmp_path, payload)
         write_md(tmp_path, names=("orders.public.users.md",))
-        rows = read_domain_rows(SOURCE_ID, JOB_ID, registration())
+        rows = read_domain_rows(SOURCE_ID, WORKSPACE_ID, registration())
         assert [(row["table_name"], row["domain_name"]) for row in rows] == [
             ("users", "用户管理")
         ]
@@ -609,7 +539,7 @@ class TestTablesFieldBoundary:
         write_yaml(tmp_path, payload)
         write_md(tmp_path, names=("orders.public.users.md",))
         with pytest.raises(DomainPublishInputError):
-            read_domain_rows(SOURCE_ID, JOB_ID, registration())
+            read_domain_rows(SOURCE_ID, WORKSPACE_ID, registration())
 
 
 class TestDirectoryResolutionErrors:
@@ -617,23 +547,27 @@ class TestDirectoryResolutionErrors:
         self, tmp_path, monkeypatch
     ):
         """目录访问抛 OSError 时按解析失败处理（doc 21.2 §4 规则 2）。"""
+        from backend.profile_loading import domain_loader
+
         write_yaml(tmp_path)
         write_md(tmp_path)
 
-        def boom(source_id, job_id):
+        def boom(source_id, workspace_id):
             raise PermissionError("denied")
 
         monkeypatch.setattr(domain_loader, "resolve_domain_output_dir", boom)
         with pytest.raises(DomainPublishInputError):
-            read_domain_rows(SOURCE_ID, JOB_ID, registration())
+            read_domain_rows(SOURCE_ID, WORKSPACE_ID, registration())
 
     def test_md_dir_resolution_oserror_is_parse_failure(self, tmp_path, monkeypatch):
+        from backend.profile_loading import domain_loader
+
         write_yaml(tmp_path)
         write_md(tmp_path)
 
-        def boom(source_id, job_id):
+        def boom(source_id, workspace_id):
             raise PermissionError("denied")
 
         monkeypatch.setattr(domain_loader, "resolve_md_output_dir", boom)
         with pytest.raises(DomainPublishInputError):
-            read_domain_rows(SOURCE_ID, JOB_ID, registration())
+            read_domain_rows(SOURCE_ID, WORKSPACE_ID, registration())

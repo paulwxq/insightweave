@@ -41,6 +41,9 @@ logs/
 *.log
 *.pid
 
+# ===== 本地二进制样本 =====
+*.pkl
+
 # ===== 运行产物目录 =====
 # 用 **/output/**（匹配 output 内部内容）而非 output/（排除目录本身），
 # 以免父目录被忽略导致 metaweave/.gitignore 中对人工维护文件的
@@ -70,3 +73,11 @@ Thumbs.db
 *.swp
 *.swo
 *~
+
+# 本机部署产物与临时报告（doc 13 §8；实值不入库）
+deploy/candidate-*.json
+deploy/logs/
+# deploy/env/ 下仅入库 *.example 模板（实值 env 文件仍被忽略）
+!deploy/env/
+deploy/env/*
+!deploy/env/*.example

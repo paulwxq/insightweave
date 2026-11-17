@@ -1,65 +1,54 @@
-"""对象详情与 DDL 摘要/正文读取（doc 19.2 §8.1/§8.2）。
+"""对象详情只读查询（doc 19.2 §8、6.1 §16–§17）。
 
-只读当前 JSON 发布：源级检查通过后按身份取对象行与字段行，逐行核对
-版本与字段数；DDL 只在详情中给摘要（不解析正文），`object-ddl` 才在
-同一条当前 DDL 行上切分 SQL 与样例。
+新模型下 `table_profile`/`table_column_profile` 行即当前内容；对象行与
+字段行的 `publish_run_id` 一致性由本模块复核（doc 6.1 §17：服务须校验），
+发布来源取行上的 `publish_run_id`。
 """
 
 import logging
-from uuid import UUID
 
 from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 
+from metaweave.utils.time_utils import utc_isoformat
+
 from backend.assets.ddl_display import (
-    DefinitionInconsistentError,
     extract_sample,
     split_definition_sql,
 )
-from backend.assets.object_catalog import get_current_json_publishes
-from backend.assets.read_tx import begin_readonly_repeatable_read
 from backend.data_sources.registration_service import (
     PlatformUnavailableError,
     SourceNotFoundError,
 )
 from backend.data_sources.repository import get_db_source
+from backend.assets.read_tx import begin_readonly_repeatable_read
 from backend.persistence.models import (
-    PublishInfo,
+    PublishRunInfo,
     TableColumnProfile,
     TableDefinition,
     TableProfile,
 )
 from backend.persistence.platform_db import PlatformSettings, platform_session
-from metaweave.utils.time_utils import utc_isoformat
-
-JSON_STEP = "json"
-DDL_STEP = "ddl"
-DEFINE_TYPE_DDL = "ddl"
+from metaweave.utils.source_id import normalize_source_id
 
 logger = logging.getLogger("backend.assets")
 
+DDL_STEP = "ddl"
+DEFINE_TYPE_DDL = "ddl"
+
 
 class ProfileInconsistentError(RuntimeError):
-    """当前 JSON 发布与画像行不一致（doc 19.2 §8.2）。"""
+    """对象行与字段行发布来源不一致。"""
 
 
 class ObjectNotFoundError(RuntimeError):
     """对象不在当前 JSON 发布的对象集合中。"""
 
 
-def _publish_block(current) -> dict:
-    return {
-        "publish_id": str(current.publish_id),
-        "job_id": str(current.job_id),
-        "published_at": utc_isoformat(current.created_at),
-    }
-
-
-def _source_rows(session, source_id: UUID) -> list:
-    rows = list(
+def _source_rows(session, source_id: str) -> list:
+    return list(
         session.scalars(select(TableProfile).where(TableProfile.source_id == source_id))
     )
-    return rows
 
 
 def _identity_row(rows, schema_name: str, object_name: str):
@@ -74,15 +63,13 @@ def _identity_row(rows, schema_name: str, object_name: str):
 
 
 def _profile_block(row) -> dict:
-    """§6 表级标量全量，排除 json_sample_records（doc 19.2 §8.1.1）。"""
     return {
-        "source_id": str(row.source_id),
+        "source_id": row.source_id,
         "schema_name": row.schema_name,
         "object_name": row.object_name,
         "db_name": row.db_name,
         "object_type": row.object_type,
-        "publish_id": str(row.publish_id),
-        "job_id": str(row.job_id),
+        "publish_run_id": str(row.publish_run_id),
         "metadata_version": row.metadata_version,
         "generated_timestamp": (
             utc_isoformat(row.generated_timestamp)
@@ -161,14 +148,11 @@ def _column_indexes(row, column_name: str):
 
 
 def _column_block(row, column) -> dict:
-    # §8.1.1：字段行返回 §6 的字段行标量（仅排除 value_distribution），
-    # 身份四列置首对齐 §6.2 列序；publish_id 用字段行自身版本标记
-    # （读取路径已校验其与对象行相同）
     return {
-        "source_id": str(row.source_id),
+        "source_id": row.source_id,
         "schema_name": row.schema_name,
         "object_name": row.object_name,
-        "publish_id": str(column.publish_id),
+        "publish_run_id": str(column.publish_run_id),
         "column_name": column.column_name,
         "ordinal_position": column.ordinal_position,
         "data_type": column.data_type,
@@ -203,25 +187,14 @@ def _column_block(row, column) -> dict:
 
 def _ddl_summary(
     session,
-    source_id: UUID,
+    source_id: str,
     *,
     db_name: str,
     object_type: str,
     schema_name: str,
     object_name: str,
 ):
-    """同身份 DDL 当前态摘要（doc 19.2 §8.2），不解析 define_text。"""
-    currents = list(
-        session.scalars(
-            select(PublishInfo).where(
-                PublishInfo.source_id == source_id,
-                PublishInfo.step_name == DDL_STEP,
-                PublishInfo.is_current_publish.is_(True),
-                # 失败尝试的 current 标记不构成有效当前发布（doc 19.2 §8.2）
-                PublishInfo.status == "success",
-            )
-        )
-    )
+    """同身份 DDL 当前态摘要（doc 6.1 §15），不解析 define_text。"""
     rows = list(
         session.scalars(
             select(TableDefinition).where(
@@ -233,43 +206,14 @@ def _ddl_summary(
         )
     )
     row = rows[0] if rows else None
-    # §8.2：标记缺失且无行、或有标记但无行 → not_published；
-    # 标记缺失却有孤立行、或行版本与标记不符 → inconsistent。
-    if not currents:
-        if row is not None:
-            logger.error(
-                "DDL 孤立行（无当前发布标记）source_id=%s schema=%s object=%s",
-                source_id,
-                schema_name,
-                object_name,
-            )
-            return "inconsistent", None
-        return "not_published", None
-    if len(currents) > 1:
-        logger.error(
-            "DDL 当前发布标记出现多条 source_id=%s count=%d",
-            source_id,
-            len(currents),
-        )
-        return "inconsistent", None
-    current = currents[0]
     if row is None:
         return "not_published", None
-    if row.publish_id != current.publish_id:
-        logger.error(
-            "DDL 行与当前标记版本不符 source_id=%s schema=%s object=%s",
-            source_id,
-            schema_name,
-            object_name,
-        )
-        return "inconsistent", None
     if row.db_name != db_name or row.object_type != object_type:
         return "incompatible", None
     return (
         "ready",
         {
-            "publish_id": str(row.publish_id),
-            "job_id": str(row.job_id),
+            "publish_run_id": str(row.publish_run_id),
             "loaded_at": utc_isoformat(row.loaded_at),
         },
     )
@@ -278,7 +222,7 @@ def _ddl_summary(
 def _not_published_detail(source_id, schema_name, object_name) -> dict:
     return {
         "state": "not_published",
-        "source_id": str(source_id),
+        "source_id": source_id,
         "schema_name": schema_name,
         "object_name": object_name,
         "json_publish": None,
@@ -289,46 +233,38 @@ def _not_published_detail(source_id, schema_name, object_name) -> dict:
     }
 
 
-def _load_current_and_rows(session, source_id: UUID):
-    """json current（仅成功）+ 源全部对象行；源级不一致直接抛受控错误。
-
-    与列表/候选统一口径（doc 19.2 §8.2）：源内任一对象行的
-    publish_id/job_id 与当前发布不符即判当前内容不一致，不只在读取
-    目标对象时才校验。
-    """
-    currents = get_current_json_publishes(session, source_id)
-    if not currents:
-        return None, None
-    if len(currents) > 1:
-        raise ProfileInconsistentError("JSON 当前发布标记出现多条")
-    current = currents[0]
+def _load_rows_checked(session, source_id: str):
+    """读取源全部对象行；源内对象行版本不一致直接抛受控错误。"""
     rows = _source_rows(session, source_id)
     if not rows:
-        raise ProfileInconsistentError("已有 JSON current 却没有任何对象行")
-    if any(
-        row.publish_id != current.publish_id or row.job_id != current.job_id
-        for row in rows
-    ):
-        logger.error("JSON 对象行版本与当前发布不符 source_id=%s", source_id)
-        raise ProfileInconsistentError("对象行版本与当前发布不符")
-    return current, rows
+        return []
+    run_ids = {row.publish_run_id for row in rows}
+    if len(run_ids) > 1:
+        logger.error("JSON 对象行存在多个发布来源 source_id=%s", source_id)
+        raise ProfileInconsistentError("对象行发布来源不一致")
+    return rows
 
 
 def get_object_detail(
     settings: PlatformSettings,
-    source_id: UUID,
+    source_id: str,
     schema_name: str,
     object_name: str,
 ) -> dict:
     """一次返回基本信息/字典/画像所需的对象行、字段行与 DDL 摘要。"""
+    source_id = normalize_source_id(source_id)
     try:
         with platform_session(settings) as session:
             begin_readonly_repeatable_read(session)
+            # doc 8.1 §8.1：资产只读守卫（已删源 410；删除中仍可看画像）
+            from backend.access_guards import require_source
+
+            require_source(session, source_id)
             source = get_db_source(session, source_id)
             if source is None:
                 raise SourceNotFoundError("数据源不存在")
-            current, rows = _load_current_and_rows(session, source_id)
-            if current is None:
+            rows = _load_rows_checked(session, source_id)
+            if not rows:
                 return _not_published_detail(source_id, schema_name, object_name)
             row = _identity_row(rows, schema_name, object_name)
             if row is None:
@@ -345,7 +281,7 @@ def get_object_detail(
                 )
             )
             if len(columns) != row.column_count or any(
-                column.publish_id != row.publish_id for column in columns
+                column.publish_run_id != row.publish_run_id for column in columns
             ):
                 logger.error(
                     "字段行版本或数量不符 source_id=%s schema=%s object=%s",
@@ -354,6 +290,7 @@ def get_object_detail(
                     object_name,
                 )
                 raise ProfileInconsistentError("字段行版本或数量不符")
+            run = session.get(PublishRunInfo, row.publish_run_id)
             ddl_state, ddl_publish = _ddl_summary(
                 session,
                 source_id,
@@ -364,10 +301,15 @@ def get_object_detail(
             )
             return {
                 "state": "ready",
-                "source_id": str(source_id),
+                "source_id": source_id,
                 "schema_name": schema_name,
                 "object_name": object_name,
-                "json_publish": _publish_block(current),
+                "json_publish": {
+                    "publish_run_id": str(row.publish_run_id),
+                    "published_at": (
+                        utc_isoformat(run.created_at) if run is not None else None
+                    ),
+                },
                 "ddl_state": ddl_state,
                 "ddl_publish": ddl_publish,
                 "profile": _profile_block(row),
@@ -379,21 +321,24 @@ def get_object_detail(
 
 def get_object_ddl(
     settings: PlatformSettings,
-    source_id: UUID,
+    source_id: str,
     schema_name: str,
     object_name: str,
 ) -> dict:
     """从同一条当前 DDL 行拆出对象定义 SQL 与最多 5 条样例（doc 19.2 §8.1）。"""
+    source_id = normalize_source_id(source_id)
     try:
         with platform_session(settings) as session:
             begin_readonly_repeatable_read(session)
+            # doc 8.1 §8.1：资产只读守卫（已删源 410；删除中仍可看画像）
+            from backend.access_guards import require_source
+
+            require_source(session, source_id)
             source = get_db_source(session, source_id)
             if source is None:
                 raise SourceNotFoundError("数据源不存在")
-            current, rows = _load_current_and_rows(session, source_id)
-            # object-ddl 只服务当前 JSON 中存在的对象；无 current 即对象
-            # 不存在，不能误当成 DDL 未发布（doc 19.2 §8.1.1）
-            if current is None:
+            rows = _load_rows_checked(session, source_id)
+            if not rows:
                 raise ObjectNotFoundError("对象不在当前 JSON 发布中")
             row = _identity_row(rows, schema_name, object_name)
             if row is None:
@@ -406,11 +351,9 @@ def get_object_ddl(
                 schema_name=schema_name,
                 object_name=object_name,
             )
-            if ddl_state == "inconsistent":
-                raise DefinitionInconsistentError("已发布 DDL 状态不一致")
             payload = {
                 "state": ddl_state,
-                "json_publish_id": str(current.publish_id),
+                "json_publish_run_id": str(row.publish_run_id),
                 "ddl_publish": ddl_publish,
                 "definition_sql": None,
                 "sample_state": None,

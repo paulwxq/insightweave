@@ -17,7 +17,10 @@ class TestNormalizeGenerateDomainsOptions:
 
     @pytest.mark.parametrize("desc", ["  订单业务  ", "dvd 租赁"])
     def test_description_stripped(self, desc):
-        assert normalize_generate_domains_options(desc, None, None).description == desc.strip()
+        assert (
+            normalize_generate_domains_options(desc, None, None).description
+            == desc.strip()
+        )
 
     @pytest.mark.parametrize("bad", [123, 1.5, True, ["a"], {"k": 1}])
     def test_description_non_string_rejected(self, bad):
@@ -27,9 +30,14 @@ class TestNormalizeGenerateDomainsOptions:
         assert "description 必须是字符串或 None" in str(ei.value)
 
     def test_mode_default_and_valid(self):
-        assert normalize_generate_domains_options(None, None, None).md_context_mode == "name_comment"
+        assert (
+            normalize_generate_domains_options(None, None, None).md_context_mode
+            == "name_comment"
+        )
         for m in ("name", "name_comment", "full"):
-            assert normalize_generate_domains_options(None, m, None).md_context_mode == m
+            assert (
+                normalize_generate_domains_options(None, m, None).md_context_mode == m
+            )
 
     @pytest.mark.parametrize("mode", ["FULL", "Name_Comment", "namecomment", 1, True])
     def test_mode_rejects_non_canonical(self, mode):
@@ -60,9 +68,10 @@ class TestRequestAndMap:
 
     def test_step_map_covers_all_operations(self):
         # doc 21.1 §5.1：方向为 ops ⊆ map——每个 operation 必须有映射，
-        # map 允许额外包含 Web 步骤（domain）。
+        # map 允许额外包含 Web 步骤（domain/dim）。
         assert set(METADATA_OPERATIONS) <= set(OPERATION_STEP_MAP)
-        assert OPERATION_STEP_MAP["generate-dim-config"] == "dim_config"
+        # doc 6 §2：generate-dim-config 复用更名后的 dim 日志段
+        assert OPERATION_STEP_MAP["generate-dim-config"] == "dim"
         assert OPERATION_STEP_MAP["generate-domains"] == "generate-domains"
 
     def test_step_map_includes_web_domain_step(self):
@@ -70,16 +79,21 @@ class TestRequestAndMap:
         assert OPERATION_STEP_MAP["domain"] == "domain"
         assert "domain" not in METADATA_OPERATIONS
 
-    def test_step_map_includes_web_dim_config_step(self):
-        """Web 步骤 dim_config 只进映射、不进 METADATA_OPERATIONS（doc 22.1 §5.1）。"""
-        assert OPERATION_STEP_MAP["dim_config"] == "dim_config"
-        assert "dim_config" not in METADATA_OPERATIONS
+    def test_step_map_includes_web_dim_step(self):
+        """Web 步骤 dim（doc 6 §2 由 dim_config 更名）只进映射、不进 METADATA_OPERATIONS。"""
+        assert OPERATION_STEP_MAP["dim"] == "dim"
+        assert "dim" not in METADATA_OPERATIONS
 
-    def test_set_operation_step_dim_config_no_keyerror(self):
-        """doc 22.1 A11a：set_operation_step("dim_config") 不抛 KeyError。"""
+    def test_step_map_includes_web_sql_step(self):
+        """Web sql 复用 SQL 生成日志段，CLI 仍使用 generate-sql-rag。"""
+        assert OPERATION_STEP_MAP["sql"] == "sql-rag-generate"
+        assert "sql" not in METADATA_OPERATIONS
+
+    def test_set_operation_step_dim_no_keyerror(self):
+        """doc 22.1 A11a：set_operation_step("dim") 不抛 KeyError。"""
         from metaweave.core.metadata.execution import set_operation_step
 
-        set_operation_step("dim_config")
+        set_operation_step("dim")
 
     def test_step_map_no_empty_values(self):
         assert all(v for v in OPERATION_STEP_MAP.values())

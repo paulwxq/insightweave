@@ -1,7 +1,9 @@
-"""doc 24.1：发布页 domain 配置编辑（读取 / 校验 / 原子写回）。
+"""doc 24.1、6.2 §5.2：发布页 domain 配置编辑（读取 / 校验 / 原子写回）。
 
-保存只改受管 ``db_domains.yaml`` 的 domain 列表。库名、库描述和
-``llm_inference`` 不接受请求里的新值。指纹对文件原始字节计算。
+按工作区定位；保存前对将被覆盖的 ``db_domains.yaml`` 做文件级备份（只
+复制旧版，不触碰采集 marker 与其他产物）；备份失败本次保存终止且不改动
+任何现有内容。保存只改受管 ``db_domains.yaml`` 的 domain 列表，库名、
+库描述和 ``llm_inference`` 不接受请求里的新值；指纹对文件原始字节计算。
 """
 
 from __future__ import annotations
@@ -13,25 +15,27 @@ import stat
 import tempfile
 from pathlib import Path
 from typing import Any
-from uuid import UUID
 
 import yaml
 
 from backend.data_sources.repository import get_db_source
-from backend.jobs.repository import assert_workspace_owner, get_step_row
 from backend.persistence.platform_db import PlatformSettings, platform_session
 from backend.profile_loading.db_loader import (
     MetaLoadSourceDisabledError,
     MetaLoadSourceNotFoundError,
 )
 from backend.profile_loading.file_utils import read_regular_text
-from backend.publishing.repository import lock_db_source_row
+from backend.workspace_files.backups import (
+    EditBackupFailedError,
+    backup_files_before_edit,
+)
+from backend.workspace_files.markers import read_collection_marker
 from metaweave.core.clean_targets import (
     resolve_domain_output_dir,
     resolve_md_output_dir,
 )
 from metaweave.core.metadata.domain_generator import LiteralDumper
-from metaweave.utils.source_id import normalize_source_id
+from metaweave.utils.source_id import normalize_workspace_id
 
 DOMAIN_ARTIFACT_NAME = "db_domains.yaml"
 DOMAIN_STEP_NAME = "domain"
@@ -67,10 +71,20 @@ class DomainConfigRegeneratedError(Exception):
         self.details: dict[str, Any] = {}
 
 
-class DomainConfigWriteFailedError(Exception):
-    """500 domain_config_write_failed：临时文件写入或替换失败，原文件不变。"""
+class DomainConfigBackupFailedError(Exception):
+    """500 domain_config_backup_failed：文件级备份失败，本次保存终止。"""
 
-    def __init__(self, message: str = "domain 配置写回失败，原文件未修改"):
+    def __init__(self, message: str = "domain 配置备份失败，本次保存未执行"):
+        super().__init__(message)
+        self.details: dict[str, Any] = {}
+
+
+class DomainConfigWriteFailedError(Exception):
+    """500 domain_config_write_failed：临时文件写入或替换失败，已完成备份保留。"""
+
+    def __init__(
+        self, message: str = "domain 配置写回失败；已完成的备份保留供人工核对"
+    ):
         super().__init__(message)
         self.details: dict[str, Any] = {}
 
@@ -81,8 +95,36 @@ def replace_domain_file(src: Path, dst: Path) -> None:
     os.replace(src, dst)
 
 
-def _resolve_identifiers(source_id, job_id) -> tuple[UUID, UUID]:
-    return normalize_source_id(source_id), normalize_source_id(job_id)
+def _require_context(session, source_id: str, workspace_id: str):
+    """工作区归属与 domain 产物准入（doc 6 §4.1：唯一成功 marker）。"""
+    from backend.workspaces.repository import get_workspace
+
+    workspace = get_workspace(session, workspace_id)
+    if workspace is None:
+        raise DomainConfigOutputMissingError("工作区不存在")
+    if workspace.source_id != source_id:
+        raise DomainConfigOutputMissingError("工作区不属于该数据源")
+    source = get_db_source(session, source_id)
+    if source is None:
+        raise MetaLoadSourceNotFoundError("未找到指定 source_id 的数据源")
+    if not source.is_active:
+        raise MetaLoadSourceDisabledError("指定数据源已禁用")
+    marker, error = read_collection_marker(
+        resolve_domain_output_dir(source_id, workspace_id)
+    )
+    if marker is None:
+        raise DomainConfigOutputMissingError(
+            error or "该工作区没有 Domain 采集 marker，请先执行 Domain"
+        )
+    if marker.status != "success":
+        raise DomainConfigOutputMissingError(
+            "该工作区的 Domain 采集未成功，请先重跑 Domain 后再编辑"
+        )
+    return source
+
+
+def _yaml_path(source_id: str, workspace_id: str) -> Path:
+    return resolve_domain_output_dir(source_id, workspace_id) / DOMAIN_ARTIFACT_NAME
 
 
 def _read_regular_bytes(path: Path) -> tuple[str, bytes | str]:
@@ -115,27 +157,6 @@ def _read_regular_bytes(path: Path) -> tuple[str, bytes | str]:
 
 def _fingerprint(content: bytes) -> str:
     return hashlib.sha256(content).hexdigest()
-
-
-def _require_context(session, source_uuid: UUID, job_uuid: UUID):
-    source = get_db_source(session, source_uuid)
-    if source is None:
-        raise MetaLoadSourceNotFoundError("未找到指定 source_id 的数据源")
-    if not source.is_active:
-        raise MetaLoadSourceDisabledError("指定数据源已禁用")
-    assert_workspace_owner(session, job_uuid, source_uuid)
-    row = get_step_row(session, job_uuid, DOMAIN_STEP_NAME)
-    if row is None:
-        raise DomainConfigOutputMissingError("该作业没有 Domain 步骤记录，请先执行 Domain")
-    if row.last_status != "success":
-        raise DomainConfigOutputMissingError(
-            "该作业的 Domain 步骤未成功，请先重跑 Domain 后再编辑"
-        )
-    return source
-
-
-def _yaml_path(source_uuid: UUID, job_uuid: UUID) -> Path:
-    return resolve_domain_output_dir(source_uuid, job_uuid) / DOMAIN_ARTIFACT_NAME
 
 
 def _load_yaml_bytes(path: Path) -> tuple[bytes, dict]:
@@ -251,19 +272,15 @@ def _validated_file_domains(domains: Any) -> list[dict]:
                     f"{key} 的 tables 必须是字符串列表",
                 )
             tables = list(tables_raw)
-        rows.append(
-            {"name": name, "description": description, "tables": tables}
-        )
+        rows.append({"name": name, "description": description, "tables": tables})
     return rows
 
 
-def _manifest_files(source_uuid: UUID, job_uuid: UUID) -> tuple[Path, list[str]]:
+def _manifest_files(source_id: str, workspace_id: str) -> tuple[Path, list[str]]:
     try:
-        md_dir = resolve_md_output_dir(source_uuid, job_uuid)
+        md_dir = resolve_md_output_dir(source_id, workspace_id)
     except (ValueError, OSError):
-        raise DomainConfigInvalidError(
-            MD_MANIFEST_REASON, MD_MANIFEST_REASON
-        ) from None
+        raise DomainConfigInvalidError(MD_MANIFEST_REASON, MD_MANIFEST_REASON) from None
     status, content = read_regular_text(md_dir / MD_MANIFEST_NAME, "MD 采集清单")
     if status != "ok" or not isinstance(content, str):
         raise DomainConfigInvalidError(MD_MANIFEST_REASON, MD_MANIFEST_REASON)
@@ -282,8 +299,8 @@ def _manifest_files(source_uuid: UUID, job_uuid: UUID) -> tuple[Path, list[str]]
     return md_dir, files
 
 
-def _candidate_tables(source, source_uuid: UUID, job_uuid: UUID) -> list[dict]:
-    md_dir, files = _manifest_files(source_uuid, job_uuid)
+def _candidate_tables(source, source_id: str, workspace_id: str) -> list[dict]:
+    md_dir, files = _manifest_files(source_id, workspace_id)
     db_name = str(source.db_name).strip()
     schemas = {str(item).strip() for item in (source.selected_schemas or [])}
     tables: list[dict] = []
@@ -325,7 +342,9 @@ def _normalize_request_domains(
             )
         seen_names.add(stripped_name)
         tables = item.get("tables")
-        if not isinstance(tables, list) or any(not isinstance(table, str) for table in tables):
+        if not isinstance(tables, list) or any(
+            not isinstance(table, str) for table in tables
+        ):
             raise DomainConfigInvalidError(
                 "domain 配置不合法", f"{stripped_name} 的 tables 必须是字符串列表"
             )
@@ -372,36 +391,75 @@ def _render(document: dict, domains: list[dict]) -> str:
     return _YAML_HEADER + body
 
 
-def read_domain_config(settings: PlatformSettings, source_id, job_id) -> dict:
-    source_uuid, job_uuid = _resolve_identifiers(source_id, job_id)
+def read_domain_config(settings: PlatformSettings, workspace_id) -> dict:
+    workspace_id = normalize_workspace_id(workspace_id)
     with platform_session(settings) as session:
-        source = _require_context(session, source_uuid, job_uuid)
-        raw, document = _load_yaml_bytes(_yaml_path(source_uuid, job_uuid))
+        # doc 8.1 §8.1：只读守卫（已删工作区 410；删除中仍可查看）
+        from backend.access_guards import require_workspace
+
+        require_workspace(session, workspace_id)
+        workspace, source_id = _workspace_source(session, workspace_id)
+        source = _require_context(session, source_id, workspace_id)
+        raw, document = _load_yaml_bytes(_yaml_path(source_id, workspace_id))
         return _config_view(raw, document, source.db_name)
 
 
-def list_domain_tables(settings: PlatformSettings, source_id, job_id) -> dict:
-    source_uuid, job_uuid = _resolve_identifiers(source_id, job_id)
+def list_domain_tables(settings: PlatformSettings, workspace_id) -> dict:
+    workspace_id = normalize_workspace_id(workspace_id)
     with platform_session(settings) as session:
-        source = _require_context(session, source_uuid, job_uuid)
-        _load_yaml_bytes(_yaml_path(source_uuid, job_uuid))
-        return {"tables": _candidate_tables(source, source_uuid, job_uuid)}
+        workspace, source_id = _workspace_source(session, workspace_id)
+        source = _require_context(session, source_id, workspace_id)
+        # doc 7.2 §4/§5.2.1：候选取自同工作区 MD 清单及普通文件，与 Domain
+        # YAML 解耦——不再要求 db_domains.yaml 可读，候选来源也不改为 JSON。
+        return {"tables": _candidate_tables(source, source_id, workspace_id)}
+
+
+def _workspace_source(session, workspace_id: str):
+    from backend.workspaces.repository import get_workspace as _get_ws
+
+    workspace = _get_ws(session, workspace_id)
+    if workspace is None:
+        raise DomainConfigOutputMissingError("工作区不存在")
+    return workspace, workspace.source_id
 
 
 def write_domain_config(
-    settings: PlatformSettings, source_id, job_id, payload: dict
+    settings: PlatformSettings, workspace_id, payload: dict
 ) -> dict:
-    source_uuid, job_uuid = _resolve_identifiers(source_id, job_id)
+    workspace_id = normalize_workspace_id(workspace_id)
     with platform_session(settings) as session:
-        # 与 SQL 步骤的结束复查共用源行锁，覆盖指纹读取至原子替换。
-        if lock_db_source_row(session, source_uuid) is None:
-            raise MetaLoadSourceNotFoundError("未找到指定 source_id 的数据源")
-        source = _require_context(session, source_uuid, job_uuid)
-        path = _yaml_path(source_uuid, job_uuid)
+        # 工作区行锁与采集步骤认领共用，覆盖指纹读取至原子替换（doc 6.2 §5.1）；
+        # doc 8.1 §5.1.1：先定位父级 → 锁源 → 锁工作区，锁内复查冻结
+        from backend.access_guards import require_workspace
+        from backend.deletion.locks import lock_source_row, lock_workspace_row
+        from backend.persistence.models import WorkspaceInfo
+
+        probe = session.get(WorkspaceInfo, workspace_id)
+        if probe is not None:
+            lock_source_row(session, probe.source_id)
+        workspace_row = lock_workspace_row(session, workspace_id)
+        if workspace_row is None:
+            raise DomainConfigOutputMissingError("工作区不存在")
+        require_workspace(session, workspace_id, for_write=True)
+        # doc 8.1 §5.1.1 + doc 10.2 §5.2：发布运行中不得保存（双向保留，
+        # pending/running 均占用；409 workspace_publish_active）
+        from backend.publishing.repository import (
+            WorkspacePublishActiveError,
+            active_publish_run_for_workspace,
+        )
+
+        publish_active = active_publish_run_for_workspace(session, workspace_id)
+        if publish_active is not None:
+            raise WorkspacePublishActiveError(publish_active)
+        source_id = workspace_row.source_id
+        source = _require_context(session, source_id, workspace_id)
+        path = _yaml_path(source_id, workspace_id)
         status, raw = _read_regular_bytes(path)
         if status != "ok" or not isinstance(raw, bytes):
             raise DomainConfigOutputMissingError("Domain 产物缺失或不是普通文件")
-        if not isinstance(payload, dict) or payload.get("fingerprint") != _fingerprint(raw):
+        if not isinstance(payload, dict) or payload.get("fingerprint") != _fingerprint(
+            raw
+        ):
             raise DomainConfigRegeneratedError()
         document = _parse_yaml_bytes(raw)
 
@@ -416,9 +474,7 @@ def write_domain_config(
             not isinstance(request_name, str)
             or request_name.strip() != str(source.db_name).strip()
         ):
-            raise DomainConfigInvalidError(
-                "domain 配置不合法", "库名与登记库名不一致"
-            )
+            raise DomainConfigInvalidError("domain 配置不合法", "库名与登记库名不一致")
         file_description = _file_description(database)
         if request_database.get("description", None) != file_description:
             raise DomainConfigInvalidError(
@@ -439,7 +495,7 @@ def write_domain_config(
         if requested == current_domains:
             return _config_view(raw, document, source.db_name)
 
-        candidates = _candidate_tables(source, source_uuid, job_uuid)
+        candidates = _candidate_tables(source, source_id, workspace_id)
         domains = _normalize_request_domains(
             payload.get("domains"), {item["id"] for item in candidates}
         )
@@ -453,6 +509,12 @@ def write_domain_config(
 
         directory = path.parent
         directory.mkdir(parents=True, exist_ok=True)
+        # 文件级备份（doc 6.2 §5.2）：只复制将被覆盖的旧版；失败则本次
+        # 保存终止，不写回、不删除任何现有内容，不触碰采集 marker。
+        try:
+            backup_files_before_edit(directory, [DOMAIN_ARTIFACT_NAME])
+        except EditBackupFailedError as exc:
+            raise DomainConfigBackupFailedError(str(exc)) from None
         temp_path: Path | None = None
         try:
             fd, name = tempfile.mkstemp(prefix=".tmp-domain-", dir=str(directory))

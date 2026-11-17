@@ -1,627 +1,323 @@
-"""doc 25.2 任务 2/3：sql 发布预检与执行单元测试（A06–A10、A16、A18、A19 发布侧）。"""
+"""sql 发布（doc 25.2、6.2 §8）：产物就绪、清单枚举与执行链。
 
-from contextlib import contextmanager
-from datetime import datetime, timezone
-from types import SimpleNamespace
-from uuid import uuid4
+就绪检查与 input_manifest 共用 `collect_sql_example_input_files` 枚举
+（忽略 `.tmp*` 与点号文件、仅取普通 `*.json`）；失败文案分派覆盖
+doc 25.2 §11 的六类出口。
+"""
+
+import json
+from uuid import UUID
 
 import pytest
 
-import backend.publishing.publish_service as publish_service
-from backend.publishing.errors import PublicationStepNotReadyError
+from backend.publishing import publish_service
+from backend.publishing.precheck import check_step
 from backend.publishing.publish_service import (
-    check_publication,
-    normalize_publish_steps,
-    publish_steps,
+    _sql_failure_summary,
+    create_publish_run,
+    execute_publish_run,
+)
+from metaweave.core.sql_rag.loader import collect_sql_example_input_files
+from tests.unit.test_publish_service import (
+    FakeSession,
+    PUBLISH_JOB_ID,
+    RUN,
+    SETTINGS,
+    SOURCE_ID,
+    WORKSPACE_ID,
+    install,
+    run_step_row,
+    step_dir,
+    write_marker,
 )
 
-SOURCE_ID = uuid4()
-JOB_ID = uuid4()
-DB_NAME = "orders"
-NOW = datetime(2026, 10, 11, 6, 0, 0, tzinfo=timezone.utc)
-SETTINGS = SimpleNamespace(database_url="fake")
+
+def sql_dir(tmp_path):
+    return step_dir(tmp_path, "sql")
 
 
-class FakeSession:
-    def __init__(self, step_rows=None, source_row=None):
-        self.step_rows = step_rows or {}
-        self.source_row = source_row
-
-    def get(self, model, key):
-        from backend.persistence.models import DbSourceInfo, JobInfo
-
-        if model is JobInfo:
-            step_name = key["step_name"] if isinstance(key, dict) else key
-            return self.step_rows.get(step_name)
-        if model is DbSourceInfo:
-            return self.source_row
-        raise AssertionError(f"unexpected model {model}")  # pragma: no cover
-
-    def commit(self):
-        return None
-
-    def rollback(self):
-        return None
+def sql_ready(tmp_path, names=("q1.json", "q2.json")):
+    """写 sql 产物与成功 marker；names 传空列表表示只有目录。"""
+    directory = sql_dir(tmp_path)
+    directory.mkdir(parents=True, exist_ok=True)
+    for name in names:
+        (directory / name).write_text(
+            json.dumps({"question": "q", "sql": "SELECT 1"}), encoding="utf-8"
+        )
+    write_marker(tmp_path, "sql")
+    return directory
 
 
-@contextmanager
-def _fake_session_ctx(session):
-    yield session
+# ---- 就绪检查与 input_manifest 枚举 ----
 
 
-def _source_row(updated_at=NOW):
-    return SimpleNamespace(
-        source_id=SOURCE_ID,
-        db_name=DB_NAME,
-        is_active=True,
-        updated_at=updated_at,
-        host="h",
-        port=5432,
-        username="u",
-        password_ciphertext="cipher",
-        sslmode=None,
-        selected_schemas=["public"],
+@pytest.fixture(autouse=True)
+def _env(monkeypatch, tmp_path):
+    install(monkeypatch, tmp_path)
+
+
+class TestCheckStepSql:
+    def test_ready_lists_json_files_in_order(self, tmp_path):
+        sql_ready(tmp_path)
+        result = check_step(None, SOURCE_ID, WORKSPACE_ID, "sql", db_name="orders")
+        assert result.ready is True and result.reason is None
+        assert result.input_files == (
+            ("sql/q1.json", str(RUN)),
+            ("sql/q2.json", str(RUN)),
+        )
+
+    @pytest.mark.parametrize(
+        ("prepare", "ready"),
+        [
+            ("empty-dir", False),
+            ("only-tmp", False),
+            ("only-dotfile-no-json", False),
+            ("missing-dir", False),
+        ],
     )
+    def test_not_ready_variants(self, tmp_path, prepare, ready):
+        if prepare == "empty-dir":
+            sql_ready(tmp_path, names=[])
+        elif prepare == "only-tmp":
+            sql_ready(tmp_path, names=[])
+            (sql_dir(tmp_path) / ".tmp123.json").write_text("x", encoding="utf-8")
+        elif prepare == "only-dotfile-no-json":
+            sql_ready(tmp_path, names=[])
+            (sql_dir(tmp_path) / ".hidden").write_text("x", encoding="utf-8")
+        result = check_step(None, SOURCE_ID, WORKSPACE_ID, "sql", db_name="orders")
+        assert result.ready is ready
+        if not ready:
+            if prepare == "missing-dir":
+                # 无 marker：目录未采集的原因优先于文件枚举
+                assert result.reason == "sql/ 目录没有采集 marker，产物不可用"
+            else:
+                assert result.reason == "sql/ 目录没有可发布的 SQL 样例文件"
+
+    def test_symlink_ignored_in_enumeration(self, tmp_path):
+        sql_ready(tmp_path, names=["q1.json"])
+        target = sql_dir(tmp_path) / "q1.json"
+        link = sql_dir(tmp_path) / "link.json"
+        link.symlink_to(target)
+        result = check_step(None, SOURCE_ID, WORKSPACE_ID, "sql", db_name="orders")
+        assert result.ready is True
+        assert [path for path, _run in result.input_files] == ["sql/q1.json"]
+
+    def test_collect_helper_sorts_by_name(self, tmp_path):
+        sql_ready(tmp_path, names=["b.json", "a.json"])
+        files = collect_sql_example_input_files(sql_dir(tmp_path))
+        assert [path.name for path in files] == ["a.json", "b.json"]
 
 
-def _step_row(status="success", updated_at=NOW, step="sql"):
-    return SimpleNamespace(
-        job_id=JOB_ID, step_name=step, last_status=status, updated_at=updated_at
-    )
+# ---- 失败文案分派（doc 25.2 §11） ----
 
 
-class Recorder:
-    def __init__(self):
-        self.inserted = []
-        self.cleared = []
-        self.stored_failures = []
-
-
-def _make_inspector(rows):
-    def inspector(sess, sid, jid):
-        row = rows.get("sql")
-        if row is None:
-            return None, None
-        return row.last_status, row.updated_at
-
-    return inspector
-
-
-# ---------------------------------------------------------------------------
-# A18 / A07：白名单与枚举
-# ---------------------------------------------------------------------------
-
-
-class TestWhitelistAndEnums:
-    def test_normalize_accepts_sql(self):
-        assert normalize_publish_steps(["sql"]) == ["sql"]
-
-    def test_normalize_rejects_unknown_with_sql_in_message(self):
-        from backend.publishing.publish_service import (
-            UnsupportedPublicationStepError,
+class TestSqlFailureSummary:
+    def test_schema_mismatch_hint(self):
+        assert "手动删除该集合" in _sql_failure_summary(
+            {"error_kind": "schema_mismatch"}
         )
 
-        with pytest.raises(UnsupportedPublicationStepError) as ei:
-            normalize_publish_steps(["md"])
-        assert "sql" in str(ei.value)
+    def test_input_failure_with_file(self):
+        message = _sql_failure_summary({"error_kind": "input", "error_file": "q1.json"})
+        assert message == "SQL 样例产物不可读或结构非法（q1.json），请重跑 sql 采集步骤"
 
-    def test_a07_step_name_literals_accept_sql(self):
-        from backend.api.schemas import PublicationStepResult, PublishCheckStep
-
-        PublishCheckStep(
-            step_name="sql",
-            job_status=None,
-            output_ready=True,
-            publishable=True,
-            reason=None,
-        )
-        PublicationStepResult(
-            step="sql", status="success", message="ok", finished_at="x"
+    def test_input_failure_without_file_omits_parens(self):
+        assert _sql_failure_summary({"error_kind": "input"}) == (
+            "SQL 样例产物不可读或结构非法，请重跑 sql 采集步骤"
         )
 
-
-# ---------------------------------------------------------------------------
-# A06 / A08：check_publication 显式分支与三段 reason 链
-# ---------------------------------------------------------------------------
-
-
-class TestCheckPublicationSql:
-    def _install(self, monkeypatch, rows, output_ready=True, job_ok=True):
-        session = FakeSession(step_rows=rows, source_row=_source_row())
-        monkeypatch.setattr(
-            publish_service, "platform_session", lambda s: _fake_session_ctx(session)
-        )
-        monkeypatch.setattr(
-            publish_service, "_job_is_publishable", lambda *a, **k: job_ok
-        )
-
-        def mk(step):
-            def inspector(sess, sid, jid):
-                row = rows.get(step)
-                if row is None:
-                    return None, None
-                return row.last_status, row.updated_at
-
-            return inspector
-
-        # 8 键整字典 patch（doc 25.2 §9 B 组同款形态）：sql 条目由真实
-        # check_publication 经显式 elif 分支产出
-        monkeypatch.setattr(
-            publish_service,
-            "_INSPECTORS",
+    def test_unconfirmed_message(self):
+        message = _sql_failure_summary(
             {
-                publish_service.DB_STEP: mk("db"),
-                publish_service.DDL_STEP: mk("ddl"),
-                publish_service.JSON_STEP: mk("json"),
-                publish_service.DOMAIN_STEP: mk("domain"),
-                publish_service.REL_STEP: mk("rel"),
-                publish_service.TABLE_SCHEMA_STEP: mk("table_schema"),
-                publish_service.DIM_VALUE_STEP: mk("dim_config"),
-                publish_service.SQL_STEP: mk("sql"),
-            },
+                "success": False,
+                "records_loaded": 5,
+                "records_failed": 2,
+                "records_unconfirmed": 3,
+            }
         )
+        assert message == (
+            "SQL 样例未全部发布到 Milvus（成功 5 条 / 失败 2 条，"
+            "另有 3 条写入结果未确认），请重新发布"
+        )
+
+    def test_failed_only_message(self):
+        assert (
+            _sql_failure_summary(
+                {"success": False, "records_loaded": 5, "records_failed": 2}
+            )
+            == "SQL 样例未全部发布到 Milvus（成功 5 条 / 失败 2 条），请重新发布"
+        )
+
+    def test_mixed_failed_appends_reason(self):
+        message = _sql_failure_summary(
+            {
+                "success": False,
+                "records_loaded": 5,
+                "records_failed": 2,
+                "error_summary": "unexpected mid-flight",
+            }
+        )
+        assert message == (
+            "SQL 样例未全部发布到 Milvus（成功 5 条 / 失败 2 条），请重新发布"
+            "；原因：unexpected mid-flight"
+        )
+
+    def test_cleanup_message(self):
+        message = _sql_failure_summary(
+            {
+                "success": False,
+                "error_kind": "cleanup",
+                "records_loaded": 5,
+                "error_summary": "delete rpc failed",
+            }
+        )
+        assert message == (
+            "SQL 样例已写入 Milvus（共 5 条），但本源旧记录未清理，请重新发布"
+            "；原因：delete rpc failed"
+        )
+
+    def test_unclassified_message(self):
+        assert (
+            _sql_failure_summary({"success": False, "error_summary": "boom"})
+            == "SQL 样例发布失败（boom），请重新发布"
+        )
+
+
+# ---- 受管加载器构造（doc 25.2 §6.2） ----
+
+
+class TestBuildSqlExampleLoader:
+    def test_injects_workspace_input_dir_and_unique_alias(self, monkeypatch, tmp_path):
+        from backend.profile_loading import sql_loader as web_loader
+
+        snapshot = {
+            "vector_database": {"providers": {"milvus": {}}},
+            "loaders": {"sql_loader": {}},
+        }
         monkeypatch.setattr(
-            publish_service, "check_sql_output_ready", lambda *a, **k: output_ready
+            web_loader, "load_main_config_snapshot", lambda *_: snapshot
         )
-        # 其余步骤的产物检查统一假化，避免触碰真实路径
-        monkeypatch.setattr(
-            publish_service, "check_db_output_ready", lambda *a, **k: (True, None)
+        first = web_loader.build_sql_example_loader(
+            SOURCE_ID, WORKSPACE_ID, UUID(int=1)
         )
-        for name in (
-            "check_ddl_output_ready",
-            "check_json_output_ready",
-            "check_domain_output_ready",
-            "check_table_schema_output_ready",
-            "check_dim_value_output_ready",
-            "check_rel_output_ready",
-        ):
-            if hasattr(publish_service, name):
-                monkeypatch.setattr(publish_service, name, lambda *a, **k: True)
-        return session
-
-    def test_a06_publishable_when_row_success_and_file(self, monkeypatch):
-        self._install(monkeypatch, {"sql": _step_row()})
-        entry = next(
-            s
-            for s in check_publication(SETTINGS, SOURCE_ID, JOB_ID)["steps"]
-            if s["step_name"] == "sql"
+        assert first.loader_cfg["input_dir"] == str(sql_dir(tmp_path))
+        assert snapshot["vector_database"]["providers"]["milvus"]["alias"].startswith(
+            "sql_"
         )
-        assert entry["publishable"] is True
-        assert entry["reason"] is None
-
-    def test_a06_reason_step_not_success(self, monkeypatch):
-        self._install(monkeypatch, {"sql": _step_row(status="failed")})
-        entry = next(
-            s
-            for s in check_publication(SETTINGS, SOURCE_ID, JOB_ID)["steps"]
-            if s["step_name"] == "sql"
+        second = web_loader.build_sql_example_loader(
+            SOURCE_ID, WORKSPACE_ID, UUID(int=2)
         )
-        assert entry["publishable"] is False
-        assert entry["reason"] == "最近一次采集失败"
-
-    def test_a06_reason_job_not_publishable(self, monkeypatch):
-        self._install(monkeypatch, {"sql": _step_row()}, job_ok=False)
-        entry = next(
-            s
-            for s in check_publication(SETTINGS, SOURCE_ID, JOB_ID)["steps"]
-            if s["step_name"] == "sql"
-        )
-        assert "不能发布" in entry["reason"]
-
-    def test_a06_reason_output_missing(self, monkeypatch):
-        self._install(monkeypatch, {"sql": _step_row()}, output_ready=False)
-        entry = next(
-            s
-            for s in check_publication(SETTINGS, SOURCE_ID, JOB_ID)["steps"]
-            if s["step_name"] == "sql"
-        )
-        assert entry["reason"] == "产物不存在或不可用"
-
-    def test_a06_row_missing_returns_entry_not_crash(self, monkeypatch):
-        """从未跑过 sql 的作业：条目正常返回（也覆盖 _INSPECTORS 注册完整性）。"""
-        self._install(monkeypatch, {})
-        entry = next(
-            s
-            for s in check_publication(SETTINGS, SOURCE_ID, JOB_ID)["steps"]
-            if s["step_name"] == "sql"
-        )
-        assert entry["job_status"] is None
-        assert entry["publishable"] is False
-        assert entry["reason"] == "没有执行记录"
-
-    def test_a06_sql_is_last_in_step_list(self, monkeypatch):
-        """循环顺序：sql 追加在 dim_value 之后（末位）。"""
-        self._install(monkeypatch, {"sql": _step_row()})
-        names = [
-            s["step_name"]
-            for s in check_publication(SETTINGS, SOURCE_ID, JOB_ID)["steps"]
-        ]
-        assert names[-1] == "sql"
-        assert names[-2] == "dim_value"
+        assert second.loader_cfg["input_dir"] == first.loader_cfg["input_dir"]
+        # 主配置快照不被改写（loader 拿 deepcopy）
+        assert snapshot["loaders"]["sql_loader"] == {}
 
 
-# ---------------------------------------------------------------------------
-# A09 / A10 / A16 / A19：_publish_sql 执行链与失败文案分派
-# ---------------------------------------------------------------------------
+# ---- 执行链 ----
 
 
 class FakeSqlLoader:
-    def __init__(self, validate=True, load_result=None, load_raises=None):
-        self.validate_return = validate
-        self.load_result = load_result or {"success": True, "replacement_started": True}
-        self.load_raises = load_raises
+    def __init__(self):
+        self.validate_result = True
+        self.load_result = {"success": True, "records_loaded": 2}
         self.closed = 0
         self.load_calls = 0
 
     def validate(self):
-        return self.validate_return
+        return self.validate_result
 
     def load(self):
         self.load_calls += 1
-        if self.load_raises is not None:
-            raise self.load_raises
         return dict(self.load_result)
 
     def close(self):
         self.closed += 1
 
 
-class TestPublishSql:
-    def _install(
-        self,
-        monkeypatch,
-        loader,
-        verify=None,
-        rows=None,
-    ):
-        session = FakeSession(
-            step_rows=rows or {"sql": _step_row()}, source_row=_source_row()
-        )
-        recorder = Recorder()
+def _publish_sql(monkeypatch, tmp_path, loader):
+    sql_ready(tmp_path)
+    session = install(monkeypatch, tmp_path, FakeSession(steps=("sql",)))
+    monkeypatch.setattr(publish_service, "build_sql_example_loader", lambda *a: loader)
+    # target_manifest 的集合名来自主配置；单测注入固定值，不读真实配置文件
+    monkeypatch.setattr(
+        publish_service, "_milvus_collection", lambda _key: "sql_example_embeddings"
+    )
+    result = create_publish_run(
+        SETTINGS,
+        PUBLISH_JOB_ID,
+        revision_no=1,
+        mode="custom",
+        steps=["sql"],
+        step_config=None,
+    )
+    run_id = UUID(result["publish_run_id"])
+    execute_publish_run(SETTINGS, run_id)
+    return session, run_id
 
-        def fake_verify(sess, job_id, step, marker):
-            if verify is not None:
-                verify(sess, job_id, step, marker)
 
-        monkeypatch.setattr(
-            publish_service, "platform_session", lambda s: _fake_session_ctx(session)
-        )
-        monkeypatch.setattr(
-            publish_service, "lock_db_source_row", lambda sess, sid: sess.source_row
-        )
-        monkeypatch.setattr(
-            publish_service, "assert_workspace_owner", lambda *a, **k: None
-        )
-        monkeypatch.setattr(
-            publish_service, "_verify_step_current_under_lock", fake_verify
-        )
-        build_calls = []
-
-        def fake_build(source_id, job_id, publish_id):
-            build_calls.append(
-                {"source_id": source_id, "job_id": job_id, "publish_id": publish_id}
-            )
-            return loader
-
-        monkeypatch.setattr(publish_service, "build_sql_example_loader", fake_build)
-
-        def fake_insert(
-            sess,
-            publish_id,
-            source_id,
-            job_id,
-            step,
-            status,
-            error_summary=None,
-            is_current=False,
-        ):
-            recorder.inserted.append(
-                {
-                    "step": step,
-                    "status": status,
-                    "error_summary": error_summary,
-                    "is_current": is_current,
-                }
-            )
-
-        monkeypatch.setattr(publish_service, "insert_publish_row", fake_insert)
-
-        def fake_clear(sess, source_id, step):
-            recorder.cleared.append(step)
-
-        monkeypatch.setattr(publish_service, "clear_current", fake_clear)
-
-        def fake_store_failure(
-            settings, source_id, job_id, publish_id, step, summary, revoke_current=False
-        ):
-            recorder.stored_failures.append(
-                {"step": step, "summary": summary, "revoke_current": revoke_current}
-            )
-            return {
-                "step": step,
-                "status": "failed",
-                "message": summary,
-                "finished_at": "x",
-            }
-
-        monkeypatch.setattr(publish_service, "_store_failure", fake_store_failure)
-        return session, recorder, build_calls
-
-    def _publish(self, steps=("sql",)):
-        return publish_steps(SETTINGS, SOURCE_ID, JOB_ID, list(steps))
-
-    def _install_precheck(self, monkeypatch, rows):
-        """publish_steps 前置：准入放行 + chosen 循环所需的 inspector。"""
-        monkeypatch.setattr(
-            publish_service,
-            "_INSPECTORS",
-            {publish_service.SQL_STEP: _make_inspector(rows)},
-        )
-        monkeypatch.setattr(
-            publish_service, "_assert_job_admission", lambda *a, **k: None
-        )
-
-    def test_a09_success_path(self, monkeypatch):
-        loader = FakeSqlLoader(
-            load_result={
-                "success": True,
-                "replacement_started": True,
-                "records_loaded": 2,
-            }
-        )
-        self._install(monkeypatch, loader)
-        self._install_precheck(monkeypatch, {"sql": _step_row()})
-        result = self._publish()
-        assert result["results"][0]["status"] == "success"
-        assert result["results"][0]["message"] == "SQL 样例已发布到 Milvus（共 2 条）"
-        assert loader.load_calls == 1 and loader.closed == 1
-
-    def test_a09_uuid_objects_passed_to_builder(self, monkeypatch):
-        loader = FakeSqlLoader(
-            load_result={
-                "success": True,
-                "replacement_started": True,
-                "records_loaded": 1,
-            }
-        )
-        _, _, build_calls = self._install(monkeypatch, loader)
-        self._install_precheck(monkeypatch, {"sql": _step_row()})
-        self._publish()
-        assert len(build_calls) == 1
-        from uuid import UUID
-
-        assert isinstance(build_calls[0]["source_id"], UUID)
-        assert isinstance(build_calls[0]["publish_id"], UUID)
-        assert build_calls[0]["job_id"] == JOB_ID
-
-    def test_a09_success_row_current(self, monkeypatch):
-        loader = FakeSqlLoader(
-            load_result={
-                "success": True,
-                "replacement_started": True,
-                "records_loaded": 2,
-            }
-        )
-        _, recorder, _ = self._install(monkeypatch, loader)
-        self._install_precheck(monkeypatch, {"sql": _step_row()})
-        self._publish()
-        assert recorder.cleared == ["sql"]
-        assert recorder.inserted == [
-            {
-                "step": "sql",
-                "status": "success",
-                "error_summary": None,
-                "is_current": True,
-            }
-        ]
-        assert recorder.stored_failures == []
-
-    def test_a10_rerun_changed_marker_rejected(self, monkeypatch):
-        def boom(sess, job_id, step, marker):
-            raise PublicationStepNotReadyError("步骤尚未采集成功")
-
+class TestPublishSqlExecution:
+    def test_success_message_and_close(self, monkeypatch, tmp_path):
         loader = FakeSqlLoader()
-        _, recorder, build_calls = self._install(monkeypatch, loader, verify=boom)
-        self._install_precheck(monkeypatch, {"sql": _step_row()})
-        result = self._publish()
-        assert result["results"][0]["status"] == "failed"
-        assert recorder.stored_failures[0]["step"] == "sql"
-        assert build_calls == []  # 复查失败即终止，未构造 loader
+        session, run_id = _publish_sql(monkeypatch, tmp_path, loader)
+        step = run_step_row(session, run_id, "sql")
+        assert step.status == "success"
+        assert step.message == "SQL 样例已发布到 Milvus（共 2 条）"
+        assert loader.load_calls == 1 and loader.closed == 1
+        assert step.input_manifest == {
+            "files": [
+                {"path": "sql/q1.json", "collection_run_id": str(RUN)},
+                {"path": "sql/q2.json", "collection_run_id": str(RUN)},
+            ]
+        }
+        assert step.target_manifest["targets"][0]["type"] == "milvus"
 
-    def test_a10_publish_holding_lock_succeeds(self, monkeypatch):
-        """发布先取得锁并通过复查：重跑等待锁释放，本次发布成功。"""
-        loader = FakeSqlLoader(
-            load_result={
-                "success": True,
-                "replacement_started": True,
-                "records_loaded": 1,
-            }
-        )
-        self._install(monkeypatch, loader)
-        self._install_precheck(monkeypatch, {"sql": _step_row()})
-        result = self._publish()
-        assert result["results"][0]["status"] == "success"
-
-    def test_a09_validate_false_generic_failure(self, monkeypatch):
-        loader = FakeSqlLoader(validate=False)
-        _, recorder, _ = self._install(monkeypatch, loader)
-        self._install_precheck(monkeypatch, {"sql": _step_row()})
-        result = self._publish()
-        assert result["results"][0]["status"] == "failed"
-        entry = recorder.stored_failures[0]
-        assert entry["step"] == "sql"
-        assert entry["summary"] == (
-            "SQL 样例发布失败，请检查 sql-rag 产物及 Milvus、Embedding 服务"
-        )
-        assert entry["revoke_current"] is False
+    def test_validate_failure_message(self, monkeypatch, tmp_path):
+        loader = FakeSqlLoader()
+        loader.validate_result = False
+        session, run_id = _publish_sql(monkeypatch, tmp_path, loader)
+        step = run_step_row(session, run_id, "sql")
+        assert step.status == "failed"
+        assert step.message == "SQL 样例发布失败：Milvus 或 Embedding 服务不可用"
         assert loader.closed == 1
 
-    def test_a19_cleanup_message(self, monkeypatch):
-        # 真实 loader 形态：cleanup 分支恒填 error_summary（删旧异常摘要，修订 11），
-        # ⑤ 命中追加规则带原因后缀（审核修订 28）
-        loader = FakeSqlLoader(
-            load_result={
-                "success": False,
-                "replacement_started": True,
-                "error_kind": "cleanup",
-                "error_summary": "delete rpc failed",
-                "records_loaded": 5,
-                "records_failed": 0,
-                "records_unconfirmed": 0,
-            }
-        )
-        _, recorder, _ = self._install(monkeypatch, loader)
-        self._install_precheck(monkeypatch, {"sql": _step_row()})
-        self._publish()
-        row = recorder.inserted[0]
-        assert row["status"] == "failed" and row["is_current"] is False
-        assert recorder.cleared == ["sql"]  # replacement_started=True 撤销旧 current
-        assert row["error_summary"] == (
-            "SQL 样例已写入 Milvus（共 5 条），但本源旧记录未清理，请重新发布；原因：delete rpc failed"
+    def test_load_failure_message_from_summary(self, monkeypatch, tmp_path):
+        loader = FakeSqlLoader()
+        loader.load_result = {
+            "success": False,
+            "error_kind": "cleanup",
+            "records_loaded": 5,
+            "error_summary": "delete rpc failed",
+        }
+        session, run_id = _publish_sql(monkeypatch, tmp_path, loader)
+        step = run_step_row(session, run_id, "sql")
+        assert step.status == "failed"
+        assert step.message == (
+            "SQL 样例已写入 Milvus（共 5 条），但本源旧记录未清理，请重新发布"
+            "；原因：delete rpc failed"
         )
 
-    def test_a19_unconfirmed_message(self, monkeypatch):
-        loader = FakeSqlLoader(
-            load_result={
-                "success": False,
-                "replacement_started": True,
-                "error_kind": None,
-                "records_loaded": 5,
-                "records_failed": 2,
-                "records_unconfirmed": 3,
-            }
-        )
-        _, recorder, _ = self._install(monkeypatch, loader)
-        self._install_precheck(monkeypatch, {"sql": _step_row()})
-        self._publish()
-        assert recorder.inserted[0]["error_summary"] == (
-            "SQL 样例未全部发布到 Milvus（成功 5 条 / 失败 2 条，"
-            "另有 3 条写入结果未确认），请重新发布"
-        )
-
-    def test_a19_failed_only_message(self, monkeypatch):
-        loader = FakeSqlLoader(
-            load_result={
-                "success": False,
-                "replacement_started": True,
-                "error_kind": None,
-                "records_loaded": 5,
-                "records_failed": 2,
-                "records_unconfirmed": 0,
-            }
-        )
-        _, recorder, _ = self._install(monkeypatch, loader)
-        self._install_precheck(monkeypatch, {"sql": _step_row()})
-        self._publish()
-        assert recorder.inserted[0]["error_summary"] == (
-            "SQL 样例未全部发布到 Milvus（成功 5 条 / 失败 2 条），请重新发布"
-        )
-
-    def test_a19_mixed_failed_with_reason(self, monkeypatch):
-        loader = FakeSqlLoader(
-            load_result={
-                "success": False,
-                "replacement_started": True,
-                "error_kind": None,
-                "records_loaded": 5,
-                "records_failed": 2,
-                "records_unconfirmed": 0,
-                "error_summary": "unexpected mid-flight",
-            }
-        )
-        _, recorder, _ = self._install(monkeypatch, loader)
-        self._install_precheck(monkeypatch, {"sql": _step_row()})
-        self._publish()
-        assert recorder.inserted[0]["error_summary"] == (
-            "SQL 样例未全部发布到 Milvus（成功 5 条 / 失败 2 条），请重新发布"
-            "；原因：unexpected mid-flight"
-        )
-
-    def test_a19_unclassified_only_message(self, monkeypatch):
-        loader = FakeSqlLoader(
-            load_result={
-                "success": False,
-                "replacement_started": False,
-                "error_kind": None,
-                "records_loaded": 0,
-                "records_failed": 0,
-                "records_unconfirmed": 0,
-                "error_summary": "boom",
-            }
-        )
-        _, recorder, _ = self._install(monkeypatch, loader)
-        self._install_precheck(monkeypatch, {"sql": _step_row()})
-        self._publish()
-        assert recorder.inserted[0]["error_summary"] == (
-            "SQL 样例发布失败（boom），请重新发布"
-        )
-        assert recorder.cleared == []  # replacement_started=False 保留旧 current
-
-    def test_load_raises_treated_as_started(self, monkeypatch):
-        loader = FakeSqlLoader(load_raises=RuntimeError("milvus down"))
-        _, recorder, _ = self._install(monkeypatch, loader)
-        self._install_precheck(monkeypatch, {"sql": _step_row()})
-        result = self._publish()
-        assert result["results"][0]["status"] == "failed"
-        row = recorder.inserted[0]
-        assert row["status"] == "failed"
-        assert row["error_summary"] == "SQL 样例发布失败（milvus down），请重新发布"
-        assert recorder.cleared == ["sql"]  # 保守按已开始替换
-
-    def test_input_without_file_omits_parens(self, monkeypatch):
-        """合并零条（error_file=None）不渲染"（None）"（审核修订 27）。"""
-        loader = FakeSqlLoader(
-            load_result={
-                "success": False,
-                "replacement_started": False,
-                "error_kind": "input",
-                "error_file": None,
-                "error_summary": "合并后没有任何可加载的 SQL 样例",
-            }
-        )
-        _, recorder, _ = self._install(monkeypatch, loader)
-        self._install_precheck(monkeypatch, {"sql": _step_row()})
-        self._publish()
-        assert recorder.inserted[0]["error_summary"] == (
-            "SQL 样例产物不可读或结构非法，请重跑 sql 采集步骤"
-        )
-
-    def test_a16_combined_request_independent_rows(self, monkeypatch):
-        loader = FakeSqlLoader(
-            load_result={
-                "success": True,
-                "replacement_started": True,
-                "records_loaded": 1,
-            }
-        )
-        _, recorder, _ = self._install(monkeypatch, loader)
-        self._install_precheck(monkeypatch, {"sql": _step_row()})
-
-        def fake_db(settings, source_id, job_id, publish_id, marker):
-            return {
-                "step": "db",
-                "status": "success",
-                "message": "ok",
-                "finished_at": "x",
-            }
-
+    def test_files_deleted_after_precheck_is_blocked(self, monkeypatch, tmp_path):
+        sql_ready(tmp_path)
+        session = install(monkeypatch, tmp_path, FakeSession(steps=("sql",)))
+        loader = FakeSqlLoader()
         monkeypatch.setattr(
-            publish_service,
-            "_INSPECTORS",
-            {
-                publish_service.DB_STEP: _make_inspector({"sql": _step_row()}),
-                publish_service.SQL_STEP: _make_inspector({"sql": _step_row()}),
-            },
+            publish_service, "build_sql_example_loader", lambda *a: loader
         )
         monkeypatch.setattr(
-            publish_service,
-            "_PUBLISHERS",
-            {
-                publish_service.DB_STEP: fake_db,
-                publish_service.SQL_STEP: publish_service._publish_sql,
-            },
+            publish_service, "_milvus_collection", lambda _key: "sql_example_embeddings"
         )
-        result = self._publish(steps=("db", "sql"))
-        assert [r["step"] for r in result["results"]] == ["db", "sql"]
-        assert all(r["status"] == "success" for r in result["results"])
-        assert recorder.inserted[0]["step"] == "sql"
+        result = create_publish_run(
+            SETTINGS,
+            PUBLISH_JOB_ID,
+            revision_no=1,
+            mode="custom",
+            steps=["sql"],
+            step_config=None,
+        )
+        run_id = UUID(result["publish_run_id"])
+        for path in sql_dir(tmp_path).glob("*.json"):
+            path.unlink()
+        execute_publish_run(SETTINGS, run_id)
+        step = run_step_row(session, run_id, "sql")
+        assert step.status == "blocked"
+        assert step.started_at is None
+        assert loader.load_calls == 0

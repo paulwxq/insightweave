@@ -47,10 +47,10 @@ class CandidateGenerator:
     """统一候选关系生成器（规则候选生成 + LLM 候选入池 + 池内去重）"""
 
     def __init__(
-            self,
-            config: dict,
-            name_similarity_service: Optional[NameSimilarityService] = None,
-            rel_id_salt: str = "",
+        self,
+        config: dict,
+        name_similarity_service: Optional[NameSimilarityService] = None,
+        rel_id_salt: str = "",
     ):
         """初始化候选生成器
 
@@ -66,27 +66,46 @@ class CandidateGenerator:
         self.rel_id_salt = rel_id_salt
 
         cm = (config or {}).get("candidate_matching") or {}
-        self.max_columns = cm.get("max_columns", DEFAULT_CANDIDATE_MATCHING["max_columns"])
-        self.name_threshold = cm.get("name_threshold", DEFAULT_CANDIDATE_MATCHING["name_threshold"])
-        self.comment_threshold = cm.get("comment_threshold", DEFAULT_CANDIDATE_MATCHING["comment_threshold"])
-        self.type_threshold = cm.get("type_threshold", DEFAULT_CANDIDATE_MATCHING["type_threshold"])
+        self.max_columns = cm.get(
+            "max_columns", DEFAULT_CANDIDATE_MATCHING["max_columns"]
+        )
+        self.name_threshold = cm.get(
+            "name_threshold", DEFAULT_CANDIDATE_MATCHING["name_threshold"]
+        )
+        self.comment_threshold = cm.get(
+            "comment_threshold", DEFAULT_CANDIDATE_MATCHING["comment_threshold"]
+        )
+        self.type_threshold = cm.get(
+            "type_threshold", DEFAULT_CANDIDATE_MATCHING["type_threshold"]
+        )
         self.logical_key_min_confidence = cm.get(
-            "logical_key_min_confidence", DEFAULT_CANDIDATE_MATCHING["logical_key_min_confidence"]
+            "logical_key_min_confidence",
+            DEFAULT_CANDIDATE_MATCHING["logical_key_min_confidence"],
         )
         self.exclude_target_semantic_roles = set(
-            cm.get("exclude_target_semantic_roles", DEFAULT_CANDIDATE_MATCHING["exclude_target_semantic_roles"])
+            cm.get(
+                "exclude_target_semantic_roles",
+                DEFAULT_CANDIDATE_MATCHING["exclude_target_semantic_roles"],
+            )
         )
         self.exclude_target_complex_types = bool(
-            cm.get("exclude_target_complex_types", DEFAULT_CANDIDATE_MATCHING["exclude_target_complex_types"])
+            cm.get(
+                "exclude_target_complex_types",
+                DEFAULT_CANDIDATE_MATCHING["exclude_target_complex_types"],
+            )
         )
 
         logger.info(
             "候选生成器已初始化: max_columns=%s, name_threshold=%s, comment_threshold=%s, "
             "type_threshold=%s, logical_key_min_confidence=%s, exclude_target_roles=%s, "
             "exclude_target_complex=%s, degraded=%s",
-            self.max_columns, self.name_threshold, self.comment_threshold,
-            self.type_threshold, self.logical_key_min_confidence,
-            self.exclude_target_semantic_roles, self.exclude_target_complex_types,
+            self.max_columns,
+            self.name_threshold,
+            self.comment_threshold,
+            self.type_threshold,
+            self.logical_key_min_confidence,
+            self.exclude_target_semantic_roles,
+            self.exclude_target_complex_types,
             self.name_similarity_service is None,
         )
 
@@ -95,12 +114,12 @@ class CandidateGenerator:
     # ------------------------------------------------------------------
 
     def generate_candidates(
-            self,
-            tables: Dict[str, dict],
-            table_pairs: List[Tuple[str, str]],
-            fk_relationship_ids: Set[str],
-            llm_raw_candidates: Optional[List[Dict[str, Any]]] = None,
-            llm_top_k: int = 50,
+        self,
+        tables: Dict[str, dict],
+        table_pairs: List[Tuple[str, str]],
+        fk_relationship_ids: Set[str],
+        llm_raw_candidates: Optional[List[Dict[str, Any]]] = None,
+        llm_top_k: int = 50,
     ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
         """生成规则池与 LLM 池（独立出口，doc 19 §3.1）
 
@@ -126,18 +145,22 @@ class CandidateGenerator:
         return rule_pool, llm_pool
 
     def _build_rule_pool(
-            self,
-            tables: Dict[str, dict],
-            table_pairs: List[Tuple[str, str]],
-            fk_relationship_ids: Set[str],
+        self,
+        tables: Dict[str, dict],
+        table_pairs: List[Tuple[str, str]],
+        fk_relationship_ids: Set[str],
     ) -> List[Dict[str, Any]]:
         """规则池：生成（方向已规范化）→ 池内同向去重 → 最小键过滤 → FK 排除"""
         rule_candidates = self._generate_rule_candidates(tables, table_pairs)
-        physical_n = sum(1 for c in rule_candidates if c.get("key_origin") == "physical")
+        physical_n = sum(
+            1 for c in rule_candidates if c.get("key_origin") == "physical"
+        )
         logical_n = sum(1 for c in rule_candidates if c.get("key_origin") == "logical")
         logger.info(
             "规则候选生成: %s 个（physical=%s, logical=%s）",
-            len(rule_candidates), physical_n, logical_n,
+            len(rule_candidates),
+            physical_n,
+            logical_n,
         )
 
         deduped = self._dedup_rule_pool(rule_candidates)
@@ -145,17 +168,20 @@ class CandidateGenerator:
         final = self._exclude_fk_duplicates(filtered, fk_relationship_ids)
         logger.info(
             "规则池最终: 生成 %s → 去重 %s → 最小键过滤 %s → FK 排除 %s 个",
-            len(rule_candidates), len(deduped), len(filtered), len(final),
+            len(rule_candidates),
+            len(deduped),
+            len(filtered),
+            len(final),
         )
         return final
 
     def _build_llm_pool(
-            self,
-            llm_raw_candidates: List[Dict[str, Any]],
-            tables: Dict[str, dict],
-            llm_top_k: int,
-            rule_pool: List[Dict[str, Any]],
-            fk_relationship_ids: Set[str],
+        self,
+        llm_raw_candidates: List[Dict[str, Any]],
+        tables: Dict[str, dict],
+        llm_top_k: int,
+        rule_pool: List[Dict[str, Any]],
+        fk_relationship_ids: Set[str],
     ) -> List[Dict[str, Any]]:
         """LLM 池：合法化 → 同向去重（同身份保留最高 confidence）→
         排序（confidence 降序、未加盐签名升序）→ top_k 截断 →
@@ -171,8 +197,13 @@ class CandidateGenerator:
         logger.info(
             "LLM 池最终: 原始 %s → 合法化 %s → 去重 %s → top_k(%s) %s → "
             "最小键过滤 %s → FK 排除 %s 个",
-            len(llm_raw_candidates), len(converted), len(deduped),
-            llm_top_k, len(truncated), len(filtered), len(final),
+            len(llm_raw_candidates),
+            len(converted),
+            len(deduped),
+            llm_top_k,
+            len(truncated),
+            len(filtered),
+            len(final),
         )
         return final
 
@@ -230,10 +261,14 @@ class CandidateGenerator:
         profiles = table.get("column_profiles", {}) or {}
         pool = []
         for col_name, profile in profiles.items():
-            semantic_role = (profile.get("semantic_analysis") or {}).get("semantic_role")
+            semantic_role = (profile.get("semantic_analysis") or {}).get(
+                "semantic_role"
+            )
             if semantic_role in self.exclude_target_semantic_roles:
                 continue
-            if self.exclude_target_complex_types and self._is_complex_type(profile.get("data_type", "")):
+            if self.exclude_target_complex_types and self._is_complex_type(
+                profile.get("data_type", "")
+            ):
                 continue
             pool.append(col_name)
         return pool
@@ -250,11 +285,11 @@ class CandidateGenerator:
     # ------------------------------------------------------------------
 
     def _passes_gate(
-            self,
-            src_col: str,
-            src_comment: Optional[str],
-            tgt_col: str,
-            tgt_comment: Optional[str],
+        self,
+        src_col: str,
+        src_comment: Optional[str],
+        tgt_col: str,
+        tgt_comment: Optional[str],
     ) -> bool:
         """闸门1（英文名）OR 闸门2（中文注释）；OR 语义，不做加权合成（见 3.4）"""
         if self.name_similarity_service is None:
@@ -265,18 +300,20 @@ class CandidateGenerator:
         if name_sim >= self.name_threshold:
             return True
 
-        comment_sim = self.name_similarity_service.compare_comment_pair(src_comment, tgt_comment)
+        comment_sim = self.name_similarity_service.compare_comment_pair(
+            src_comment, tgt_comment
+        )
         if comment_sim is not None and comment_sim >= self.comment_threshold:
             return True
 
         return False
 
     def _qualifying_targets(
-            self,
-            src_col: str,
-            src_profile: dict,
-            target_pool: List[str],
-            target_profiles: Dict[str, dict],
+        self,
+        src_col: str,
+        src_profile: dict,
+        target_pool: List[str],
+        target_profiles: Dict[str, dict],
     ) -> Set[str]:
         """单个源列在目标列池中过闸（名称/注释 OR 类型兼容）后的合法目标列集合"""
         qualifying: Set[str] = set()
@@ -285,7 +322,9 @@ class CandidateGenerator:
 
         for tgt_col in target_pool:
             tgt_profile = target_profiles.get(tgt_col, {}) or {}
-            if not self._passes_gate(src_col, src_comment, tgt_col, tgt_profile.get("comment")):
+            if not self._passes_gate(
+                src_col, src_comment, tgt_col, tgt_profile.get("comment")
+            ):
                 continue
 
             tgt_type = tgt_profile.get("data_type", "")
@@ -359,9 +398,9 @@ class CandidateGenerator:
     # ------------------------------------------------------------------
 
     def _generate_rule_candidates(
-            self,
-            tables: Dict[str, dict],
-            table_pairs: List[Tuple[str, str]],
+        self,
+        tables: Dict[str, dict],
+        table_pairs: List[Tuple[str, str]],
     ) -> List[Dict[str, Any]]:
         candidates: List[Dict[str, Any]] = []
         for t1, t2 in table_pairs:
@@ -375,9 +414,9 @@ class CandidateGenerator:
         return candidates
 
     def _generate_directional_candidates(
-            self,
-            source_table: dict,
-            target_table: dict,
+        self,
+        source_table: dict,
+        target_table: dict,
     ) -> List[Dict[str, Any]]:
         source_key_sets = self._collect_source_key_sets(source_table)
         if not source_key_sets:
@@ -398,22 +437,27 @@ class CandidateGenerator:
             qualifying_sets = []
             for src_col in source_columns:
                 qset = self._qualifying_targets(
-                    src_col, source_profiles.get(src_col, {}) or {}, target_pool, target_profiles
+                    src_col,
+                    source_profiles.get(src_col, {}) or {},
+                    target_pool,
+                    target_profiles,
                 )
                 qualifying_sets.append(qset)
 
             assignments = self._find_all_assignments(qualifying_sets)
             for assignment in assignments:
-                candidates.append({
-                    # doc 19 §3.2.1：生成时即规范化方向（关联字段表 → 键表）。
-                    # 原搜索起点是键表（source_table），规范化后键侧在 target。
-                    "source": target_table,
-                    "target": source_table,
-                    "source_columns": assignment,
-                    "target_columns": list(source_columns),
-                    "candidate_origin": "rule",
-                    "key_origin": origin,  # "physical" | "logical"，供 inference_method 映射使用
-                })
+                candidates.append(
+                    {
+                        # doc 19 §3.2.1：生成时即规范化方向（关联字段表 → 键表）。
+                        # 原搜索起点是键表（source_table），规范化后键侧在 target。
+                        "source": target_table,
+                        "target": source_table,
+                        "source_columns": assignment,
+                        "target_columns": list(source_columns),
+                        "candidate_origin": "rule",
+                        "key_origin": origin,  # "physical" | "logical"，供 inference_method 映射使用
+                    }
+                )
 
         return candidates
 
@@ -422,9 +466,9 @@ class CandidateGenerator:
     # ------------------------------------------------------------------
 
     def _ingest_llm_candidates(
-            self,
-            llm_raw_candidates: List[Dict[str, Any]],
-            tables: Dict[str, dict],
+        self,
+        llm_raw_candidates: List[Dict[str, Any]],
+        tables: Dict[str, dict],
     ) -> List[Dict[str, Any]]:
         """把 LLM 产出器返回的原始候选转换为统一内部候选格式，并执行候选层
         统一口径过滤（目标列必须在目标列池中，见 3.7）。
@@ -451,7 +495,11 @@ class CandidateGenerator:
                 source_columns = c.get("from_columns", [])
                 target_columns = c.get("to_columns", [])
 
-            if not source_columns or not target_columns or len(source_columns) != len(target_columns):
+            if (
+                not source_columns
+                or not target_columns
+                or len(source_columns) != len(target_columns)
+            ):
                 logger.warning("LLM 候选列信息不完整或不对齐，丢弃: %s", c)
                 continue
 
@@ -459,7 +507,10 @@ class CandidateGenerator:
             if not all(sc in source_profiles for sc in source_columns):
                 logger.warning(
                     "LLM 候选源列不存在于源表，丢弃: %s.%s -> %s.%s",
-                    from_full, source_columns, to_full, target_columns,
+                    from_full,
+                    source_columns,
+                    to_full,
+                    target_columns,
                 )
                 continue
 
@@ -470,25 +521,30 @@ class CandidateGenerator:
             if not all(tc in target_pool for tc in target_columns):
                 logger.debug(
                     "LLM 候选目标列命中 metric/complex 排除规则，丢弃: %s.%s -> %s.%s",
-                    from_full, source_columns, to_full, target_columns,
+                    from_full,
+                    source_columns,
+                    to_full,
+                    target_columns,
                 )
                 continue
 
-            converted.append({
-                "source": source_table,
-                "target": target_table,
-                "source_columns": list(source_columns),
-                "target_columns": list(target_columns),
-                "candidate_origin": "llm",
-                "confidence": c.get("confidence", 0.5),
-            })
+            converted.append(
+                {
+                    "source": source_table,
+                    "target": target_table,
+                    "source_columns": list(source_columns),
+                    "target_columns": list(target_columns),
+                    "candidate_origin": "llm",
+                    "confidence": c.get("confidence", 0.5),
+                }
+            )
 
         return converted
 
     @staticmethod
     def _truncate_llm_top_k(
-            llm_candidates: List[Dict[str, Any]],
-            top_k: Optional[int],
+        llm_candidates: List[Dict[str, Any]],
+        top_k: Optional[int],
     ) -> List[Dict[str, Any]]:
         """按 confidence 降序截断前 top_k 个；并列按未加盐有向规范签名升序
         （见 doc 19 §3.1.1，不依赖 LLM 返回顺序；rel_id_salt 不得参与候选
@@ -527,7 +583,8 @@ class CandidateGenerator:
         src_info = candidate["source"].get("object_info", {})
         tgt_info = candidate["target"].get("object_info", {})
         pairs = sorted(
-            f"{s}={t}" for s, t in zip(candidate["source_columns"], candidate["target_columns"])
+            f"{s}={t}"
+            for s, t in zip(candidate["source_columns"], candidate["target_columns"])
         )
         return (
             f"{src_info.get('schema_name')}.{src_info.get('object_name')}->"
@@ -567,7 +624,9 @@ class CandidateGenerator:
         info = table.get("object_info", {})
         return f"{info.get('schema_name')}.{info.get('object_name')}"
 
-    def _dedup_rule_pool(self, candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def _dedup_rule_pool(
+        self, candidates: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
         """规则池同向去重（doc 19 §3.1.1）：同一有向身份重复时 key_origin 按
         physical > logical 保留，不得由候选遍历顺序决定；相同来源的重复项直接
         去重。key_origin 决定 3.2.2 的纠偏策略（物理键约束修正 vs 逻辑键失效
@@ -581,8 +640,8 @@ class CandidateGenerator:
                 best[sig] = candidate
                 continue
             if (
-                    existing.get("key_origin") == "logical"
-                    and candidate.get("key_origin") == "physical"
+                existing.get("key_origin") == "logical"
+                and candidate.get("key_origin") == "physical"
             ):
                 best[sig] = candidate
         return list(best.values())
@@ -596,15 +655,15 @@ class CandidateGenerator:
             sig = self._directed_unsigned_signature(candidate)
             existing = best.get(sig)
             if existing is None or float(candidate.get("confidence", 0.5)) > float(
-                    existing.get("confidence", 0.5)
+                existing.get("confidence", 0.5)
             ):
                 best[sig] = candidate
         return list(best.values())
 
     def _exclude_fk_duplicates(
-            self,
-            candidates: List[Dict[str, Any]],
-            fk_relationship_ids: Set[str],
+        self,
+        candidates: List[Dict[str, Any]],
+        fk_relationship_ids: Set[str],
     ) -> List[Dict[str, Any]]:
         """FK 排除（双向，评分前，doc 19 §3.1）：正向或反向身份命中物理 FK
         集合即排除。两池各自调用，FK 身份集合全局。
@@ -619,9 +678,9 @@ class CandidateGenerator:
         return final
 
     def _filter_superkeys_llm_pool(
-            self,
-            llm_candidates: List[Dict[str, Any]],
-            rule_pool: List[Dict[str, Any]],
+        self,
+        llm_candidates: List[Dict[str, Any]],
+        rule_pool: List[Dict[str, Any]],
     ) -> List[Dict[str, Any]]:
         """LLM 池最小键过滤（单向，doc 19 §3.1.1）：superkey 判定用
         "LLM 池单列 ∪ 规则池单列"并集——规则单列抑制 LLM 复合（规则单列键侧
@@ -631,12 +690,14 @@ class CandidateGenerator:
         single_map: Set[Tuple[str, str, str, str]] = set()
         for candidate in list(rule_pool) + list(llm_candidates):
             if len(candidate["source_columns"]) == 1:
-                single_map.add((
-                    self._full_name(candidate["source"]),
-                    self._full_name(candidate["target"]),
-                    candidate["source_columns"][0],
-                    candidate["target_columns"][0],
-                ))
+                single_map.add(
+                    (
+                        self._full_name(candidate["source"]),
+                        self._full_name(candidate["target"]),
+                        candidate["source_columns"][0],
+                        candidate["target_columns"][0],
+                    )
+                )
 
         result = []
         for candidate in llm_candidates:
@@ -645,14 +706,18 @@ class CandidateGenerator:
                 tgt_full = self._full_name(candidate["target"])
                 is_superkey = any(
                     (src_full, tgt_full, sc, tc) in single_map
-                    for sc, tc in zip(candidate["source_columns"], candidate["target_columns"])
+                    for sc, tc in zip(
+                        candidate["source_columns"], candidate["target_columns"]
+                    )
                 )
                 if is_superkey:
                     continue
             result.append(candidate)
         return result
 
-    def _filter_superkeys(self, candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def _filter_superkeys(
+        self, candidates: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
         """最小键过滤：同池内若单列键 col→X 的候选已存在，复合键 (col, other)→(X, Y)
         的某指派同样把 col 配到 X，则该复合候选视为 superkey 冗余，丢弃（见 3.9）。
         不区分候选来源（逻辑键/物理约束/LLM 三来源的超集都由本条兜底）。
@@ -660,10 +725,14 @@ class CandidateGenerator:
         single_map: Set[Tuple[str, str, str, str]] = set()
         for c in candidates:
             if len(c["source_columns"]) == 1:
-                single_map.add((
-                    self._full_name(c["source"]), self._full_name(c["target"]),
-                    c["source_columns"][0], c["target_columns"][0],
-                ))
+                single_map.add(
+                    (
+                        self._full_name(c["source"]),
+                        self._full_name(c["target"]),
+                        c["source_columns"][0],
+                        c["target_columns"][0],
+                    )
+                )
 
         result = []
         for c in candidates:

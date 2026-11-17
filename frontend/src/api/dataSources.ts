@@ -1,32 +1,36 @@
-import { apiRequest } from './http'
+import { ApiError, apiRequest } from './http'
 import type {
   ConnectionCheckResponse,
   ConnectionFields,
   DataSourceCreateRequest,
-  CollectionJobCreateResponse,
-  CollectionJobListResponse,
-  SqlReadinessResponse,
-  CollectionHomeResponse,
-  PublishDefinitionResponse,
-  PublishHomeResponse,
-  PublishJobListResponse,
   DataSourceListItem,
-  PublicationCreateResponse,
-  PublishCheckResponse,
   DataSourceListResponse,
   DataSourceUpdateRequest,
-  DomainConfigResponse,
-  DomainConfigTablesResponse,
-  DomainConfigUpdateRequest,
-  DimValueColumnsResponse,
-  DimValueConfigGetResponse,
-  DimValueConfigUpdateRequest,
-  DimValueObjectsResponse,
-  RelConfigColumnsResponse,
-  RelConfigGetResponse,
-  RelConfigUpdateRequest,
-  RelConfigUpdateResponse,
+  DeletionTaskDetail,
+  DeletionTaskItem,
+  DeletionTargetChange,
+  DeletionTargetConfirmation,
+  DeletionRunRef,
+  SourceDeletionPreview,
 } from './types'
+
+/**
+ * 从删除/清理被拒（409 resource_has_unfinished_runs）中提取阻断运行明细；
+ * 其他错误返回空数组，调用方据此决定是否渲染清单。
+ */
+export function parseBlockingRuns(error: unknown): DeletionRunRef[] {
+  if (!(error instanceof ApiError) || error.code !== 'resource_has_unfinished_runs') {
+    return []
+  }
+  const details = error.details as { blocking_runs?: unknown } | undefined
+  return Array.isArray(details?.blocking_runs) ? (details.blocking_runs as DeletionRunRef[]) : []
+}
+
+export function parseDeletionTargetChange(error: unknown): DeletionTargetChange | null {
+  if (!(error instanceof ApiError) || error.code !== 'deletion_targets_changed') return null
+  const details = error.details as DeletionTargetChange | undefined
+  return details?.previous?.fingerprint && details.current?.fingerprint ? details : null
+}
 
 export function checkConnection(fields: ConnectionFields) {
   return apiRequest<ConnectionCheckResponse>('/api/data-sources/connection-check', {
@@ -58,192 +62,6 @@ export function setDataSourceActivation(sourceId: string, isActive: boolean) {
   )
 }
 
-export function listCollectionJobs(sourceId: string) {
-  return apiRequest<CollectionJobListResponse>(`/api/data-sources/${sourceId}/collection-jobs`)
-}
-
-export function listPublishJobs(sourceId: string) {
-  return apiRequest<PublishJobListResponse>(`/api/data-sources/${sourceId}/publish-jobs`)
-}
-
-export function getCollectionHome(sourceId: string) {
-  return apiRequest<CollectionHomeResponse>(
-    `/api/data-sources/${sourceId}/collection-home`,
-    {},
-    'create',
-    true,
-  )
-}
-
-export function getPublishHome(sourceId: string) {
-  return apiRequest<PublishHomeResponse>(
-    `/api/data-sources/${sourceId}/publish-home`,
-    {},
-    'create',
-    true,
-  )
-}
-
-export function getPublishDefinition(sourceId: string, publishId: string) {
-  return apiRequest<PublishDefinitionResponse>(
-    `/api/data-sources/${sourceId}/publish-jobs/${publishId}`,
-  )
-}
-
-export function checkPublication(sourceId: string, jobId: string) {
-  return apiRequest<PublishCheckResponse>(
-    `/api/data-sources/${sourceId}/collection-jobs/${jobId}/publish-check`,
-    {},
-    'create',
-    true,
-  )
-}
-
-export function createPublication(sourceId: string, jobId: string, steps: string[]) {
-  return apiRequest<PublicationCreateResponse>(
-    `/api/data-sources/${sourceId}/collection-jobs/${jobId}/publications`,
-    { method: 'POST', body: JSON.stringify({ steps }) },
-    'create',
-    true,
-  )
-}
-
-export function getDomainConfig(sourceId: string, jobId: string) {
-  return apiRequest<DomainConfigResponse>(
-    `/api/data-sources/${sourceId}/collection-jobs/${jobId}/domain-config`,
-    {},
-    'create',
-    true,
-  )
-}
-
-export function getDomainTables(sourceId: string, jobId: string) {
-  return apiRequest<DomainConfigTablesResponse>(
-    `/api/data-sources/${sourceId}/collection-jobs/${jobId}/domain-config/tables`,
-    {},
-    'create',
-    true,
-  )
-}
-
-export function putDomainConfig(
-  sourceId: string,
-  jobId: string,
-  payload: DomainConfigUpdateRequest,
-) {
-  return apiRequest<DomainConfigResponse>(
-    `/api/data-sources/${sourceId}/collection-jobs/${jobId}/domain-config`,
-    { method: 'PUT', body: JSON.stringify(payload) },
-    'create',
-    true,
-  )
-}
-
-export function getDimValueConfig(sourceId: string, jobId: string) {
-  return apiRequest<DimValueConfigGetResponse>(
-    `/api/data-sources/${sourceId}/collection-jobs/${jobId}/dim-config`,
-  )
-}
-
-export function putDimValueConfig(
-  sourceId: string,
-  jobId: string,
-  payload: DimValueConfigUpdateRequest,
-) {
-  return apiRequest<DimValueConfigGetResponse>(
-    `/api/data-sources/${sourceId}/collection-jobs/${jobId}/dim-config`,
-    { method: 'PUT', body: JSON.stringify(payload) },
-    'create',
-    true,
-  )
-}
-
-export function getDimValueObjects(sourceId: string, jobId: string) {
-  return apiRequest<DimValueObjectsResponse>(
-    `/api/data-sources/${sourceId}/collection-jobs/${jobId}/dim-config/objects`,
-  )
-}
-
-export function getDimValueObjectColumns(
-  sourceId: string,
-  jobId: string,
-  schemaName: string,
-  objectName: string,
-) {
-  return apiRequest<DimValueColumnsResponse>(
-    `/api/data-sources/${sourceId}/collection-jobs/${jobId}/dim-config/object-columns` +
-      `?schema_name=${encodeURIComponent(schemaName)}&object_name=${encodeURIComponent(objectName)}`,
-  )
-}
-
-export function getRelConfig(sourceId: string, jobId: string) {
-  return apiRequest<RelConfigGetResponse>(
-    `/api/data-sources/${sourceId}/collection-jobs/${jobId}/rel-config`,
-  )
-}
-
-export function putRelConfig(
-  sourceId: string,
-  jobId: string,
-  payload: RelConfigUpdateRequest,
-) {
-  return apiRequest<RelConfigUpdateResponse>(
-    `/api/data-sources/${sourceId}/collection-jobs/${jobId}/rel-config`,
-    { method: 'PUT', body: JSON.stringify(payload) },
-    'create',
-    true,
-  )
-}
-
-export function getRelObjectColumns(
-  sourceId: string,
-  jobId: string,
-  schemaName: string,
-  objectName: string,
-) {
-  return apiRequest<RelConfigColumnsResponse>(
-    `/api/data-sources/${sourceId}/collection-jobs/${jobId}/rel-config/object-columns` +
-      `?schema_name=${encodeURIComponent(schemaName)}&object_name=${encodeURIComponent(objectName)}`,
-  )
-}
-
-export function createCollectionJob(
-  sourceId: string,
-  steps: string[],
-  jobId = '',
-  domainDescription?: string,
-  syncDomainDescription = false,
-) {
-  // doc 21.1 §8.4：仅当本次会话保存过描述（domainDescription 已提供）时成对携带；
-  // 未保存/未勾选 domain 时两字段都不发送，由后端按 db_desc → 数据源描述解析。
-  const body: {
-    steps: string[]
-    job_id?: string
-    domain_description?: string
-    sync_domain_description?: boolean
-  } = { steps }
-  if (jobId) body.job_id = jobId
-  if (domainDescription !== undefined) {
-    body.domain_description = domainDescription
-    body.sync_domain_description = syncDomainDescription
-  }
-  return apiRequest<CollectionJobCreateResponse>(
-    `/api/data-sources/${sourceId}/collection-jobs`,
-    { method: 'POST', body: JSON.stringify(body) },
-    'create',
-    true,
-  )
-}
-
-export function getSqlReadiness(sourceId: string, jobId: string) {
-  return apiRequest<SqlReadinessResponse>(
-    `/api/data-sources/${sourceId}/collection-jobs/${jobId}/sql-readiness`,
-    {},
-    'create',
-    true,
-  )
-}
-
 export function checkSavedConnection(sourceId: string) {
   return apiRequest<ConnectionCheckResponse>(
     `/api/data-sources/${sourceId}/connection-check`,
@@ -252,9 +70,39 @@ export function checkSavedConnection(sourceId: string) {
   )
 }
 
-export function deleteDataSource(sourceId: string, deleteOutput = false): Promise<void> {
-  const query = deleteOutput ? '?delete_output=true' : ''
-  return apiRequest<void>(`/api/data-sources/${sourceId}${query}`, { method: 'DELETE' })
+// ---- 删除与知识清理（doc 8.1 §2.4/§3.2/§7） ----
+
+/** 提交源删除任务（202）：确认体回传目标 ID，替代旧 204/deleteOutput 契约。 */
+export function deleteDataSource(sourceId: string, confirmId: string) {
+  return apiRequest<DeletionTaskItem>(`/api/data-sources/${sourceId}`, {
+    method: 'DELETE',
+    body: JSON.stringify({ confirm_id: confirmId }),
+  })
+}
+
+/** 源级知识清理（202）：清五张内容表 + 三类向量 + 该源图，保留作业与采集文件。 */
+export function clearPublishedData(sourceId: string, confirmId: string) {
+  return apiRequest<DeletionTaskItem>(`/api/data-sources/${sourceId}/published-data/clear`, {
+    method: 'POST',
+    body: JSON.stringify({ confirm_id: confirmId }),
+  })
+}
+
+export function getSourceDeletionPreview(sourceId: string) {
+  return apiRequest<SourceDeletionPreview>(`/api/data-sources/${sourceId}/deletion-preview`, {
+    cache: 'no-store',
+  })
+}
+
+export function getDeletionTask(taskId: string) {
+  return apiRequest<DeletionTaskDetail>(`/api/deletion-tasks/${taskId}`)
+}
+
+export function retryDeletionTask(taskId: string, confirmation?: DeletionTargetConfirmation) {
+  return apiRequest<DeletionTaskItem>(`/api/deletion-tasks/${taskId}/retry`, {
+    method: 'POST',
+    ...(confirmation ? { body: JSON.stringify({ target_confirmation: confirmation }) } : {}),
+  })
 }
 
 export function updateDataSource(sourceId: string, fields: DataSourceUpdateRequest) {

@@ -37,7 +37,9 @@ class RelationshipWriter:
         output_config = config.get("output", {})
         database_config = config.get("database", {})
 
-        self.rel_dir = resolve_project_path(output_config.get("rel_directory", "output/rel"))
+        self.rel_dir = resolve_project_path(
+            output_config.get("rel_directory", "output/rel")
+        )
         self.rel_granularity = output_config.get("rel_granularity", "global")
         self.database_name = database_config.get("database")
         if not self.database_name:
@@ -53,8 +55,12 @@ class RelationshipWriter:
 
         # 决策阈值（用于置信度分类）
         decision_config = config.get("decision", {})
-        self.high_confidence_threshold = decision_config.get("high_confidence_threshold", 0.90)
-        self.medium_confidence_threshold = decision_config.get("medium_confidence_threshold", 0.80)
+        self.high_confidence_threshold = decision_config.get(
+            "high_confidence_threshold", 0.90
+        )
+        self.medium_confidence_threshold = decision_config.get(
+            "medium_confidence_threshold", 0.80
+        )
 
         # 确保输出目录存在
         ensure_dir(self.rel_dir)
@@ -102,13 +108,13 @@ class RelationshipWriter:
         return "low"
 
     def write_results(
-            self,
-            relations: List[Relation],
-            suppressed: List[Dict[str, Any]],
-            config: Dict[str, Any],
-            tables: Optional[Dict[str, dict]] = None,
-            generated_by: str = "rel",
-            extra_statistics: Optional[Dict[str, Any]] = None
+        self,
+        relations: List[Relation],
+        suppressed: List[Dict[str, Any]],
+        config: Dict[str, Any],
+        tables: Optional[Dict[str, dict]] = None,
+        generated_by: str = "rel",
+        extra_statistics: Optional[Dict[str, Any]] = None,
     ) -> List[str]:
         """输出关系发现结果（v3.2格式）
 
@@ -125,11 +131,13 @@ class RelationshipWriter:
         """
         # 保存 tables 供后续使用
         self.tables = tables or {}
-        
+
         output_files = []
 
         # 1. 输出JSON（v3.2格式）
-        json_file = self._write_json_v32(relations, suppressed, config, generated_by, extra_statistics)
+        json_file = self._write_json_v32(
+            relations, suppressed, config, generated_by, extra_statistics
+        )
         if json_file:
             output_files.append(str(json_file))
 
@@ -142,12 +150,12 @@ class RelationshipWriter:
         return output_files
 
     def _write_json_v32(
-            self,
-            relations: List[Relation],
-            suppressed: List[Dict],
-            config: Dict[str, Any],
-            generated_by: str = "rel",
-            extra_statistics: Optional[Dict[str, Any]] = None
+        self,
+        relations: List[Relation],
+        suppressed: List[Dict],
+        config: Dict[str, Any],
+        generated_by: str = "rel",
+        extra_statistics: Optional[Dict[str, Any]] = None,
     ) -> Path:
         """输出JSON文件（v3.2格式）
 
@@ -177,7 +185,9 @@ class RelationshipWriter:
             if rel.is_composite:
                 table_pair = rel.table_pair
                 if table_pair in suppressed_by_table_pair:
-                    rel_dict["suppressed_single_relations"] = suppressed_by_table_pair[table_pair]
+                    rel_dict["suppressed_single_relations"] = suppressed_by_table_pair[
+                        table_pair
+                    ]
 
             relationships_v32.append(rel_dict)
 
@@ -193,7 +203,11 @@ class RelationshipWriter:
         nested_extra = {}
         if extra_statistics:
             db_queries = extra_statistics.get("database_queries_executed", 0)
-            nested_extra = {k: v for k, v in extra_statistics.items() if k != "database_queries_executed"}
+            nested_extra = {
+                k: v
+                for k, v in extra_statistics.items()
+                if k != "database_queries_executed"
+            }
 
         # 构建JSON数据（v3.2格式）
         data = {
@@ -204,19 +218,21 @@ class RelationshipWriter:
             "json_files_loaded": stats["json_files_loaded"],
             "database_queries_executed": db_queries,
             "generated_timestamp": utc_isoformat(datetime.now(timezone.utc)),
-
             "statistics": {
                 "total_relationships_found": stats["total_relationships_found"],
                 "foreign_key_relationships": stats["foreign_key_relationships"],
                 "composite_key_relationships": stats["composite_key_relationships"],
                 "single_column_relationships": stats["single_column_relationships"],
-                "total_suppressed_single_relations": stats["total_suppressed_single_relations"],
+                "total_suppressed_single_relations": stats[
+                    "total_suppressed_single_relations"
+                ],
                 "rule_only_relationships": stats["rule_only_relationships"],
                 "llm_only_relationships": stats["llm_only_relationships"],
-                "rule_llm_overlap_relationships": stats["rule_llm_overlap_relationships"],
+                "rule_llm_overlap_relationships": stats[
+                    "rule_llm_overlap_relationships"
+                ],
             },
-
-            "relationships": relationships_v32
+            "relationships": relationships_v32,
         }
 
         # 合并额外的统计项（不含已提取的顶层字段）
@@ -224,7 +240,10 @@ class RelationshipWriter:
             data["statistics"].update(nested_extra)
 
         # 写入文件（使用配置的粒度，当前仅支持 global）
-        json_file = self.rel_dir / f"{self.database_name}.relationships_{self.rel_granularity}.json"
+        json_file = (
+            self.rel_dir
+            / f"{self.database_name}.relationships_{self.rel_granularity}.json"
+        )
         with open(json_file, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
 
@@ -232,8 +251,7 @@ class RelationshipWriter:
         return json_file
 
     def _group_suppressed_by_table_pair(
-            self,
-            suppressed: List[Dict[str, Any]]
+        self, suppressed: List[Dict[str, Any]]
     ) -> Dict[str, List[Dict[str, Any]]]:
         """按表对分组被抑制的单列关系
 
@@ -264,7 +282,8 @@ class RelationshipWriter:
                 "to_column": candidate["target_columns"][0],
                 "original_score": candidate.get("composite_score", 0.0),
                 "suppression_reason": "在复合键中，无独立约束",
-                "could_have_been_accepted": candidate.get("composite_score", 0.0) >= 0.80
+                "could_have_been_accepted": candidate.get("composite_score", 0.0)
+                >= 0.80,
             }
 
             grouped[table_pair].append(suppressed_rel)
@@ -294,14 +313,8 @@ class RelationshipWriter:
         result = {
             "relationship_id": rel.relationship_id,
             "type": rel_type,
-            "from_table": {
-                "schema": rel.source_schema,
-                "table": rel.source_table
-            },
-            "to_table": {
-                "schema": rel.target_schema,
-                "table": rel.target_table
-            },
+            "from_table": {"schema": rel.source_schema, "table": rel.source_table},
+            "to_table": {"schema": rel.target_schema, "table": rel.target_table},
         }
 
         # 列名（单列用 from_column，复合用 from_columns）
@@ -333,7 +346,7 @@ class RelationshipWriter:
 
         # 关系基数（所有关系都有）
         result["cardinality"] = rel.cardinality
-        
+
         # 外键约束名（仅外键关系有值）
         if rel.constraint_name is not None:
             result["constraint_name"] = rel.constraint_name
@@ -356,9 +369,7 @@ class RelationshipWriter:
     }
 
     def _parse_discovery_info(
-            self,
-            inference_method: Optional[str],
-            rel: Relation
+        self, inference_method: Optional[str], rel: Relation
     ) -> Dict[str, Optional[str]]:
         """解析 inference_method 为 discovery_method, target_source_type, source_constraint
 
@@ -430,7 +441,7 @@ class RelationshipWriter:
             - "single_field_index": 单列索引（含唯一/非唯一）
             - None: 没有物理约束（只是数据唯一或逻辑主键）
         """
-        if not hasattr(self, 'tables') or not self.tables or not rel.is_single_column:
+        if not hasattr(self, "tables") or not self.tables or not rel.is_single_column:
             return None
 
         source_table_key = f"{rel.source_schema}.{rel.source_table}"
@@ -476,7 +487,7 @@ class RelationshipWriter:
             - 只认物理约束，不认统计唯一
             - 与 _get_source_constraint() 保持相同的口径
         """
-        if not hasattr(self, 'tables') or not self.tables or not rel.is_single_column:
+        if not hasattr(self, "tables") or not self.tables or not rel.is_single_column:
             return None
 
         target_table_key = f"{rel.target_schema}.{rel.target_table}"
@@ -506,17 +517,13 @@ class RelationshipWriter:
             lk_conf = lk.get("confidence_score", 0)
 
             # 单列逻辑主键且置信度 >= 0.8
-            if (len(lk_cols) == 1 and
-                lk_cols[0] == target_column and
-                lk_conf >= 0.8):
+            if len(lk_cols) == 1 and lk_cols[0] == target_column and lk_conf >= 0.8:
                 return "candidate_logical_key"
 
         return None
 
     def _calculate_statistics_v32(
-            self,
-            relations: List[Relation],
-            suppressed: List[Dict[str, Any]]
+        self, relations: List[Relation], suppressed: List[Dict[str, Any]]
     ) -> Dict[str, int]:
         """计算统计数据（v3 统一改造口径，见 doc 15 §3.8）
 
@@ -547,16 +554,17 @@ class RelationshipWriter:
         total = len(relations)
 
         # 外键直通关系数（relationship_type == "foreign_key"）
-        foreign_key_count = len([r for r in relations if r.relationship_type == "foreign_key"])
+        foreign_key_count = len(
+            [r for r in relations if r.relationship_type == "foreign_key"]
+        )
 
         composite_count = len([r for r in relations if r.is_composite])
         single_count = len([r for r in relations if r.is_single_column])
 
         # 被抑制的单列关系数量
-        suppressed_single_count = len([
-            s for s in suppressed
-            if len(s.get("source_columns", [])) == 1
-        ])
+        suppressed_single_count = len(
+            [s for s in suppressed if len(s.get("source_columns", [])) == 1]
+        )
 
         # 来源分档统计（doc 15 §3.8：物理FK / 仅规则 / 仅LLM / 重叠）
         # 物理FK 已由 foreign_key_count 覆盖（relationship_type 判断，不依赖
@@ -599,7 +607,10 @@ class RelationshipWriter:
             medium_confidence_threshold=self.medium_confidence_threshold,
         )
         # 写入文件（使用配置的粒度，当前仅支持 global）
-        md_file = self.rel_dir / f"{self.database_name}.relationships_{self.rel_granularity}.md"
+        md_file = (
+            self.rel_dir
+            / f"{self.database_name}.relationships_{self.rel_granularity}.md"
+        )
         with open(md_file, "w", encoding="utf-8") as f:
             f.write(content)
 
@@ -647,12 +658,14 @@ def render_markdown_report(
     high_conf = len(
         [s for s in scores if s is not None and s >= high_confidence_threshold]
     )
-    medium_conf = len([
-        s
-        for s in scores
-        if s is not None
-        and medium_confidence_threshold <= s < high_confidence_threshold
-    ])
+    medium_conf = len(
+        [
+            s
+            for s in scores
+            if s is not None
+            and medium_confidence_threshold <= s < high_confidence_threshold
+        ]
+    )
 
     lines.append(f"- 外键直通: {foreign_key_count}")
     lines.append(f"- 推断关系: {inferred_count}")

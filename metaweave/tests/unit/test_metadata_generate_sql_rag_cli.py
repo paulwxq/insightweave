@@ -66,7 +66,10 @@ class _DummySQLValidator:
 def _base_config():
     return {
         "database": {"database": "testdb", "host": "localhost"},
-        "llm": {"active": "qwen", "providers": {"qwen": {"model": "m", "api_key": "k"}}},
+        "llm": {
+            "active": "qwen",
+            "providers": {"qwen": {"model": "m", "api_key": "k"}},
+        },
         "output": {"markdown_directory": "output/md", "rel_directory": "output/rel"},
         "sql_rag": {
             "generation": {"output_dir": "output/sql-rag"},
@@ -82,7 +85,9 @@ def _setup_env(tmp_path, db_name="testdb"):
     domains_dir = tmp_path / "output" / "domains"
     domains_dir.mkdir(parents=True)
     (domains_dir / "db_domains.yaml").write_text(
-        yaml.safe_dump({"database": {"name": db_name}, "domains": []}, allow_unicode=True),
+        yaml.safe_dump(
+            {"database": {"name": db_name}, "domains": []}, allow_unicode=True
+        ),
         encoding="utf-8",
     )
     md_dir = tmp_path / "output" / "md"
@@ -171,9 +176,7 @@ def _invoke(
 def test_generate_sql_rag_basic_with_validation(tmp_path, monkeypatch):
     """默认（validation.enabled=true）：生成后执行校验，路径解析与调用参数正确"""
     cfg = _setup_env(tmp_path)
-    result, spies = _invoke(
-        CliRunner(), cfg, [], monkeypatch, tmp_path, _base_config()
-    )
+    result, spies = _invoke(CliRunner(), cfg, [], monkeypatch, tmp_path, _base_config())
 
     assert result.exit_code == 0, result.output
     gen = _DummyQuestionSQLGenerator.instances[0]
@@ -200,9 +203,7 @@ def test_skips_validation_when_enabled_false(tmp_path, monkeypatch):
     cfg = _setup_env(tmp_path)
     loaded_config = _base_config()
     loaded_config["sql_rag"]["validation"]["enabled"] = False
-    result, spies = _invoke(
-        CliRunner(), cfg, [], monkeypatch, tmp_path, loaded_config
-    )
+    result, spies = _invoke(CliRunner(), cfg, [], monkeypatch, tmp_path, loaded_config)
 
     assert result.exit_code == 0, result.output
     assert "跳过 SQL 校验" in result.output
@@ -242,9 +243,7 @@ def test_missing_domains_file_friendly_error(tmp_path, monkeypatch):
     (tmp_path / "output" / "md").mkdir(parents=True)
     # 故意不写 db_domains.yaml
 
-    result, spies = _invoke(
-        CliRunner(), cfg, [], monkeypatch, tmp_path, _base_config()
-    )
+    result, spies = _invoke(CliRunner(), cfg, [], monkeypatch, tmp_path, _base_config())
 
     assert result.exit_code != 0
     assert "未找到业务域配置" in result.output
@@ -266,9 +265,7 @@ def test_resolves_domains_from_config(tmp_path, monkeypatch):
 
     loaded_config = _base_config()
     loaded_config["output"]["domains_directory"] = "custom_domains"
-    result, spies = _invoke(
-        CliRunner(), cfg, [], monkeypatch, tmp_path, loaded_config
-    )
+    result, spies = _invoke(CliRunner(), cfg, [], monkeypatch, tmp_path, loaded_config)
 
     assert result.exit_code == 0, result.output
     gen = _DummyQuestionSQLGenerator.instances[0]
@@ -284,8 +281,12 @@ def test_md_context_dir_cli_explicit_wins(tmp_path, monkeypatch):
     custom_md.mkdir()
 
     result, spies = _invoke(
-        CliRunner(), cfg, ["--md-context-dir", str(custom_md)],
-        monkeypatch, tmp_path, _base_config(),
+        CliRunner(),
+        cfg,
+        ["--md-context-dir", str(custom_md)],
+        monkeypatch,
+        tmp_path,
+        _base_config(),
     )
 
     assert result.exit_code == 0, result.output
@@ -303,9 +304,7 @@ def test_md_dir_from_output_markdown_directory(tmp_path, monkeypatch):
 
     loaded_config = _base_config()
     loaded_config["output"]["markdown_directory"] = "cfg_md"
-    result, spies = _invoke(
-        CliRunner(), cfg, [], monkeypatch, tmp_path, loaded_config
-    )
+    result, spies = _invoke(CliRunner(), cfg, [], monkeypatch, tmp_path, loaded_config)
 
     assert result.exit_code == 0, result.output
     gen = _DummyQuestionSQLGenerator.instances[0]
@@ -383,9 +382,7 @@ def test_repair_enabled_warns_without_blocking(tmp_path, monkeypatch):
 def test_llm_prechecks_invoked(tmp_path, monkeypatch):
     """分支显式调用两个 LLM 配置预检（load_config 本身不含预检）"""
     cfg = _setup_env(tmp_path)
-    result, spies = _invoke(
-        CliRunner(), cfg, [], monkeypatch, tmp_path, _base_config()
-    )
+    result, spies = _invoke(CliRunner(), cfg, [], monkeypatch, tmp_path, _base_config())
 
     assert result.exit_code == 0, result.output
     spies["precheck_declared"].assert_called_once()
@@ -396,7 +393,12 @@ def test_generation_failure_aborts_before_validation(tmp_path, monkeypatch):
     """生成失败 → 直接终止，不进入校验段（不建连接、不建 validator）"""
     cfg = _setup_env(tmp_path)
     result, spies = _invoke(
-        CliRunner(), cfg, [], monkeypatch, tmp_path, _base_config(),
+        CliRunner(),
+        cfg,
+        [],
+        monkeypatch,
+        tmp_path,
+        _base_config(),
         gen_success=False,
     )
 
@@ -448,9 +450,12 @@ def test_warns_out_of_scope_params(tmp_path, monkeypatch):
     """generate-sql-rag 模式下显式传入无效参数 → 仅告警不拦截"""
     cfg = _setup_env(tmp_path)
     result, spies = _invoke(
-        CliRunner(), cfg,
+        CliRunner(),
+        cfg,
         ["--description", "某描述", "--tables", "a,b", "--md-limit", "5"],
-        monkeypatch, tmp_path, _base_config(),
+        monkeypatch,
+        tmp_path,
+        _base_config(),
     )
 
     assert result.exit_code == 0, result.output
@@ -467,9 +472,18 @@ def test_no_warning_for_valid_params(tmp_path, monkeypatch):
     md_dir = tmp_path / "output" / "md"
 
     result, spies = _invoke(
-        CliRunner(), cfg,
-        ["--domains-config", str(domains_path), "--md-context-dir", str(md_dir), "--clean"],
-        monkeypatch, tmp_path, _base_config(),
+        CliRunner(),
+        cfg,
+        [
+            "--domains-config",
+            str(domains_path),
+            "--md-context-dir",
+            str(md_dir),
+            "--clean",
+        ],
+        monkeypatch,
+        tmp_path,
+        _base_config(),
     )
 
     assert result.exit_code == 0, result.output

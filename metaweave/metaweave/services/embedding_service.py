@@ -16,7 +16,9 @@ logger = get_metaweave_logger("services.embedding_service")
 class EmbeddingService:
     """封装 DashScope Embedding，提供同步与异步接口。"""
 
-    def __init__(self, embedding_config: dict, name_similarity_config: Optional[dict] = None):
+    def __init__(
+        self, embedding_config: dict, name_similarity_config: Optional[dict] = None
+    ):
         self.config = embedding_config or {}
         self.name_similarity_config = name_similarity_config or {}
 
@@ -34,7 +36,10 @@ class EmbeddingService:
         self.batch_size = self.config.get("batch_size", 16)
         self.max_retries = self.config.get("max_retries", 3)
         self.timeout = self.config.get("timeout", 30)
-        self.async_concurrency = self.config.get("async_concurrency", self.name_similarity_config.get("async_concurrency", 10))
+        self.async_concurrency = self.config.get(
+            "async_concurrency",
+            self.name_similarity_config.get("async_concurrency", 10),
+        )
 
         if not self.model or not self.api_key:
             raise ValueError("Embedding 配置缺少 model 或 api_key")
@@ -80,7 +85,7 @@ class EmbeddingService:
         # 去重保持顺序
         unique_texts = list(dict.fromkeys(texts))
         for i in range(0, len(unique_texts), self.batch_size):
-            batch = unique_texts[i:i + self.batch_size]
+            batch = unique_texts[i : i + self.batch_size]
             batch_result = self._embed_batch(batch)
             results.update(batch_result)
 
@@ -120,7 +125,9 @@ class EmbeddingService:
                     )
                     time.sleep(delay)
                 else:
-                    logger.error("Embedding 调用失败（已重试 %s 次）: %s", self.max_retries, exc)
+                    logger.error(
+                        "Embedding 调用失败（已重试 %s 次）: %s", self.max_retries, exc
+                    )
 
         raise last_error or RuntimeError("Embedding 调用失败，原因未知")
 

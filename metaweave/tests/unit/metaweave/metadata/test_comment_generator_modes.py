@@ -29,7 +29,10 @@ def test_incremental_mode_only_requests_missing_comments():
 
     service.generate_table_comment.assert_not_called()
     assert service.generate_column_comments.call_count == 1
-    assert [item["name"] for item in service.generate_column_comments.call_args.kwargs["columns"]] == ["name"]
+    assert [
+        item["name"]
+        for item in service.generate_column_comments.call_args.kwargs["columns"]
+    ] == ["name"]
     assert metadata.comment == "数据库对象注释"
     assert metadata.columns[0].comment == "数据库字段注释"
     assert metadata.columns[1].comment == "新字段注释"

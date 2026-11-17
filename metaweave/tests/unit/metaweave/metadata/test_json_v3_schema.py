@@ -152,13 +152,12 @@ def test_v3_formatter_emits_compact_schema(tmp_path):
     assert "classification_reason" not in table_profile
     assert "rule_based_classification" not in table_profile
     assert "column_statistics" not in table_profile
-    assert "is_partial" not in table_profile["physical_constraints"][
-        "unique_constraints"
-    ][0]
+    assert (
+        "is_partial"
+        not in table_profile["physical_constraints"]["unique_constraints"][0]
+    )
     assert table_profile["indexes"][0]["included_columns"] == ["order_id"]
-    assert table_profile["indexes"][0]["key_expressions"] == [
-        "lower((amount)::text)"
-    ]
+    assert table_profile["indexes"][0]["key_expressions"] == ["lower((amount)::text)"]
 
 
 def test_current_json_format_replaces_legacy_shape():
@@ -281,3 +280,98 @@ def test_metadata_document_rejects_unknown_version_and_invalid_v3_classification
                 },
             }
         )
+
+
+# ---- doc 7.1 §8.7/§8.8：推荐属性与画像契约的兼容 ----
+
+
+def _v3_doc_with_recommendation(table_profile_overrides=None):
+    table_profile = {
+        "table_category": "dim",
+        "confidence": 0.9,
+        "inference_basis": ["llm_inferred"],
+        "classification_source": "llm",
+        "classification_reason": "维度属性为主",
+        "rule_based_classification": {
+            "table_category": "dim",
+            "confidence": 0.8,
+            "inference_basis": ["dim_name_pattern"],
+        },
+        "indexes": [],
+        "physical_constraints": {
+            "primary_key": None,
+            "foreign_keys": [],
+            "unique_constraints": [],
+        },
+        "dimension_value_columns": ["name"],
+        "dimension_value_confidence": 0.9,
+    }
+    table_profile.update(table_profile_overrides or {})
+    return {
+        "metadata_version": "3.0",
+        "object_info": {
+            "schema_name": "public",
+            "object_name": "dim_x",
+            "comment": "",
+        },
+        "column_profiles": {
+            "name": {"ordinal_position": 1, "data_type": "text"},
+            "id": {"ordinal_position": 2, "data_type": "integer"},
+        },
+        "table_profile": table_profile,
+        "sample_records": {"sample_method": "none", "records": []},
+    }
+
+
+def test_dimension_value_recommendation_fields_pass_contract():
+    data = _v3_doc_with_recommendation()
+
+    document = MetadataDocument.from_dict(data)
+
+    assert document.table_profile["dimension_value_columns"] == ["name"]
+    assert document.data["table_profile"]["dimension_value_confidence"] == 0.9
+
+
+def test_rule_profile_with_empty_recommendation_passes_contract():
+    data = _v3_doc_with_recommendation(
+        {
+            "classification_source": "rule",
+            "classification_reason": None,
+            "rule_based_classification": None,
+            "dimension_value_columns": [],
+            "dimension_value_confidence": None,
+        }
+    )
+    # rule 来源不允许携带 classification_reason / rule_based_classification
+    del data["table_profile"]["classification_reason"]
+    del data["table_profile"]["rule_based_classification"]
+
+    document = MetadataDocument.from_dict(data)
+
+    assert document.table_profile["dimension_value_columns"] == []
+
+
+def test_base_table_profile_to_json_dict_has_no_recommendation_defaults():
+    from dataclasses import fields
+
+    from metaweave.core.metadata.models import (
+        ColumnStatisticsSummary,
+        KeyColumnsSummary,
+        TableProfile,
+    )
+
+    summary = ColumnStatisticsSummary(
+        **{f.name: 0 for f in fields(ColumnStatisticsSummary)}
+    )
+    profile = TableProfile(
+        table_category="dim",
+        confidence=0.8,
+        column_statistics=summary,
+        key_columns=KeyColumnsSummary(),
+    )
+
+    metadata = TableMetadata(schema_name="public", table_name="dim_x")
+    result = profile.to_json_dict(metadata=metadata)
+
+    assert "dimension_value_columns" not in result
+    assert "dimension_value_confidence" not in result

@@ -114,10 +114,6 @@ onMounted(reload)
         <span class="asset-count">{{ filtered.length }} 个数据库</span>
       </div>
 
-      <div v-if="catalog && catalog.inconsistent_count > 0" class="asset-warning" role="status">
-        有 {{ catalog.inconsistent_count }} 个数据源的当前发布缺少画像内容，未列入目录。
-      </div>
-
       <div class="asset-toolbar">
         <label class="asset-search">
           <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="8" /><path d="m21 21-4.3-4.3" /></svg>
@@ -149,7 +145,7 @@ onMounted(reload)
       </div>
       <template v-else>
         <div class="asset-list">
-          <article v-for="item in visible" :key="item.publish_id" class="asset-row">
+          <article v-for="item in visible" :key="item.publish_run_id" class="asset-row">
             <div class="asset-lead">
               <span class="asset-mark" :class="markClass(item)">
                 <svg viewBox="0 0 24 24" aria-hidden="true"><rect width="20" height="8" x="2" y="2" rx="2" /><rect width="20" height="8" x="2" y="14" rx="2" /><path d="M6 6h.01" /><path d="M6 18h.01" /></svg>

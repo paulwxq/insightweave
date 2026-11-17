@@ -22,7 +22,7 @@ class TableCategory(str, enum.Enum):
 VARCHAR_LIMITS: Dict[str, int] = {
     "entity_id": 512,
     "source_id": 36,
-    "publish_id": 36,
+    "publish_run_id": 36,
     "object_id": 256,
     "object_type": 64,
     "parent_id": 256,
@@ -69,16 +69,16 @@ class SchemaObject:
         self,
         embedding: Optional[List[float]] = None,
         source_id: Optional[str] = None,
-        publish_id: Optional[str] = None,
+        publish_run_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """转换为 Milvus upsert/insert 所需的完整记录。
 
-        entity_id、source_id、publish_id 由应用显式赋值，schema 不会自动填充。
+        entity_id、source_id、publish_run_id 由应用显式赋值，schema 不会自动填充。
         """
         return {
             "entity_id": build_entity_id(source_id, self.object_id),
             "source_id": source_id or "",
-            "publish_id": publish_id or "",
+            "publish_run_id": publish_run_id or "",
             "object_id": self.object_id,
             "object_type": self.object_type.value,
             "parent_id": self.parent_id,

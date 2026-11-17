@@ -13,8 +13,8 @@ from click.testing import CliRunner
 from metaweave.cli import loader_cli
 
 SUMMARY_HEADING = "RAG 加载汇总"
-SOURCE = "b9a4943d-44d6-4f35-b553-d25207f9d8c1"
-JOB = "550e8400-e29b-41d4-a716-446655440000"
+SOURCE = "db_src_1"
+WORKSPACE = "ws_1"
 
 
 def _ok_loader(message="加载完成", execution_time=0.5):
@@ -89,10 +89,10 @@ class TestCommandContract:
             )
 
         assert result.exit_code == 0
-        loader.load.assert_called_once_with(clean=False)
+        loader.load.assert_called_once_with()
 
-    @pytest.mark.parametrize("load_type", ["cql"])
-    def test_clean_keeps_original_meaning_for_other_types(self, tmp_path, load_type):
+    def test_clean_no_longer_wipes_for_cql(self, tmp_path):
+        """doc 4 §4.4：--clean 对 cql 无整库清空语义，load 仍按源替换。"""
         runner = CliRunner()
         config = _write_config(tmp_path)
         loader = _ok_loader()
@@ -100,15 +100,16 @@ class TestCommandContract:
         with mock.patch.object(
             loader_cli.LoaderFactory,
             "create",
-            side_effect=_factory({load_type: loader}),
+            side_effect=_factory({"cql": loader}),
         ):
             result = runner.invoke(
                 loader_cli.rag_load_command,
-                ["--type", load_type, "-c", config, "--clean"],
+                ["--type", "cql", "-c", config, "--clean"],
             )
 
         assert result.exit_code == 0
-        loader.load.assert_called_once_with(clean=True)
+        loader.load.assert_called_once_with()
+        assert "无额外清理" in result.output
 
     def test_invalid_type_rejected_by_choice(self, tmp_path):
         runner = CliRunner()
@@ -141,25 +142,43 @@ class TestCommandContract:
 class TestTableSchemaDebugCli:
     """doc 20.1 §10.7：table_schema 调试加载"""
 
-    def test_requires_both_uuids(self, tmp_path):
+    def test_requires_both_ids(self, tmp_path):
         config = _write_config(tmp_path)
         for args in (
             ["--type", "table_schema"],
             ["--type", "table_schema", "--source_id", SOURCE],
-            ["--type", "table_schema", "--job_id", JOB],
-            ["--type", "table_schema", "--source_id", "bad", "--job_id", JOB],
+            ["--type", "table_schema", "--workspace_id", WORKSPACE],
         ):
             result = CliRunner().invoke(
                 loader_cli.rag_load_command, args + ["-c", config]
             )
             assert result.exit_code == 2, args
 
+    def test_bad_short_id_rejected_in_managed_derivation(self, tmp_path):
+        """非法短 ID 由受管配置派生拦截（配置错误，exit 1），不在 CLI 解析层。"""
+        config = _write_config(tmp_path)
+        result = CliRunner().invoke(
+            loader_cli.rag_load_command,
+            [
+                "--type",
+                "table_schema",
+                "--source_id",
+                "bad",
+                "--workspace_id",
+                WORKSPACE,
+                "-c",
+                config,
+            ],
+        )
+        assert result.exit_code == 1
+        assert "配置错误" in result.output and "短 ID" in result.output
+
     def test_clean_never_resolves_clean_target_or_warns_about_wiping(
         self, tmp_path, monkeypatch
     ):
         config = _write_config(tmp_path)
         loader = _ok_loader()
-        loader.publish_id = "11111111-2222-4333-8444-555555555555"
+        loader.publish_run_id = "11111111-2222-4333-8444-555555555555"
         loader.close = mock.MagicMock()
         seen = []
         import metaweave.core.clean_targets as clean_targets
@@ -177,8 +196,8 @@ class TestTableSchemaDebugCli:
                     "table_schema",
                     "--source_id",
                     SOURCE,
-                    "--job_id",
-                    JOB,
+                    "--workspace_id",
+                    WORKSPACE,
                     "-c",
                     config,
                 ]
@@ -189,6 +208,9 @@ class TestTableSchemaDebugCli:
             loader.load.assert_called_once_with(clean=False)
             assert "清空目标数据库" not in result.output
             assert "调试批次 UUID" in result.output
+            # doc 12.1：断言输出含实际批次 UUID 值——属性改名后 getattr
+            # 静默取空串时此处失败，防止打印空批次标识
+            assert "11111111-2222-4333-8444-555555555555" in result.output
         assert seen == []
         assert loader.close.call_count == 2
 
@@ -213,8 +235,8 @@ class TestTableSchemaDebugCli:
                 "table_schema",
                 "--source_id",
                 SOURCE,
-                "--job_id",
-                JOB,
+                "--workspace_id",
+                WORKSPACE,
                 "-c",
                 config,
             ],
@@ -246,8 +268,8 @@ class TestTableSchemaDebugCli:
                 "table_schema",
                 "--source_id",
                 SOURCE,
-                "--job_id",
-                JOB,
+                "--workspace_id",
+                WORKSPACE,
                 "-c",
                 str(path),
             ],
@@ -260,7 +282,7 @@ class TestTableSchemaDebugCli:
     def test_loader_closed_even_when_load_fails(self, tmp_path, monkeypatch):
         config = _write_config(tmp_path)
         loader = _fail_loader("Milvus 超时")
-        loader.publish_id = "x"
+        loader.publish_run_id = "x"
         monkeypatch.setattr(loader_cli.LoaderFactory, "create", lambda *a, **k: loader)
         result = CliRunner().invoke(
             loader_cli.rag_load_command,
@@ -269,8 +291,8 @@ class TestTableSchemaDebugCli:
                 "table_schema",
                 "--source_id",
                 SOURCE,
-                "--job_id",
-                JOB,
+                "--workspace_id",
+                WORKSPACE,
                 "-c",
                 config,
             ],

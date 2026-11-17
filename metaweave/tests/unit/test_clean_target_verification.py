@@ -105,7 +105,9 @@ class TestExecuteCqlVerification:
         from metaweave.core.cql_generator.models import CQLGenerationResult
 
         class _Dummy:
-            def __init__(self, config_path, domain_resolver=None, config=None):
+            def __init__(
+                self, config_path, domain_resolver=None, config=None, provenance=None
+            ):
                 self.config = config or {}
 
             def generate(self, step_name="cql"):
@@ -118,6 +120,7 @@ class TestExecuteCqlVerification:
             config_path=cfg_path,
             operation="cql",
             clean=True,
+            cql_source_id="db_src_1",
             expected_clean_target=expected,
         )
         result = execute_cql(req)
@@ -506,7 +509,8 @@ class TestStandaloneCliSharesCleanResolver:
             ["--type", load_type, "-c", str(cfg), "--clean"],
         )
         assert result.exit_code == 1
-        assert "clean 当前目标无法解析" in result.output
+        # doc 4 §4.4：cql 不再解析 clean 目标（按源替换，无整库清空）；
+        # 非法目标改由 loader 配置校验拒绝，仍不泄露凭据
         assert frag in result.output
         assert "secret" not in result.output  # 不泄露凭据
 
@@ -933,8 +937,8 @@ class TestRagLoadResolverBeforeLoaderDerivation:
             loader_cli.rag_load_command, ["--type", "cql", "-c", str(cfg), "--clean"]
         )
         assert result.exit_code == 1
-        assert "clean 当前目标无法解析" in result.output
-        assert frag in result.output
+        # doc 4 §4.4：cql 不再走 clean 目标解析；形态错误由配置校验友好报出
+        assert "配置错误" in result.output and frag in result.output
         # 不得出现原始 TypeError/AttributeError 文本
         assert "list indices must be integers" not in result.output
         assert "object has no attribute 'get'" not in result.output
@@ -1139,7 +1143,8 @@ class TestRagLoadMainConfigShapeValidation:
         assert "object has no attribute 'get'" not in result.output
 
     def test_resolver_also_friendly_with_clean(self, tmp_path, monkeypatch):
-        """clean=true 时同样结构化（主配置 None 由 resolver 拦截）。"""
+        """clean=true 时同样结构化（主配置 None 由形态校验拦截，doc 4 后
+        cql 不再走 clean 目标解析）。"""
         from click.testing import CliRunner
 
         from metaweave.cli import loader_cli
@@ -1153,7 +1158,7 @@ class TestRagLoadMainConfigShapeValidation:
             loader_cli.rag_load_command, ["--type", "cql", "-c", str(cfg), "--clean"]
         )
         assert result.exit_code == 1
-        assert "clean 当前目标无法解析" in result.output
+        assert "配置错误" in result.output
         assert "主配置" in result.output and "必须是对象" in result.output
 
     def test_valid_config_regression(self, tmp_path, monkeypatch):
@@ -1536,8 +1541,8 @@ class TestMilvusConfigShapeRejected:
                 },
                 "vector_database": {"active": "milvus", "providers": {"milvus": bad}},
             },
-            source_id="11111111-2222-3333-4444-555555555555",
-            publish_id="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeffff",
+            source_id="db_src_1",
+            publish_run_id="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeffff",
         )
         assert loader.validate() is False
 
@@ -1564,7 +1569,7 @@ class TestMilvusActiveAndProviderRequired:
     def test_sql_loader_validate_false(self, tmp_path, caplog, vd, frag):
         """经**注入参数**提供配置，断言具体错误原因且 Milvus 客户端未被创建。
 
-        受管口径（doc 25.2）：input_dir 目录即输入、source_id/publish_id
+        受管口径（doc 25.2）：input_dir 目录即输入、source_id/publish_run_id
         必须注入——vector_database 约束校验仍在其后按序生效。
         """
         import logging
@@ -1609,8 +1614,8 @@ class TestMilvusActiveAndProviderRequired:
             },
             milvus_client_cls=_FakeMilvus,
             embedding_service_cls=_FakeEmb,
-            source_id="11111111-2222-3333-4444-555555555555",
-            publish_id="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeffff",
+            source_id="db_src_1",
+            publish_run_id="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeffff",
         )
         with caplog.at_level(logging.ERROR):
             assert loader.validate() is False

@@ -51,8 +51,12 @@ def _write_md_file(md_dir: Path) -> None:
     )
 
 
-def test_generate_domains_initializes_missing_yaml_and_writes_full_config(tmp_path, monkeypatch):
-    monkeypatch.setattr("metaweave.core.metadata.domain_generator.LLMService", _DummyLLMService)
+def test_generate_domains_initializes_missing_yaml_and_writes_full_config(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(
+        "metaweave.core.metadata.domain_generator.LLMService", _DummyLLMService
+    )
 
     md_dir = tmp_path / "md"
     _write_md_file(md_dir)
@@ -85,7 +89,9 @@ def test_generate_domains_initializes_missing_yaml_and_writes_full_config(tmp_pa
 
 def test_generate_domains_skips_symlinked_md_files(tmp_path, monkeypatch):
     """md 读取不跟随符号链接（doc 21.1 §13.2）：链接指向的目录外内容不进入提示词。"""
-    monkeypatch.setattr("metaweave.core.metadata.domain_generator.LLMService", _DummyLLMService)
+    monkeypatch.setattr(
+        "metaweave.core.metadata.domain_generator.LLMService", _DummyLLMService
+    )
 
     md_dir = tmp_path / "md"
     _write_md_file(md_dir)
@@ -106,7 +112,9 @@ def test_generate_domains_skips_symlinked_md_files(tmp_path, monkeypatch):
 
 def test_generate_domains_skips_fifo_md_files(tmp_path, monkeypatch):
     """非常规文件（FIFO）在读取侧被跳过，不因打开阻塞（doc 21.1 §13.2）。"""
-    monkeypatch.setattr("metaweave.core.metadata.domain_generator.LLMService", _DummyLLMService)
+    monkeypatch.setattr(
+        "metaweave.core.metadata.domain_generator.LLMService", _DummyLLMService
+    )
 
     md_dir = tmp_path / "md"
     _write_md_file(md_dir)
@@ -124,7 +132,9 @@ def test_generate_domains_skips_fifo_md_files(tmp_path, monkeypatch):
 
 
 def test_generate_domains_requires_md_files(tmp_path, monkeypatch):
-    monkeypatch.setattr("metaweave.core.metadata.domain_generator.LLMService", _DummyLLMService)
+    monkeypatch.setattr(
+        "metaweave.core.metadata.domain_generator.LLMService", _DummyLLMService
+    )
 
     generator = DomainGenerator(
         config=_make_config(),
@@ -139,7 +149,9 @@ def test_generate_domains_requires_md_files(tmp_path, monkeypatch):
 
 
 def test_prompt_without_description_uses_auto_mode(tmp_path, monkeypatch):
-    monkeypatch.setattr("metaweave.core.metadata.domain_generator.LLMService", _DummyLLMService)
+    monkeypatch.setattr(
+        "metaweave.core.metadata.domain_generator.LLMService", _DummyLLMService
+    )
     md_dir = tmp_path / "md"
     _write_md_file(md_dir)
 

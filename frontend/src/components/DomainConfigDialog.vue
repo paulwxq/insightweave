@@ -1,30 +1,31 @@
 <script setup lang="ts">
+// doc 7.2 §3.1.2/§4：domain 草稿编辑弹窗（运行草稿 / 版本草稿两种用途）。
+// 仅从 props 初始化并深拷贝为独立编辑状态；确认只回传父组件，不调用
+// 配置 YAML GET/PUT。候选表经 getDomainTables 读取（与 db_domains.yaml 解耦）。
 import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
 
-import { getDomainConfig, getDomainTables, putDomainConfig } from '../api/dataSources'
-import { ApiError } from '../api/http'
-import type { DomainConfigDomain, DomainConfigTableOption } from '../api/types'
+import { getDomainTables } from '../api/workspaces'
+import type { DomainConfigTableOption, DomainParam } from '../api/types'
 
 const props = defineProps<{
-  sourceId: string
-  jobId: string
+  workspaceId: string
+  dbName: string
+  /** 当前草稿或引用版本默认配置；弹窗深拷贝为独立编辑状态 */
+  initialDomains: DomainParam[]
+  /** run = 本次运行草稿；version = 作业版本草稿 */
+  purpose: 'run' | 'version'
 }>()
 
 const emit = defineEmits<{
   close: []
+  apply: [domains: DomainParam[]]
 }>()
 
-const loading = ref(true)
-const fatal = ref('')
-const saveError = ref('')
-const saving = ref(false)
-const fingerprint = ref('')
-const baseline = ref('')
-const dbName = ref('')
-const dbDescription = ref<string | null>(null)
-const maxDomains = ref<number | null>(null)
-const domains = ref<DomainConfigDomain[]>([])
+const applyError = ref('')
+const domains = ref<DomainParam[]>([])
 const candidates = ref<DomainConfigTableOption[]>([])
+/** 候选表接口失败：草稿仍可查看/应用，仅禁用添加表（doc 7.2 §4 局部降级） */
+const candidatesError = ref('')
 const openPicker = ref<number | null>(null)
 const pickerQuery = ref('')
 const editing = ref<{ index: number; field: 'name' | 'description' } | null>(null)
@@ -35,33 +36,17 @@ const candidateById = computed(() => {
   return map
 })
 
-const membershipCount = computed(() => {
-  const counts = new Map<string, number>()
-  for (const domain of domains.value) {
-    for (const table of domain.tables) counts.set(table, (counts.get(table) ?? 0) + 1)
-  }
-  return counts
-})
-
-function domainSnapshot(rows: DomainConfigDomain[]) {
-  return JSON.stringify(
-    rows.map((item) => ({
-      name: item.name.trim(),
-      description: item.description.trim(),
-      tables: [...item.tables],
-    })),
-  )
-}
-
-const dirty = computed(() => domainSnapshot(domains.value) !== baseline.value)
+const confirmText = computed(() =>
+  props.purpose === 'run' ? '应用到本次执行' : '应用到作业配置',
+)
+const scopeNote = computed(() =>
+  props.purpose === 'run'
+    ? '仅应用到本次运行，不修改工作区配置文件'
+    : '随作业保存写入新版本，不直接修改工作区文件',
+)
 
 function tableLabel(id: string) {
   return candidateById.value.get(id) ?? id
-}
-
-function overLimit(id: string) {
-  if (maxDomains.value == null) return false
-  return (membershipCount.value.get(id) ?? 0) > maxDomains.value
 }
 
 function pickerOptions(index: number) {
@@ -71,43 +56,6 @@ function pickerOptions(index: number) {
     if (selected.has(item.id)) return false
     return !keyword || item.label.toLowerCase().includes(keyword)
   })
-}
-
-function reasonOf(error: unknown) {
-  if (error instanceof ApiError) {
-    const reason = error.details && !Array.isArray(error.details) ? error.details.reason : ''
-    if (typeof reason === 'string' && reason) return reason
-    return error.message
-  }
-  return '请求失败，请稍后重试。'
-}
-
-async function load() {
-  loading.value = true
-  fatal.value = ''
-  saveError.value = ''
-  try {
-    const [config, tables] = await Promise.all([
-      getDomainConfig(props.sourceId, props.jobId),
-      getDomainTables(props.sourceId, props.jobId),
-    ])
-    fingerprint.value = config.fingerprint
-    dbName.value = config.database.name
-    dbDescription.value = config.database.description
-    maxDomains.value = config.max_domains_per_table
-    domains.value = config.domains.map((item) => ({
-      name: item.name,
-      description: item.description,
-      tables: [...item.tables],
-    }))
-    baseline.value = domainSnapshot(domains.value)
-    candidates.value = tables.tables
-  } catch (error) {
-    fatal.value = reasonOf(error)
-    domains.value = []
-  } finally {
-    loading.value = false
-  }
 }
 
 function isEditing(index: number, field: 'name' | 'description') {
@@ -166,6 +114,7 @@ function togglePicker(index: number) {
   pickerQuery.value = ''
 }
 
+/** 与后端 _validate_domains_param 同口径的本地结构校验 */
 function validateLocal(): string {
   const names = new Set<string>()
   for (const domain of domains.value) {
@@ -181,86 +130,73 @@ function validateLocal(): string {
   return ''
 }
 
-async function save() {
-  if (!dirty.value || saving.value) return
-  saveError.value = ''
+function apply() {
+  applyError.value = ''
   const local = validateLocal()
   if (local) {
-    saveError.value = local
+    applyError.value = local
     return
   }
-  const noTables = domains.value.every((domain) => domain.tables.length === 0)
-  if (domains.value.length === 0) {
-    const ok = window.confirm(
-      '保存后的文件没有任何表归属，发布 domain 时会失败。之后重跑或发布 rel 会因 domain 列表为空失败。',
-    )
-    if (!ok) return
-  } else if (noTables) {
-    const ok = window.confirm('保存后的文件没有任何表归属，发布 domain 时会失败。')
-    if (!ok) return
-  }
-  saving.value = true
-  try {
-    await putDomainConfig(props.sourceId, props.jobId, {
-      fingerprint: fingerprint.value,
-      database: { name: dbName.value, description: dbDescription.value },
-      max_domains_per_table: maxDomains.value,
-      domains: domains.value.map((domain) => ({
-        name: domain.name,
-        description: domain.description,
-        tables: [...domain.tables],
-      })),
-    })
-    emit('close')
-  } catch (error) {
-    if (error instanceof ApiError && error.code === 'domain_config_regenerated') {
-      fatal.value = reasonOf(error)
-      domains.value = []
-      return
-    }
-    saveError.value = reasonOf(error)
-  } finally {
-    saving.value = false
-  }
+  // 只回传域清单（完整替换语义由父组件/后端执行），不触碰配置文件
+  emit(
+    'apply',
+    domains.value.map((domain) => ({
+      name: domain.name,
+      description: domain.description,
+      tables: [...domain.tables],
+    })),
+  )
 }
 
 function onKeydown(event: KeyboardEvent) {
-  if (event.key === 'Escape' && !saving.value) emit('close')
+  if (event.key === 'Escape') emit('close')
 }
 
 onMounted(() => {
-  void load()
+  // props 深拷贝为独立编辑状态（§4 第 1 项）
+  domains.value = props.initialDomains.map((item) => ({
+    name: item.name,
+    description: item.description,
+    tables: [...item.tables],
+  }))
+  getDomainTables(props.workspaceId)
+    .then((resp) => {
+      candidates.value = resp.tables
+    })
+    .catch(() => {
+      candidates.value = []
+      candidatesError.value = '候选表列表读取失败，暂不能添加表；已有草稿仍可编辑和应用'
+    })
   window.addEventListener('keydown', onKeydown)
 })
 onUnmounted(() => window.removeEventListener('keydown', onKeydown))
 </script>
 
 <template>
-  <div class="dialog-backdrop" @click.self="saving ? undefined : emit('close')">
+  <div class="dialog-backdrop" @click.self="emit('close')">
     <div class="dialog-panel domain-cfg" role="dialog" aria-modal="true" aria-labelledby="domain-cfg-title">
       <header class="domain-cfg-head">
         <div>
           <p class="domain-cfg-kicker">DOMAIN CONFIG</p>
           <h2 id="domain-cfg-title">业务主题配置</h2>
-          <span class="domain-cfg-file">db_domains.yaml</span>
+          <span class="domain-cfg-file">
+            {{ purpose === 'run' ? '本次执行草稿' : '版本配置草稿' }}
+          </span>
         </div>
-        <button type="button" class="domain-cfg-x" aria-label="关闭" :disabled="saving" @click="emit('close')">
+        <button type="button" class="domain-cfg-x" aria-label="关闭" @click="emit('close')">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18" /></svg>
         </button>
       </header>
 
-      <p v-if="loading" class="domain-cfg-status">正在读取配置…</p>
-      <p v-else-if="fatal" class="domain-cfg-status alert" role="alert">{{ fatal }}</p>
-
-      <template v-else>
-        <div class="domain-cfg-body">
+      <div class="domain-cfg-body">
         <section class="domain-cfg-db">
           <h3>{{ dbName }}</h3>
-          <p>{{ dbDescription || '采集时未写入库描述' }}</p>
+          <p>{{ scopeNote }}</p>
         </section>
         <p class="domain-cfg-hint">
-          一张表可以属于多个 domain。<template v-if="maxDomains != null">采集时建议每表不超过 {{ maxDomains }} 个主题，保存不强制。</template>
+          一张表可以属于多个 domain；应用采用完整替换语义，未保留在此清单中的域不会带入。
         </p>
+        <p v-if="candidatesError" class="domain-cfg-hint alert" role="alert">{{ candidatesError }}</p>
 
         <div class="domain-cfg-card">
           <div class="domain-cfg-scroll">
@@ -301,13 +237,17 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
                 @dblclick="startEdit(index, 'description')"
               >{{ domain.description.trim() || '双击填写描述' }}</p>
               <div class="domain-cfg-tables">
-                <span v-for="table in domain.tables" :key="table" class="domain-cfg-chip" :class="{ warn: overLimit(table) }">
+                <span v-for="table in domain.tables" :key="table" class="domain-cfg-chip">
                   {{ tableLabel(table) }}
                   <button type="button" :aria-label="`移除 ${tableLabel(table)}`" @click="removeTable(index, table)">×</button>
-                  <small v-if="overLimit(table)">超过建议主题数</small>
                 </span>
                 <div class="domain-cfg-picker">
-                  <button type="button" class="domain-cfg-plus" @click="togglePicker(index)">
+                  <button
+                    type="button"
+                    class="domain-cfg-plus"
+                    :disabled="!!candidatesError"
+                    @click="togglePicker(index)"
+                  >
                     <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>
                     添加表
                   </button>
@@ -331,6 +271,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
                 删除
               </button>
             </div>
+            <p v-if="!domains.length" class="domain-cfg-empty">尚未配置任何业务域</p>
           </div>
         </div>
 
@@ -338,14 +279,13 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>
           新增 domain
         </button>
-        </div>
-        <footer class="domain-cfg-foot">
-          <span v-if="saveError" class="domain-cfg-save-error" role="alert">{{ saveError }}</span>
-          <span v-else class="domain-cfg-save-note">{{ dirty ? '保存后写回 db_domains.yaml' : '没有修改' }}</span>
-          <button type="button" class="domain-cfg-cancel" :disabled="saving" @click="emit('close')">取消</button>
-          <button type="button" class="domain-cfg-save" :disabled="saving || !dirty" @click="save">{{ saving ? '保存中' : '保存' }}</button>
-        </footer>
-      </template>
+      </div>
+      <footer class="domain-cfg-foot">
+        <span v-if="applyError" class="domain-cfg-save-error" role="alert">{{ applyError }}</span>
+        <span v-else class="domain-cfg-save-note">{{ scopeNote }}</span>
+        <button type="button" class="domain-cfg-cancel" @click="emit('close')">取消</button>
+        <button type="button" class="domain-cfg-save" @click="apply">{{ confirmText }}</button>
+      </footer>
     </div>
   </div>
 </template>
@@ -407,7 +347,6 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
   color: #66788f;
   display: grid;
   place-items: center;
-  padding: 0;
   flex-shrink: 0;
 }
 .domain-cfg-x svg,
@@ -455,6 +394,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
   line-height: 1.5;
 }
 .domain-cfg-db p { margin-top: 4px; }
+.domain-cfg-hint.alert { color: #c25454; }
 .domain-cfg-card {
   border: 1px solid #d9e3ef;
   border-radius: 12px;
@@ -576,6 +516,11 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
 .domain-cfg-add svg { width: 10px; height: 10px; }
 .domain-cfg-delete:hover { background: #fdf4f4; }
 .domain-cfg-plus:hover { background: #eef5ff; }
+.domain-cfg-plus:disabled {
+  border-color: #d9e3ef;
+  color: #8a99ac;
+  cursor: not-allowed;
+}
 .domain-cfg-picker { position: relative; }
 .domain-cfg-menu {
   position: absolute;
@@ -660,8 +605,5 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
   background: #2e7cd6;
   color: #fff;
 }
-.domain-cfg-save:disabled,
-.domain-cfg-cancel:disabled { opacity: 0.6; }
-.domain-cfg-status { margin: 18px 28px; color: #66788f; font-size: 13px; }
-.domain-cfg-status.alert { color: #c25454; }
+.domain-cfg-empty { margin: 0; padding: 16px; text-align: center; color: #66788f; font-size: 12px; }
 </style>

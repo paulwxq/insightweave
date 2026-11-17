@@ -1,0 +1,865 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC%3Awght%40100..900&family=Noto+Serif+SC%3Awght%40200..900&display=swap"
+      rel="stylesheet"
+    />
+
+    <style>
+      *, ::before, ::after {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+      }
+    </style>
+
+    <style>
+      body {
+        min-height: 100vh;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+    </style>
+  </head>
+  <body style="background-color: #F2F6FB">
+    <div
+      data-pencil-name="新建查询-自然语言查询"
+      style="align-items: flex-start; background-color: #F2F6FB; box-sizing: border-box; display: flex; flex-direction: row; gap: 0px; height: 1080px; justify-content: flex-start; overflow: hidden; width: 1440px"
+    >
+      <div
+        data-pencil-name="侧边导航"
+        style="align-items: flex-start; background-color: #FFFFFF; border-color: #D9E3EF; border-style: solid; border-width: 0px 1px 0px 0px; box-sizing: content-box; display: flex; flex-direction: column; flex-shrink: 0; gap: 8px; height: 1080px; justify-content: flex-start; margin: 0px -0.5px 0px 0px; padding: 28px 18px; width: 231.5px"
+      >
+        <div
+          data-pencil-name="Logo 区"
+          style="align-items: center; box-sizing: border-box; display: flex; flex-direction: row; flex-shrink: 0; gap: 10px; height: fit-content; justify-content: flex-start; width: 100%"
+        >
+          <div
+            data-pencil-name="Logo 图标"
+            style="box-sizing: border-box; flex-shrink: 0; height: 34px; overflow: hidden; position: relative; width: 34px"
+          >
+            <svg
+              viewBox="0 0 16.596 19.223"
+              preserveAspectRatio="none"
+              xmlns="http://www.w3.org/2000/svg"
+              style="box-sizing: border-box; height: 19.223px; left: 8.687px; overflow: visible; position: absolute; top: 2.176px; width: 16.596px; z-index: 0"
+            >
+              <defs>
+                <linearGradient
+                  id="svg1-g1"
+                  x1="-1"
+                  x2="1"
+                  gradientUnits="userSpaceOnUse"
+                  gradientTransform="matrix(7.14119 3.355277 -3.119279 8.9065 8.4238 6.6631)"
+                >
+                  <stop offset="0" stop-color="#378be6" />
+                  <stop offset="1" stop-color="#1c579f" />
+                </linearGradient>
+              </defs>
+              <path
+                d="M0 4.705v11.22l5.687 3.298 1.717-1.016v-1.449l-4.046-2.295v-7.897l4.993-2.822 4.913 2.848v3.298l3.332 1.844v-7.008l-8.206-4.726-8.39 4.705z"
+                fill="url(#svg1-g1)"
+              />
+            </svg>
+            <svg
+              viewBox="0 0 3.332 7.008"
+              preserveAspectRatio="none"
+              xmlns="http://www.w3.org/2000/svg"
+              style="box-sizing: border-box; height: 7.008px; left: 21.951px; overflow: visible; position: absolute; top: 6.902px; width: 3.332px; z-index: 1"
+            >
+              <defs>
+                <linearGradient
+                  id="svg2-g1"
+                  x1="-1"
+                  x2="1"
+                  gradientUnits="userSpaceOnUse"
+                  gradientTransform="matrix(1.667488 0 0 3.50415 1.6677 3.3987)"
+                >
+                  <stop offset="0" stop-color="#307dd6" />
+                  <stop offset="0.526" stop-color="#205eaa" />
+                </linearGradient>
+              </defs>
+              <path d="M0 5.164l3.332 1.844v-7.008l-3.332 1.866z" fill="url(#svg2-g1)" />
+            </svg>
+            <svg
+              viewBox="0 0 15.44 17.599"
+              preserveAspectRatio="none"
+              xmlns="http://www.w3.org/2000/svg"
+              style="box-sizing: border-box; height: 17.599px; left: 2.261px; overflow: visible; position: absolute; top: 14.119px; width: 15.44px; z-index: 2"
+            >
+              <defs>
+                <linearGradient
+                  id="svg3-g1"
+                  x1="-1"
+                  x2="1"
+                  gradientUnits="userSpaceOnUse"
+                  gradientTransform="matrix(5.827365 6.30796 -5.316322 6.380709 7.4576 8.4245)"
+                >
+                  <stop offset="0" stop-color="#2d7dd5" />
+                  <stop offset="1" stop-color="#20589d" />
+                </linearGradient>
+              </defs>
+              <path
+                d="M5.925 0l-5.925 3.451v9.507l8.13 4.641 7.31-4.322v-7.399l-3.242 1.874-.013 3.731-4.025 2.363-4.841-2.771v-5.673l2.606-1.539v-3.863z"
+                fill="url(#svg3-g1)"
+              />
+            </svg>
+            <svg
+              viewBox="0 0 9.006 14.505"
+              preserveAspectRatio="none"
+              xmlns="http://www.w3.org/2000/svg"
+              style="box-sizing: border-box; height: 14.505px; left: 12.512px; overflow: visible; position: absolute; top: 12.516px; width: 9.006px; z-index: 3"
+            >
+              <defs>
+                <linearGradient
+                  id="svg4-g1"
+                  x1="-1"
+                  x2="1"
+                  gradientUnits="userSpaceOnUse"
+                  gradientTransform="matrix(3.406627 5.795362 -3.269855 4.986334 5.2954 6.5919)"
+                >
+                  <stop offset="0" stop-color="#2872c3" />
+                  <stop offset="1" stop-color="#174684" />
+                </linearGradient>
+              </defs>
+              <path
+                d="M0 0v3.562l5.725 3.502v7.441l3.281-1.857v-7.357l-9.006-5.291z"
+                fill="url(#svg4-g1)"
+              />
+            </svg>
+            <svg
+              viewBox="0 0 14.425 19.359"
+              preserveAspectRatio="none"
+              xmlns="http://www.w3.org/2000/svg"
+              style="box-sizing: border-box; height: 19.359px; left: 17.285px; overflow: visible; position: absolute; top: 12.487px; width: 14.425px; z-index: 4"
+            >
+              <defs>
+                <linearGradient
+                  id="svg5-g1"
+                  x1="-1"
+                  x2="1"
+                  gradientUnits="userSpaceOnUse"
+                  gradientTransform="matrix(5.107352 6.88914 -5.112682 6.827079 7.5514 8.5708)"
+                >
+                  <stop offset="0" stop-color="#276cba" />
+                  <stop offset="1" stop-color="#184785" />
+                </linearGradient>
+              </defs>
+              <path
+                d="M.183 2.491l3.149 1.874 1.207-.689 6.545 3.634v5.393l-4.722 2.827-3.094-1.798-3.268 1.895 6.379 3.732 8.045-4.781v-9.159l-9.86-5.419-4.381 2.491z"
+                fill="url(#svg5-g1)"
+              />
+            </svg>
+          </div>
+          <div
+            data-pencil-name="品牌文字"
+            style="align-items: flex-start; box-sizing: border-box; display: flex; flex-direction: column; flex-shrink: 0; gap: 2px; height: fit-content; justify-content: flex-start; width: fit-content"
+          >
+            <div
+              data-pencil-name="产品名"
+              style='box-sizing: border-box; color: #17293F; font-family: "Noto Serif SC", system-ui, sans-serif; font-size: 16px; font-style: normal; font-weight: 700; letter-spacing: 0px; line-height: normal; text-align: left; white-space: nowrap'
+            >
+              MetaWeave
+            </div>
+            <div
+              data-pencil-name="副标题"
+              style='box-sizing: border-box; color: #66788F; font-family: "Noto Sans SC", system-ui, sans-serif; font-size: 10px; font-style: normal; font-weight: 400; letter-spacing: 0px; line-height: normal; text-align: left; white-space: nowrap'
+            >
+              智能数据分析工作台
+            </div>
+          </div>
+        </div>
+        <div
+          data-pencil-name="导航菜单"
+          style="align-items: flex-start; box-sizing: border-box; display: flex; flex-direction: column; flex-shrink: 0; gap: 4px; height: fit-content; justify-content: flex-start; padding: 12px 0px; width: 100%"
+        >
+          <div
+            data-pencil-name="导航-首页"
+            style="align-items: center; background-color: #00000000; border-radius: 10px; box-sizing: border-box; display: flex; flex-direction: row; flex-shrink: 0; gap: 10px; height: fit-content; justify-content: flex-start; padding: 11px 12px; width: 100%"
+          >
+            <svg
+              data-pencil-name="图标"
+              viewBox="0 0 16 16"
+              preserveAspectRatio="xMidYMid meet"
+              data-icon-name="house"
+              data-icon-set="lucide"
+              xmlns="http://www.w3.org/2000/svg"
+              style="box-sizing: border-box; flex-shrink: 0; height: 16px; overflow: visible; width: 16px"
+            >
+              <path
+                d="M7.793 .687q-.547 .032-.977 .368-.144 .113-2.527 2.16l-1.84 1.586q-.511 .445-.672 .64-.129 .125-.226 .321v.015q-.094 .176-.145 .352l-.062 .176 .015 6.238q0 .496 .032 .594 .16 .558 .535 .937 .379 .375 .937 .535 .098 .032 .817 .032l4.32 .015 4.32-.015q.719 0 .817-.032 .558-.16 .933-.535 .379-.379 .539-.937 .032-.098 .032-.594l.015-6.238-.062-.176q-.051-.176-.145-.352v-.015q-.097-.196-.211-.321-.16-.195-.672-.625l-4.32-3.711q-.605-.496-1.453-.418zM8.289 2.078q.094 .051 2.422 2.035 2.328 1.985 2.457 2.125l.031 .035q.082 .079 .098 .192 .016 .144 .031 .672v5.679l-.047 .114q-.16 .316-.496 .383-.113 .031-1.121 .031h-1.008v-4.383q0-.449-.031-.609-.016-.114-.082-.239l-.031-.05q-.114-.254-.344-.43-.23-.176-.504-.258-.113-.031-.351-.031h-1.313-1.312q-.239 0-.352 .031-.273 .082-.504 .258-.23 .176-.344 .43l-.031 .05q-.066 .125-.082 .239-.031 .16-.031 .609v4.383h-1.008q-1.008 0-1.121-.031-.336-.067-.496-.383l-.047-.114v-5.711q.016-.511 .047-.671 .015-.114 .097-.176l.063-.067q.098-.093 2.383-2.054 2.289-1.961 2.386-2.024 .129-.097 .313-.105 .184-.008 .328 .07zM9.344 10.992v2.352h-2.688v-4.688h2.688z"
+                fill="#66788f"
+              />
+            </svg>
+            <div
+              data-pencil-name="标签"
+              style='box-sizing: border-box; color: #66788F; font-family: "Noto Sans SC", system-ui, sans-serif; font-size: 13px; font-style: normal; font-weight: 400; letter-spacing: 0px; line-height: normal; text-align: left; white-space: nowrap'
+            >
+              首页
+            </div>
+          </div>
+          <div
+            data-pencil-name="导航-数据资产"
+            style="align-items: center; background-color: #00000000; border-radius: 10px; box-sizing: border-box; display: flex; flex-direction: row; flex-shrink: 0; gap: 10px; height: fit-content; justify-content: flex-start; padding: 11px 12px; width: 100%"
+          >
+            <svg
+              data-pencil-name="图标"
+              viewBox="0 0 16 16"
+              preserveAspectRatio="xMidYMid meet"
+              data-icon-name="database"
+              data-icon-set="lucide"
+              xmlns="http://www.w3.org/2000/svg"
+              style="box-sizing: border-box; flex-shrink: 0; height: 16px; overflow: visible; width: 16px"
+            >
+              <path
+                d="M7.426 .687q-1.121 .032-2.145 .192-1.023 .16-1.808 .433-1.825 .641-2.098 1.68-.031 .113-.031 .801v4.207 4.207q0 .688 .031 .801 .242 .93 1.695 1.535 .993 .402 2.383 .609 1.395 .207 2.883 .176 1.52-.031 2.863-.289 .992-.191 1.735-.504 .746-.312 1.16-.703 .418-.391 .531-.824 .031-.113 .031-.785v-4.223-4.223q0-.672-.031-.785-.227-.879-1.57-1.469-1.344-.593-3.551-.789-.336-.031-.801-.047l-.59-.015q-.16 0-.687 .015zM8.734 2.016q2.356 .113 3.747 .703 .351 .16 .597 .336 .25 .175 .235 .289 .015 .031-.082 .129-.301 .32-1.094 .601-.793 .278-1.864 .438-.609 .082-1.019 .105-.406 .024-1.254 .024-.848 0-1.258-.024-.406-.023-1.015-.105-.926-.129-1.649-.36-.719-.23-1.101-.504-.114-.082-.204-.175-.085-.098-.085-.129 0-.114 .207-.274 .707-.543 2.359-.836 1.656-.297 3.48-.218zM3.121 5.215q.992 .418 2.43 .625 1.41 .191 2.93 .16 1.566-.047 2.894-.336 1.008-.207 1.856-.594l.113-.047-.016 3.008-.047 .067q-.066 .078-.25 .207-.183 .129-.375 .222-1.054 .512-2.894 .715-1.84 .199-3.633-.012-.832-.093-1.57-.277-.735-.183-1.207-.414-.473-.234-.618-.426l-.062-.082-.016-3.008zM3.152 9.902q1.328 .532 3.407 .707 .386 .047 1.441 .047 1.055 0 1.441-.047 1.758-.16 2.973-.546 .496-.176 .832-.336l.098-.047v2.992l-.063 .082q-.191 .269-.84 .543-.648 .269-1.496 .43-1.394 .273-2.945 .273-1.551 0-2.945-.273-.848-.161-1.496-.43-.649-.274-.84-.543l-.063-.082v-2.992l.129 .062q.11 .067 .367 .16z"
+                fill="#66788f"
+              />
+            </svg>
+            <div
+              data-pencil-name="标签"
+              style='box-sizing: border-box; color: #66788F; font-family: "Noto Sans SC", system-ui, sans-serif; font-size: 13px; font-style: normal; font-weight: 400; letter-spacing: 0px; line-height: normal; text-align: left; white-space: nowrap'
+            >
+              数据资产
+            </div>
+          </div>
+          <div
+            data-pencil-name="导航-智能问数"
+            style="align-items: center; background-color: #EEF3F9; border-radius: 10px; box-sizing: border-box; display: flex; flex-direction: row; flex-shrink: 0; gap: 10px; height: fit-content; justify-content: flex-start; outline-offset: -0.5px; outline: 1px solid #D9E3EF; padding: 11px 12px; width: 100%"
+          >
+            <svg
+              data-pencil-name="图标"
+              viewBox="0 0 16 16"
+              preserveAspectRatio="xMidYMid meet"
+              data-icon-name="messages-square"
+              data-icon-set="lucide"
+              xmlns="http://www.w3.org/2000/svg"
+              style="box-sizing: border-box; flex-shrink: 0; height: 16px; overflow: visible; width: 16px"
+            >
+              <path
+                d="M2.465 .687q-.336 .032-.672 .192-.336 .16-.578 .418-.352 .367-.496 .894l-.047 .192v6.547q0 .672 .016 .781 .082 .496 .503 .769 .426 .274 .907 .145 .16-.051 .261-.113 .106-.063 .329-.254 .16-.16 .656-.656 .543-.532 .711-.688 .168-.16 .25-.195l.109-.047 5.281-.016 .176-.062q.418-.129 .746-.399 .328-.273 .504-.644 .16-.321 .207-.688 .016-.191 0-2.336v-2.144l-.047-.192q-.144-.527-.496-.879-.512-.558-1.297-.64-.191-.016-3.504-.016-3.312 0-3.519 .031zM9.602 2.062q.222 .114 .336 .336l.046 .114v4.32l-.046 .113q-.129 .254-.403 .367-.062 .016-2.687 .032h-2.641l-.16 .047q-.16 .05-.352 .148-.191 .094-.32 .184-.129 .086-.75 .711l-.625 .605 .016-6.527 .047-.114q.128-.285 .433-.367 .098-.031 3.551-.031l3.441 .016zM13.121 5.375q-.211 .066-.332 .242-.117 .176-.117 .383 0 .273 .191 .465 .098 .094 .2 .137 .105 .039 .281 .062 .176 .023 .269 .066 .098 .04 .184 .129 .09 .086 .141 .196l.046 .113 .016 6.559-.656-.657q-.512-.496-.688-.644-.175-.153-.383-.25-.144-.063-.335-.113l-.196-.047-2.605-.016q-2.625-.016-2.688-.031-.258-.098-.402-.383-.016-.066-.031-.16-.016-.098-.016-.434-.016-.48-.039-.551-.023-.074-.09-.16-.062-.09-.129-.136-.176-.129-.414-.129-.273 0-.465 .191-.144 .129-.175 .297-.032 .168-.016 .648 0 .305 .008 .418 .008 .11 .039 .239 .082 .289 .207 .504 .129 .214 .336 .425 .211 .207 .426 .336 .214 .125 .503 .207l.192 .047 5.25 .016 .094 .047q.097 .05 .945 .898 .609 .59 .75 .727 .144 .136 .258 .183 .258 .129 .527 .129 .367 0 .664-.223 .297-.226 .426-.609 .016-.082 .031-.594l.016-5.664q-.016-.797-.031-1.07-.016-.207-.047-.367-.129-.449-.45-.801-.32-.352-.753-.527-.223-.082-.52-.121-.297-.04-.422 .023z"
+                fill="#2e7cd6"
+              />
+            </svg>
+            <div
+              data-pencil-name="标签"
+              style='box-sizing: border-box; color: #17293F; font-family: "Noto Sans SC", system-ui, sans-serif; font-size: 13px; font-style: normal; font-weight: 700; letter-spacing: 0px; line-height: normal; text-align: left; white-space: nowrap'
+            >
+              智能问数
+            </div>
+            <svg
+              data-pencil-name="展开箭头"
+              viewBox="0 0 14 14"
+              preserveAspectRatio="xMidYMid meet"
+              data-icon-name="chevron-up"
+              data-icon-set="lucide"
+              xmlns="http://www.w3.org/2000/svg"
+              style="box-sizing: border-box; flex-shrink: 0; height: 14px; overflow: visible; width: 14px"
+            >
+              <path
+                d="M6.846 4.689q-.085 .028-.195 .113-.14 .127-.533 .516l-1.288 1.275q-1.819 1.822-1.863 1.907-.041 .083-.041 .236 0 .154 .034 .24 .038 .082 .133 .181 .099 .095 .181 .133 .086 .034 .24 .034 .153 0 .236-.041 .085-.044 1.668-1.623l1.582-1.583 1.583 1.583q1.582 1.579 1.664 1.623 .086 .041 .239 .041 .154 0 .236-.034 .086-.038 .181-.133 .099-.099 .134-.181 .037-.086 .037-.24 0-.153-.044-.236-.041-.085-1.86-1.907l-1.442-1.428q-.335-.335-.461-.417-.099-.072-.199-.072h-.041q-.14 0-.181 .013z"
+                fill="#66788f"
+              />
+            </svg>
+          </div>
+          <div
+            data-pencil-name="子菜单-新建查询"
+            style="align-items: center; background-color: #E3EEFB; border-radius: 10px; box-sizing: border-box; display: flex; flex-direction: row; flex-shrink: 0; gap: 10px; height: fit-content; justify-content: flex-start; outline-offset: -0.5px; outline: 1px solid #C9DEF3; padding: 11px 12px 11px 38px; width: 100%"
+          >
+            <div
+              data-pencil-name="标签"
+              style='box-sizing: border-box; color: #2E7CD6; font-family: "Noto Sans SC", system-ui, sans-serif; font-size: 13px; font-style: normal; font-weight: 700; letter-spacing: 0px; line-height: normal; text-align: left; white-space: nowrap'
+            >
+              新建查询
+            </div>
+          </div>
+          <div
+            data-pencil-name="子菜单-新建分析"
+            style="align-items: center; background-color: #00000000; border-radius: 10px; box-sizing: border-box; display: flex; flex-direction: row; flex-shrink: 0; gap: 0px; height: fit-content; justify-content: space-between; padding: 11px 12px 11px 38px; width: 100%"
+          >
+            <div
+              data-pencil-name="标签"
+              style='box-sizing: border-box; color: #66788F; font-family: "Noto Sans SC", system-ui, sans-serif; font-size: 13px; font-style: normal; font-weight: 400; letter-spacing: 0px; line-height: normal; text-align: left; white-space: nowrap'
+            >
+              新建分析
+            </div>
+            <div
+              data-pencil-name="角标"
+              style='box-sizing: border-box; color: #66788F; font-family: "Noto Sans SC", system-ui, sans-serif; font-size: 11px; font-style: normal; font-weight: 400; letter-spacing: 0px; line-height: normal; text-align: left; white-space: nowrap'
+            >
+              即将开放
+            </div>
+          </div>
+          <div
+            data-pencil-name="导航-数据源管理"
+            style="align-items: center; background-color: #00000000; border-radius: 10px; box-sizing: border-box; display: flex; flex-direction: row; flex-shrink: 0; gap: 10px; height: fit-content; justify-content: flex-start; padding: 11px 12px; width: 100%"
+          >
+            <svg
+              data-pencil-name="图标"
+              viewBox="0 0 16 16"
+              preserveAspectRatio="xMidYMid meet"
+              data-icon-name="layers"
+              data-icon-set="lucide"
+              xmlns="http://www.w3.org/2000/svg"
+              style="box-sizing: border-box; flex-shrink: 0; height: 16px; overflow: visible; width: 16px"
+            >
+              <path
+                d="M7.824 .687q-.304 .016-.578 .129-.156 .063-2.941 1.336-2.785 1.274-2.922 1.336-.137 .063-.297 .223-.156 .16-.238 .289-.274 .496-.114 1.051 .161 .551 .657 .789 .175 .097 3 1.379 2.824 1.277 2.937 1.324 .305 .113 .649 .121 .343 .008 .664-.105 .093-.032 2.886-1.293 2.793-1.266 3.047-1.395 .305-.144 .465-.367 .305-.383 .305-.84 0-.457-.305-.84-.16-.207-.43-.336l-2.914-1.343-2.941-1.329q-.258-.113-.516-.129l-.191-.015q-.063 0-.223 .015zM8.191 2.031q.067 .031 2.84 1.289 2.778 1.254 2.922 1.336 .031 .016-.418 .227-.445 .207-2.414 1.101-2.898 1.313-3.012 1.336-.109 .024-.23-.008-.117-.031-2.992-1.335-2.871-1.305-2.856-1.321 .016-.015 2.848-1.304 2.832-1.29 2.93-1.321 .191-.062 .382 0zM1.121 7.375q-.191 .066-.305 .211-.144 .191-.144 .43 0 .367 .191 .679 .192 .313 .512 .489 .211 .097 3.051 1.386 2.84 1.285 2.949 1.317 .625 .211 1.25 .015 .078-.031 2.879-1.293 2.801-1.265 3.07-1.41 .356-.16 .555-.48 .199-.321 .199-.703 0-.161-.047-.289-.113-.223-.336-.336-.097-.047-.25-.047-.152 0-.261 .031-.161 .066-.282 .219-.121 .148-.152 .308v.114l-2.863 1.297q-2.848 1.281-2.93 1.312-.207 .078-.43 0-.097-.031-2.929-1.328l-2.832-1.281-.032-.129q-.046-.254-.234-.399-.184-.144-.422-.144-.129 0-.207 .031zM1.23 10.688q-.14 .015-.277 .113-.137 .094-.219 .222-.093 .207-.046 .481 .031 .238 .117 .418 .09 .176 .265 .351 .176 .176 .356 .254 .429 .227 3.172 1.457 2.746 1.231 2.843 1.262 .637 .195 1.278-.047 .176-.062 3.039-1.375 2.867-1.312 2.945-1.359 .242-.145 .41-.399 .168-.257 .207-.546 .039-.29-.066-.489-.102-.199-.309-.297-.113-.046-.257-.054-.145-.008-.239 .023-.176 .067-.297 .219-.121 .148-.152 .324l-.016 .098-2.847 1.297q-2.848 1.297-2.946 1.328-.191 .062-.414-.016-.113-.051-2.945-1.328l-2.832-1.297v-.047q0-.066-.051-.183-.047-.121-.094-.168-.238-.305-.625-.242z"
+                fill="#66788f"
+              />
+            </svg>
+            <div
+              data-pencil-name="标签"
+              style='box-sizing: border-box; color: #66788F; font-family: "Noto Sans SC", system-ui, sans-serif; font-size: 13px; font-style: normal; font-weight: 400; letter-spacing: 0px; line-height: normal; text-align: left; white-space: nowrap'
+            >
+              数据源管理
+            </div>
+          </div>
+          <div
+            data-pencil-name="导航-工作区管理"
+            style="align-items: center; background-color: #00000000; border-radius: 10px; box-sizing: border-box; display: flex; flex-direction: row; flex-shrink: 0; gap: 10px; height: fit-content; justify-content: flex-start; padding: 11px 12px; width: 100%"
+          >
+            <svg
+              data-pencil-name="图标"
+              viewBox="0 0 16 16"
+              preserveAspectRatio="xMidYMid meet"
+              data-icon-name="layout-grid"
+              data-icon-set="lucide"
+              xmlns="http://www.w3.org/2000/svg"
+              style="box-sizing: border-box; flex-shrink: 0; height: 16px; overflow: visible; width: 16px"
+            >
+              <path
+                d="M2.32 1.375q-.257 .082-.488 .266-.23 .183-.344 .421l-.031 .036q-.066 .14-.082 .238-.031 .144-.031 .512v1.199 1.906q0 .285 .031 .399 .082 .32 .367 .593 .129 .125 .258 .207 .129 .078 .305 .129l.144 .047h3.504q.285-.016 .383-.031 .352-.098 .605-.352 .258-.258 .356-.609 .016-.098 .031-.383v-3.504l-.047-.144q-.05-.192-.133-.313-.078-.121-.218-.265-.176-.176-.336-.254l-.02-.016q-.14-.066-.254-.082-.144-.031-.543-.031h-1.312-1.746q-.285 .015-.399 .031zM9.68 1.375q-.321 .066-.61 .352-.14 .144-.222 .265-.078 .121-.129 .313l-.047 .144v3.504q.016 .305 .031 .383 .098 .351 .352 .609 .258 .254 .609 .352 .078 .015 .383 .031h3.504l.144-.047q.192-.051 .313-.129 .121-.082 .265-.222 .27-.274 .352-.61 .031-.144 .039-1.992 .008-1.848-.039-1.976-.082-.352-.348-.614-.261-.265-.613-.363-.113-.031-.383-.031h-1.617q-1.855 0-1.984 .031zM6 4.336v1.664h-3.344v-3.344h3.344zM13.344 4.336v1.664h-3.344v-3.344h3.344zM2.512 8.672q-.449 .047-.785 .398-.27 .258-.352 .578-.031 .114-.031 .399v1.617 1.488q0 .368 .031 .512 .016 .098 .082 .238l.031 .036q.114 .253 .352 .437 .238 .184 .512 .25 .128 .047 1.976 .039 1.848-.008 1.992-.039 .336-.082 .61-.352 .14-.144 .218-.265 .083-.121 .133-.313l.047-.144v-3.504q-.015-.285-.031-.383-.098-.351-.363-.605-.262-.258-.598-.356-.078-.015-.398-.031h-1.504q-1.778-.016-1.922 0zM9.856 8.672q-.254 .031-.43 .129-.274 .129-.457 .351-.184 .223-.266 .512-.015 .078-.031 .383v3.504l.047 .144q.051 .192 .129 .313 .082 .121 .222 .265 .274 .27 .61 .352 .144 .031 1.992 .039 1.848 .008 1.976-.039 .274-.066 .512-.25 .238-.184 .352-.437l.031-.036q.066-.14 .082-.238 .031-.144 .031-.512v-2.961q0-.382-.031-.527-.016-.098-.082-.238l-.016-.035q-.078-.145-.254-.321-.175-.175-.335-.254l-.036-.015q-.14-.082-.238-.098-.129-.015-.48-.031h-1.407q-1.793 0-1.921 .016zM6 11.664v1.68h-3.344v-3.344h3.344zM13.344 11.664v1.68h-3.344v-3.344h3.344z"
+                fill="#66788f"
+              />
+            </svg>
+            <div
+              data-pencil-name="标签"
+              style='box-sizing: border-box; color: #66788F; font-family: "Noto Sans SC", system-ui, sans-serif; font-size: 13px; font-style: normal; font-weight: 400; letter-spacing: 0px; line-height: normal; text-align: left; white-space: nowrap'
+            >
+              工作区管理
+            </div>
+          </div>
+          <div
+            data-pencil-name="导航-系统设置"
+            style="align-items: center; background-color: #00000000; border-radius: 10px; box-sizing: border-box; display: flex; flex-direction: row; flex-shrink: 0; gap: 10px; height: fit-content; justify-content: flex-start; padding: 11px 12px; width: 100%"
+          >
+            <svg
+              data-pencil-name="图标"
+              viewBox="0 0 16 16"
+              preserveAspectRatio="xMidYMid meet"
+              data-icon-name="settings"
+              data-icon-set="lucide"
+              xmlns="http://www.w3.org/2000/svg"
+              style="box-sizing: border-box; flex-shrink: 0; height: 16px; overflow: visible; width: 16px"
+            >
+              <path
+                d="M7.777 .687q-.035 .016-.175 .032-.371 .066-.731 .273-.359 .207-.582 .496-.226 .274-.332 .532-.102 .253-.18 .652-.035 .207-.082 .328-.047 .121-.152 .227-.102 .101-.238 .175-.137 .071-.282 .102-.222 .031-.558-.098-.227-.094-.387-.125-.156-.035-.414-.035-.32-.016-.512 .035-.625 .125-1.074 .551-.445 .426-.621 1.012-.176 .582-.016 1.187 .192 .703 .832 1.215 .207 .18 .301 .348 .098 .168 .098 .406 0 .238-.098 .406-.094 .168-.301 .348-.464 .367-.671 .797-.243 .48-.243 1 0 .519 .243 1 .222 .433 .605 .738 .387 .305 .848 .414 .687 .176 1.441-.129 .289-.109 .543-.07 .258 .039 .473 .242 .215 .199 .265 .567 .063 .429 .239 .785 .257 .527 .769 .855 .512 .328 1.102 .36 .707 .031 1.304-.344 .602-.375 .872-1.031 .097-.258 .144-.586 .051-.329 .191-.504 .145-.176 .336-.274 .356-.16 .786 0 .257 .114 .449 .156 .191 .04 .429 .04 .372 0 .708-.114 .496-.16 .863-.527 .527-.512 .637-1.215 .113-.707-.208-1.363-.207-.43-.656-.781-.222-.176-.32-.352-.094-.18-.094-.418 0-.238 .094-.406 .098-.168 .305-.348 .351-.269 .546-.59 .336-.496 .368-1.078 .031-.586-.235-1.113-.261-.528-.75-.856-.488-.328-1.047-.363-.289-.031-.546 .012-.254 .039-.559 .168-.238 .094-.406 .094-.168 0-.364-.094-.191-.098-.336-.274-.14-.175-.191-.504-.047-.328-.144-.586-.207-.496-.633-.855-.422-.359-.965-.473-.098-.031-.363-.047-.262-.015-.325 0zM8.352 2.098q.175 .078 .304 .207 .129 .129 .176 .289 .031 .078 .063 .301 .128 .769 .64 1.281 .418 .433 1.008 .594 .145 .046 .23 .054 .09 .008 .333 .008 .285 0 .453-.031 .168-.031 .441-.145 .238-.097 .422-.097 .187 0 .394 .113 .094 .047 .215 .16 .121 .113 .168 .207 .098 .191 .098 .41 0 .215-.098 .406-.047 .114-.113 .188-.063 .07-.207 .18-.879 .707-.879 1.777 0 1.07 .879 1.777 .176 .145 .262 .266 .09 .117 .125 .277 .078 .352-.067 .641-.047 .094-.168 .215-.121 .121-.215 .168-.222 .097-.402 .097-.176 0-.441-.105-.262-.106-.461-.145-.199-.039-.473-.023-.48 .016-.863 .191-.528 .258-.856 .7-.328 .437-.425 1.031-.032 .238-.063 .316-.047 .16-.176 .289-.129 .129-.289 .207-.094 .051-.152 .059-.055 .008-.215 .008-.16 0-.219-.008-.054-.008-.133-.059-.351-.16-.48-.476-.031-.082-.063-.274-.066-.418-.195-.687-.207-.465-.59-.785-.382-.321-.863-.45-.144-.046-.234-.054-.086-.008-.328-.008-.286 0-.454 .031-.168 .031-.441 .145-.238 .097-.426 .097-.183 0-.39-.097-.094-.047-.215-.168-.121-.121-.168-.215-.145-.289-.067-.641 .036-.16 .121-.277 .09-.121 .266-.266 .688-.547 .848-1.379 .031-.14 .031-.398 0-.258-.031-.398-.16-.817-.832-1.379-.16-.11-.227-.18-.062-.074-.109-.188-.129-.269-.082-.543 .051-.273 .242-.48 .191-.207 .48-.258 .145-.015 .27 .004 .129 .016 .32 .094 .258 .098 .465 .137 .207 .039 .477 .023 .273-.016 .465-.055 .195-.043 .433-.168 .352-.175 .625-.449 .481-.496 .609-1.25 .032-.238 .063-.336 .047-.125 .168-.262 .121-.136 .238-.191 .121-.059 .207-.082 .09-.023 .235-.016 .144 .008 .199 .016 .058 .008 .152 .059zM7.586 5.375q-1.027 .176-1.648 .945-.211 .254-.333 .512-.117 .258-.214 .594-.032 .125-.039 .222-.008 .094-.008 .352 0 .32 .031 .496 .031 .176 .129 .434 .191 .543 .605 .961 .418 .414 .961 .605 .258 .098 .434 .129 .176 .031 .496 .031 .32 0 .496-.031 .176-.031 .434-.129 .543-.191 .957-.605 .418-.418 .609-.961 .098-.258 .129-.434 .031-.176 .031-.496 0-.32-.031-.496-.031-.176-.129-.434-.238-.636-.762-1.086-.519-.449-1.191-.593-.16-.032-.488-.039-.328-.008-.469 .023zM8.336 6.703q.32 .082 .598 .363 .281 .278 .363 .598 .031 .145 .031 .336 0 .191-.031 .32-.082 .336-.348 .61-.261 .269-.613 .367-.129 .031-.336 .031-.207 0-.336-.031-.351-.098-.617-.367-.262-.274-.344-.61-.031-.129-.031-.32 0-.191 .031-.336 .067-.258 .258-.496 .191-.238 .465-.367 .398-.207 .91-.098z"
+                fill="#66788f"
+              />
+            </svg>
+            <div
+              data-pencil-name="标签"
+              style='box-sizing: border-box; color: #66788F; font-family: "Noto Sans SC", system-ui, sans-serif; font-size: 13px; font-style: normal; font-weight: 400; letter-spacing: 0px; line-height: normal; text-align: left; white-space: nowrap'
+            >
+              系统设置
+            </div>
+          </div>
+        </div>
+      </div>
+      <div
+        data-pencil-name="新建查询主内容区"
+        style="align-items: flex-start; background-color: #00000000; box-sizing: border-box; display: flex; flex-direction: column; flex: 1 1 0; gap: 0px; height: 100%; justify-content: flex-start; padding: 32px 36px"
+      >
+        <div
+          data-pencil-name="自然语言查询工作区"
+          style="align-items: flex-start; background-color: #FFFFFF; border-radius: 20px; box-shadow: 0px 6px 20px #17293F0D; box-sizing: border-box; display: flex; flex-direction: column; flex: 1 1 0; gap: 0px; justify-content: flex-start; outline-offset: -0.5px; outline: 1px solid #D9E3EF; overflow: hidden; width: 100%"
+        >
+          <div
+            data-pencil-name="查询页头"
+            style="align-items: center; border-color: #D9E3EF; border-style: solid; border-width: 0px 0px 1px 0px; box-sizing: content-box; display: flex; flex-direction: row; flex-shrink: 0; gap: 20px; height: 97.5px; justify-content: flex-start; margin: 0px 0px -0.5px 0px; padding: 22px 26px; width: 1136px"
+          >
+            <div
+              data-pencil-name="查询类型区"
+              style="align-items: center; box-sizing: border-box; display: flex; flex-direction: row; flex: 1 1 0; gap: 16px; height: fit-content; justify-content: flex-start"
+            >
+              <div
+                data-pencil-name="新建查询按钮"
+                style="align-items: center; background-color: #2E7CD6; border-radius: 9px; box-sizing: border-box; display: flex; flex-direction: row; flex-shrink: 0; gap: 6px; height: fit-content; justify-content: flex-start; outline-offset: -0.5px; outline: 1px solid #2E7CD6; padding: 9px 11px; width: fit-content"
+              >
+                <svg
+                  data-pencil-name="新建查询按钮图标"
+                  viewBox="0 0 14 14"
+                  preserveAspectRatio="xMidYMid meet"
+                  data-icon-name="plus"
+                  data-icon-set="lucide"
+                  xmlns="http://www.w3.org/2000/svg"
+                  style="box-sizing: border-box; flex-shrink: 0; height: 14px; overflow: visible; width: 14px"
+                >
+                  <path
+                    d="M6.901 2.352q-.096 .013-.174 .051-.076 .034-.154 .126-.075 .089-.113 .168-.034 .075-.034 .328v3.401h-3.668l-.085 .041q-.222 .113-.301 .338-.075 .222 .007 .434 .058 .096 .14 .181 .086 .082 .168 .12 .085 .034 .338 .034h3.401v3.401q0 .253 .034 .338 .038 .083 .12 .168 .085 .082 .188 .133 .106 .048 .232 .048 .126 0 .229-.048 .106-.051 .188-.133 .085-.085 .12-.168 .037-.085 .037-.338v-3.401h3.401q.253 0 .335-.034 .086-.038 .168-.12 .085-.085 .133-.188 .051-.106 .051-.232 0-.126-.041-.239-.099-.195-.294-.294l-.085-.041h-3.668v-3.387q0-.267-.027-.322-.072-.198-.253-.301-.181-.105-.393-.064z"
+                    fill="#ffffff"
+                  />
+                </svg>
+                <div
+                  data-pencil-name="新建查询按钮文字"
+                  style='box-sizing: border-box; color: #FFFFFF; font-family: "Noto Sans SC", system-ui, sans-serif; font-size: 12px; font-style: normal; font-weight: 700; letter-spacing: 0px; line-height: normal; text-align: left; white-space: nowrap'
+                >
+                  新建查询
+                </div>
+              </div>
+              <div
+                data-pencil-name="自然语言查询标签"
+                style="align-items: center; background-color: #EEF3F9; border-radius: 8px; box-sizing: border-box; display: flex; flex-direction: row; flex-shrink: 0; gap: 7px; height: fit-content; justify-content: flex-start; padding: 7px 10px; width: fit-content"
+              >
+                <svg
+                  data-pencil-name="自然语言说明图标"
+                  viewBox="0 0 15 15"
+                  preserveAspectRatio="xMidYMid meet"
+                  data-icon-name="message-square-text"
+                  data-icon-set="lucide"
+                  xmlns="http://www.w3.org/2000/svg"
+                  style="box-sizing: border-box; flex-shrink: 0; height: 15px; overflow: visible; width: 15px"
+                >
+                  <path
+                    d="M2.117 1.289q-.421 .092-.769 .363-.345 .267-.539 .659-.135 .3-.179 .63-.015 .179 0 5.368v4.472q.015 .732 .029 .809 .121 .359 .399 .571 .279 .209 .623 .209 .253 0 .494-.121 .107-.044 .238-.172 .136-.128 .707-.681 .795-.795 .886-.842l.088-.044 8.672-.015 .18-.044q.271-.077 .472-.194 .201-.121 .396-.315 .197-.198 .314-.399 .121-.201 .198-.472l.044-.18 .015-6.749q-.015-.872-.029-1.157-.015-.209-.044-.359-.151-.509-.542-.868-.389-.363-.901-.469-.117-.029-.868-.029h-4.516-4.471q-.78 .014-.897 .029zM12.601 2.52q.33 .043 .465 .344l.044 .106v7.8l-.029 .092q-.135 .267-.377 .359-.059 .014-4.395 .029l-4.317 .015-.169 .029q-.146 .048-.282 .106-.227 .092-.392 .227-.164 .132-.644 .626l-.63 .616 .015-9.899 .044-.106q.062-.136 .179-.231 .121-.099 .249-.121 .128-.022 5.123-.022 4.996 0 5.116 .03zM4.23 3.765q-.15 .044-.279 .164-.128 .121-.172 .271-.058 .209 .03 .422 .091 .208 .285 .315 .077 .043 .213 .043 .194 .015 .761 .03l4.443-.015 .12-.044q.224-.121 .312-.344 .091-.227 .007-.451-.081-.227-.304-.347l-.106-.044-2.626-.015q-2.607 0-2.684 .015zM4.259 6.27q-.194 .029-.344 .194-.15 .164-.165 .377 0 .15 .066 .3 .07 .15 .205 .238l.029 .029q.059 .048 .194 .063 .165 .014 .736 .029h5.04q.571-.015 .736-.029 .135-.015 .194-.063l.029-.029q.227-.15 .264-.395 .036-.249-.106-.465-.143-.22-.411-.249-.12-.03-3.241-.03-3.12 0-3.226 .03zM4.157 8.789q-.107 .048-.206 .139-.095 .088-.135 .172-.037 .081-.044 .125-.007 .044-.007 .15 0 .165 .044 .271 .12 .223 .348 .315 .073 .029 .344 .029h1.754 1.754q.271 0 .359-.036 .092-.041 .179-.129 .092-.091 .143-.201 .055-.113 .055-.249 0-.135-.044-.256-.106-.209-.315-.315l-.091-.044h-3.794q-.286 .014-.344 .029z"
+                    fill="#66788f"
+                  />
+                </svg>
+                <div
+                  data-pencil-name="自然语言说明文字"
+                  style='box-sizing: border-box; color: #66788F; font-family: "Noto Sans SC", system-ui, sans-serif; font-size: 13px; font-style: normal; font-weight: 400; letter-spacing: 0px; line-height: normal; text-align: left; white-space: nowrap'
+                >
+                  自然语言查询
+                </div>
+              </div>
+            </div>
+            <div
+              data-pencil-name="标题组"
+              style="align-items: center; box-sizing: border-box; display: flex; flex-direction: column; flex-shrink: 0; gap: 6px; height: fit-content; justify-content: flex-start; width: fit-content"
+            >
+              <div
+                data-pencil-name="页面标题"
+                style='box-sizing: border-box; color: #17293F; font-family: "Noto Sans SC", system-ui, sans-serif; font-size: 22px; font-style: normal; font-weight: 700; letter-spacing: 0px; line-height: normal; text-align: left; white-space: nowrap'
+              >
+                新建查询
+              </div>
+              <div
+                data-pencil-name="页面副标题"
+                style='box-sizing: border-box; color: #66788F; font-family: "Noto Sans SC", system-ui, sans-serif; font-size: 11px; font-style: normal; font-weight: 400; letter-spacing: 0px; line-height: normal; text-align: left; white-space: nowrap'
+              >
+                选择数据库并完成检查后开始提问
+              </div>
+            </div>
+            <div
+              data-pencil-name="页面操作区"
+              style="align-items: center; box-sizing: border-box; display: flex; flex-direction: row; flex: 1 1 0; gap: 8px; height: fit-content; justify-content: flex-end"
+            >
+              <div
+                data-pencil-name="返回按钮"
+                style="align-items: center; background-color: #FFFFFF; border-radius: 9px; box-sizing: border-box; display: flex; flex-direction: row; flex-shrink: 0; gap: 6px; height: fit-content; justify-content: flex-start; outline-offset: -0.5px; outline: 1px solid #D9E3EF; padding: 9px 11px; width: fit-content"
+              >
+                <svg
+                  data-pencil-name="返回按钮图标"
+                  viewBox="0 0 14 14"
+                  preserveAspectRatio="xMidYMid meet"
+                  data-icon-name="arrow-left"
+                  data-icon-set="lucide"
+                  xmlns="http://www.w3.org/2000/svg"
+                  style="box-sizing: border-box; flex-shrink: 0; height: 14px; overflow: visible; width: 14px"
+                >
+                  <path
+                    d="M6.901 2.352q-.096 .013-.168 .051-.068 .034-2.177 2.136-2.105 2.099-2.146 2.167-.113 .181-.072 .407 .027 .095 .068 .174 .045 .075 2.157 2.177l1.682 1.679q.376 .365 .516 .464 .085 .055 .198 .055h.041q.239 0 .42-.181 .113-.113 .147-.28 .035-.168-.02-.322-.027-.085-.26-.321-.232-.239-1.364-1.374-1.582-1.582-1.582-1.596 0-.014 3.428-.014h3.011q.448 0 .53-.034 .086-.038 .168-.12 .085-.085 .133-.188 .051-.106 .051-.232 0-.126-.041-.239-.099-.195-.294-.294l-.085-.041h-3.446q-3.455 0-3.455-.014 0-.014 1.582-1.596 1.132-1.135 1.364-1.371 .233-.239 .26-.324 .068-.209-.004-.404-.068-.198-.242-.301-.175-.105-.4-.064z"
+                    fill="#66788f"
+                  />
+                </svg>
+                <div
+                  data-pencil-name="返回按钮文字"
+                  style='box-sizing: border-box; color: #17293F; font-family: "Noto Sans SC", system-ui, sans-serif; font-size: 12px; font-style: normal; font-weight: 400; letter-spacing: 0px; line-height: normal; text-align: left; white-space: nowrap'
+                >
+                  返回
+                </div>
+              </div>
+              <div
+                data-pencil-name="查询历史按钮"
+                style="align-items: center; background-color: #FFFFFF; border-radius: 9px; box-sizing: border-box; display: flex; flex-direction: row; flex-shrink: 0; gap: 6px; height: fit-content; justify-content: flex-start; outline-offset: -0.5px; outline: 1px solid #D9E3EF; padding: 9px 11px; width: fit-content"
+              >
+                <svg
+                  data-pencil-name="查询历史按钮图标"
+                  viewBox="0 0 14 14"
+                  preserveAspectRatio="xMidYMid meet"
+                  data-icon-name="history"
+                  data-icon-set="lucide"
+                  xmlns="http://www.w3.org/2000/svg"
+                  style="box-sizing: border-box; flex-shrink: 0; height: 14px; overflow: visible; width: 14px"
+                >
+                  <path
+                    d="M1.596 1.189q-.253 .086-.379 .308l-.041 .085v3.261l.041 .072q.099 .195 .294 .28l.085 .041 2.813 .014q.321-.014 .434-.027 .072-.014 .154-.072l.014-.014q.171-.126 .219-.314 .047-.188-.031-.376-.075-.192-.257-.287-.085-.058-.266-.072-.181-.014-.769-.014h-.742l.236-.225q.742-.728 1.582-1.091 .968-.42 2.031-.42 .94 0 1.763 .349 1.176 .492 1.938 1.493 .766 1.002 .92 2.246 .027 .225 .027 .567 0 .342-.027 .568-.154 1.274-.94 2.29-.783 1.011-1.972 1.49-.814 .321-1.723 .321-.28 0-.461-.014-.182-.013-.462-.071-.882-.181-1.647-.684-.763-.506-1.282-1.254-.516-.749-.711-1.644-.085-.448-.092-.776-.007-.332-.075-.472-.086-.167-.267-.267-.058-.027-.099-.041-.041-.013-.154-.013-.113 0-.154 .013-.041 .014-.099 .041-.181 .1-.28 .267-.069 .154-.034 .653 .034 .496 .147 .988 .294 1.189 1.035 2.156 .742 .964 1.805 1.559 1.066 .595 2.297 .708 .184 .013 .533 .013 .349 0 .533-.013 1.385-.127 2.547-.869 1.148-.714 1.862-1.862 .742-1.163 .869-2.547 .013-.184 .013-.533 0-.349-.013-.533-.141-1.525-1.016-2.782-.875-1.262-2.262-1.935-.588-.28-1.149-.42-.557-.141-1.216-.154-1.091-.028-2.113 .307-.714 .24-1.302 .605-.588 .363-1.148 .91l-.281 .263v-1.679l-.041-.085q-.099-.181-.28-.267-.086-.041-.226-.047-.14-.007-.181 .006zM6.86 3.514q-.127 .027-.239 .133-.11 .106-.168 .232l-.027 .096v3.192l.041 .086q.058 .096 .126 .154 .086 .068 .366 .222l.909 .461q1.203 .605 1.302 .633 .24 .068 .455-.055 .215-.126 .273-.379 .041-.182-.041-.38-.044-.096-.116-.15-.068-.058-.318-.185l-1.835-.936-.014-2.704-.041-.099q-.044-.082-.123-.157-.075-.079-.154-.113-.075-.038-.194-.051-.117-.014-.202 0z"
+                    fill="#66788f"
+                  />
+                </svg>
+                <div
+                  data-pencil-name="查询历史按钮文字"
+                  style='box-sizing: border-box; color: #17293F; font-family: "Noto Sans SC", system-ui, sans-serif; font-size: 12px; font-style: normal; font-weight: 400; letter-spacing: 0px; line-height: normal; text-align: left; white-space: nowrap'
+                >
+                  查询历史
+                </div>
+              </div>
+              <div
+                data-pencil-name="复制链接按钮"
+                style="align-items: center; background-color: #FFFFFF; border-radius: 9px; box-sizing: border-box; display: flex; flex-direction: row; flex-shrink: 0; gap: 0px; height: 34px; justify-content: center; outline-offset: -0.5px; outline: 1px solid #D9E3EF; width: 34px"
+              >
+                <svg
+                  data-pencil-name="复制链接按钮图标"
+                  viewBox="0 0 14 14"
+                  preserveAspectRatio="xMidYMid meet"
+                  data-icon-name="link-2"
+                  data-icon-set="lucide"
+                  xmlns="http://www.w3.org/2000/svg"
+                  style="box-sizing: border-box; flex-shrink: 0; height: 14px; overflow: visible; width: 14px"
+                >
+                  <path
+                    d="M3.821 3.514q-.112 .013-.208 .027-.181 .014-.421 .079-.239 .061-.42 .133-.813 .335-1.374 1.008-.557 .67-.738 1.538-.199 .94 .116 1.849 .314 .91 1.059 1.525 .629 .533 1.398 .714 .294 .072 .476 .086 .184 .013 .854 .013h.841l.099-.041q.195-.099 .27-.287 .079-.191 .027-.393-.048-.202-.215-.328-.082-.058-.147-.072-.062-.013-.256-.027l-.633-.014q-.81-.013-.95-.041-.759-.171-1.261-.741-.407-.465-.533-1.081-.041-.181-.041-.461 0-.28 .041-.461 .112-.547 .441-.968 .331-.42 .82-.656 .253-.14 .533-.198 .14-.028 .964-.041l.813-.014 .113-.041q.209-.113 .291-.321 .085-.212 .007-.421-.076-.212-.284-.324l-.099-.041-.769-.014q-.756 0-.814 .014zM8.61 3.514q-.127 .027-.239 .133-.11 .106-.168 .232-.068 .209 .014 .428 .085 .215 .294 .314l.113 .041 .813 .014q.824 .013 .964 .041 .687 .154 1.169 .646 .485 .489 .625 1.176 .041 .181 .041 .461 0 .28-.041 .461-.126 .616-.533 1.081-.502 .57-1.261 .741-.14 .028-.95 .041l-.633 .014q-.194 .014-.259 .027-.062 .014-.144 .072-.167 .126-.219 .328-.048 .202 .028 .393 .078 .188 .273 .287l.099 .041h.841q.67 0 .851-.013 .185-.014 .479-.086 .475-.113 .923-.376 .447-.266 .786-.632 .615-.67 .83-1.525 .219-.854 0-1.708-.215-.855-.83-1.525-.325-.352-.752-.608-.428-.26-.889-.387-.294-.085-.499-.099-.202-.013-.844-.027-.81 0-.882 .014zM4.481 6.453q-.239 .086-.345 .325-.103 .236-.007 .461 .058 .096 .14 .181 .086 .082 .168 .12 .085 .034 .406 .034h2.157 2.157q.321 0 .403-.034 .086-.038 .168-.12 .085-.085 .133-.188 .051-.106 .051-.232 0-.126-.041-.239-.099-.195-.294-.294l-.085-.041h-2.478q-2.478 0-2.533 .027z"
+                    fill="#66788f"
+                  />
+                </svg>
+              </div>
+              <div
+                data-pencil-name="刷新按钮"
+                style="align-items: center; background-color: #FFFFFF; border-radius: 9px; box-sizing: border-box; display: flex; flex-direction: row; flex-shrink: 0; gap: 0px; height: 34px; justify-content: center; outline-offset: -0.5px; outline: 1px solid #D9E3EF; width: 34px"
+              >
+                <svg
+                  data-pencil-name="刷新按钮图标"
+                  viewBox="0 0 14 14"
+                  preserveAspectRatio="xMidYMid meet"
+                  data-icon-name="rotate-cw"
+                  data-icon-set="lucide"
+                  xmlns="http://www.w3.org/2000/svg"
+                  style="box-sizing: border-box; flex-shrink: 0; height: 14px; overflow: visible; width: 14px"
+                >
+                  <path
+                    d="M6.566 1.176q-.629 .072-1.121 .205-.489 .13-1.008 .383-.951 .461-1.665 1.22-.714 .755-1.135 1.719-.461 1.094-.461 2.297 0 .335 .013 .533 .127 1.384 .869 2.547 .714 1.148 1.862 1.862 1.163 .742 2.547 .869 .184 .013 .533 .013 .349 0 .533-.013 1.385-.127 2.56-.869 1.149-.714 1.863-1.876 .728-1.176 .855-2.564 .027-.222 .013-.447 0-.14-.007-.195-.006-.055-.034-.113-.099-.167-.28-.267-.058-.027-.099-.041-.041-.013-.154-.013-.113 0-.154 .013-.041 .014-.099 .041-.181 .1-.266 .267-.041 .058-.041 .154l-.055 .547q-.045 .629-.298 1.261-.249 .629-.656 1.148-.516 .67-1.23 1.111-.715 .441-1.528 .609-.28 .058-.462 .071-.181 .014-.461 .014-.28 0-.461-.014-.182-.013-.462-.071-1.022-.209-1.876-.851-.855-.646-1.344-1.583-.266-.519-.393-1.029-.126-.512-.126-1.114 0-.602 .126-1.111 .127-.513 .393-1.032 .476-.923 1.306-1.559 .834-.639 1.856-.861 .338-.072 .773-.092 .434-.021 .796 .02 1.805 .226 3.165 1.624l.082 .085h-.742q-.741 0-.854 .028-.25 .027-.383 .232-.133 .202-.099 .434 .034 .229 .246 .369l.014 .014q.082 .058 .153 .072 .113 .013 .435 .027l2.799-.014 .099-.041q.181-.085 .28-.28l.041-.072v-3.261l-.041-.085q-.099-.167-.28-.267-.058-.027-.099-.041-.041-.013-.154-.013-.113 0-.154 .013-.041 .014-.099 .041-.181 .1-.28 .267l-.041 .085v1.679l-.239-.236q-.517-.506-1.05-.841-1.176-.769-2.632-.967-.14-.028-.601-.034-.462-.007-.588-.007z"
+                    fill="#66788f"
+                  />
+                </svg>
+              </div>
+            </div>
+          </div>
+          <div
+            data-pencil-name="数据库选择栏"
+            style="align-items: center; background-color: #F8FAFD; border-color: #D9E3EF; border-style: solid; border-width: 0px 0px 1px 0px; box-sizing: content-box; display: flex; flex-direction: row; flex-shrink: 0; gap: 16px; height: 80.5px; justify-content: flex-start; margin: 0px 0px -0.5px 0px; padding: 20px 28px; width: 1136px"
+          >
+            <div
+              data-pencil-name="数据库标签"
+              style='box-sizing: border-box; color: #17293F; font-family: "Noto Sans SC", system-ui, sans-serif; font-size: 14px; font-style: normal; font-weight: 700; letter-spacing: 0px; line-height: normal; text-align: left; white-space: nowrap'
+            >
+              数据库
+            </div>
+            <div
+              data-pencil-name="数据库下拉选择器"
+              style="align-items: center; background-color: #FFFFFF; border-radius: 10px; box-sizing: border-box; display: flex; flex-direction: row; flex-shrink: 0; gap: 0px; height: fit-content; justify-content: space-between; outline-offset: -0.5px; outline: 1px solid #D9E3EF; padding: 11px 13px; width: 280px"
+            >
+              <div
+                data-pencil-name="选择器提示"
+                style="align-items: center; box-sizing: border-box; display: flex; flex-direction: row; flex-shrink: 0; gap: 8px; height: fit-content; justify-content: flex-start; width: fit-content"
+              >
+                <svg
+                  data-pencil-name="数据库图标"
+                  viewBox="0 0 16 16"
+                  preserveAspectRatio="xMidYMid meet"
+                  data-icon-name="database"
+                  data-icon-set="lucide"
+                  xmlns="http://www.w3.org/2000/svg"
+                  style="box-sizing: border-box; flex-shrink: 0; height: 16px; overflow: visible; width: 16px"
+                >
+                  <path
+                    d="M7.426 .687q-1.121 .032-2.145 .192-1.023 .16-1.808 .433-1.825 .641-2.098 1.68-.031 .113-.031 .801v4.207 4.207q0 .688 .031 .801 .242 .93 1.695 1.535 .993 .402 2.383 .609 1.395 .207 2.883 .176 1.52-.031 2.863-.289 .992-.191 1.735-.504 .746-.312 1.16-.703 .418-.391 .531-.824 .031-.113 .031-.785v-4.223-4.223q0-.672-.031-.785-.227-.879-1.57-1.469-1.344-.593-3.551-.789-.336-.031-.801-.047l-.59-.015q-.16 0-.687 .015zM8.734 2.016q2.356 .113 3.747 .703 .351 .16 .597 .336 .25 .175 .235 .289 .015 .031-.082 .129-.301 .32-1.094 .601-.793 .278-1.864 .438-.609 .082-1.019 .105-.406 .024-1.254 .024-.848 0-1.258-.024-.406-.023-1.015-.105-.926-.129-1.649-.36-.719-.23-1.101-.504-.114-.082-.204-.175-.085-.098-.085-.129 0-.114 .207-.274 .707-.543 2.359-.836 1.656-.297 3.48-.218zM3.121 5.215q.992 .418 2.43 .625 1.41 .191 2.93 .16 1.566-.047 2.894-.336 1.008-.207 1.856-.594l.113-.047-.016 3.008-.047 .067q-.066 .078-.25 .207-.183 .129-.375 .222-1.054 .512-2.894 .715-1.84 .199-3.633-.012-.832-.093-1.57-.277-.735-.183-1.207-.414-.473-.234-.618-.426l-.062-.082-.016-3.008zM3.152 9.902q1.328 .532 3.407 .707 .386 .047 1.441 .047 1.055 0 1.441-.047 1.758-.16 2.973-.546 .496-.176 .832-.336l.098-.047v2.992l-.063 .082q-.191 .269-.84 .543-.648 .269-1.496 .43-1.394 .273-2.945 .273-1.551 0-2.945-.273-.848-.161-1.496-.43-.649-.274-.84-.543l-.063-.082v-2.992l.129 .062q.11 .067 .367 .16z"
+                    fill="#66788f"
+                  />
+                </svg>
+                <div
+                  data-pencil-name="选择器占位文字"
+                  style='box-sizing: border-box; color: #66788F; font-family: "Noto Sans SC", system-ui, sans-serif; font-size: 13px; font-style: normal; font-weight: 400; letter-spacing: 0px; line-height: normal; text-align: left; white-space: nowrap'
+                >
+                  请选择数据库
+                </div>
+              </div>
+              <svg
+                data-pencil-name="下拉箭头"
+                viewBox="0 0 15 15"
+                preserveAspectRatio="xMidYMid meet"
+                data-icon-name="chevron-down"
+                data-icon-set="lucide"
+                xmlns="http://www.w3.org/2000/svg"
+                style="box-sizing: border-box; flex-shrink: 0; height: 15px; overflow: visible; width: 15px"
+              >
+                <path
+                  d="M3.585 5.024q-.271 .092-.406 .33-.044 .092-.044 .271 0 .179 .051 .278 .055 .096 1.996 2.04 1.944 1.941 2.04 1.996 .099 .051 .278 .051 .179 0 .275-.051 .099-.055 2.039-1.996 1.945-1.944 1.996-2.04 .055-.099 .055-.278 0-.179-.044-.271-.106-.179-.3-.286-.062-.029-.106-.044-.044-.014-.165-.014-.121 0-.165 .014-.044 .015-.121 .044-.106 .063-1.783 1.744l-1.681 1.677-3.029-3.014q-.333-.315-.45-.407-.092-.058-.212-.058h-.03q-.15 0-.194 .014z"
+                  fill="#66788f"
+                />
+              </svg>
+            </div>
+            <div
+              data-pencil-name="数据库检查说明"
+              style="align-items: center; box-sizing: border-box; display: flex; flex-direction: row; flex: 1 1 0; gap: 7px; height: fit-content; justify-content: flex-start"
+            >
+              <svg
+                data-pencil-name="说明图标"
+                viewBox="0 0 14 14"
+                preserveAspectRatio="xMidYMid meet"
+                data-icon-name="info"
+                data-icon-set="lucide"
+                xmlns="http://www.w3.org/2000/svg"
+                style="box-sizing: border-box; flex-shrink: 0; height: 14px; overflow: visible; width: 14px"
+              >
+                <path
+                  d="M6.692 .602q-1.162 .041-2.228 .505-1.063 .462-1.904 1.268-.837 .804-1.343 1.853-.489 1.008-.602 2.157-.027 .195-.027 .615 0 .42 .027 .615 .113 1.149 .602 2.157 .659 1.401 1.897 2.338 1.241 .936 2.751 1.203 .533 .099 1.135 .099 .755 0 1.432-.154 .68-.153 1.354-.475 1.261-.618 2.163-1.702 .903-1.083 1.255-2.444 .294-1.117 .181-2.252-.113-1.135-.602-2.171-.588-1.203-1.62-2.085-1.029-.881-2.314-1.275-1.008-.307-2.157-.252zM7.66 1.791q1.076 .14 1.992 .68 .916 .54 1.562 1.408 .828 1.104 1.009 2.547 .013 .167 .013 .574 0 .407-.013 .574-.14 1.162-.721 2.13-.582 .963-1.535 1.623-.475 .335-1.049 .561-.575 .222-1.19 .307-.253 .041-.728 .041-.475 0-.728-.041-1.077-.153-1.959-.687-.881-.533-1.527-1.387-.827-1.104-1.009-2.547-.013-.167-.013-.574 0-.407 .013-.574 .14-1.121 .67-2.051 .533-.93 1.432-1.589 .544-.407 1.207-.67 .666-.267 1.326-.325l.253-.027q.096-.014 .475 0 .38 .013 .52 .027zM6.901 4.102q-.181 .027-.321 .167-.209 .212-.154 .506 .054 .294 .321 .42 .099 .041 .253 .041 .253 0 .42-.167 .127-.127 .154-.308 .055-.294-.157-.502-.208-.212-.516-.157zM6.846 6.439q-.253 .086-.379 .308l-.041 .086v2.464q0 .181 .034 .266 .038 .083 .12 .168 .085 .082 .188 .133 .106 .048 .232 .048 .126 0 .229-.048 .106-.051 .188-.133 .085-.085 .12-.168 .037-.085 .037-.266v-2.464l-.041-.086q-.099-.181-.28-.267-.085-.041-.226-.047-.14-.007-.181 .006z"
+                  fill="#66788f"
+                />
+              </svg>
+              <div
+                data-pencil-name="说明文字"
+                style='box-sizing: border-box; color: #66788F; flex: 1 1 0; font-family: "Noto Sans SC", system-ui, sans-serif; font-size: 12px; font-style: normal; font-weight: 400; letter-spacing: 0px; line-height: normal; text-align: left'
+              >
+                新建查询前先选择数据库并完成检查，再次打开会话不会重复检查。
+              </div>
+            </div>
+          </div>
+          <div
+            data-pencil-name="查询空状态"
+            style="align-items: center; background-color: #FCFDFE; box-sizing: border-box; display: flex; flex-direction: column; flex: 1 1 0; gap: 18px; justify-content: center; padding: 40px; width: 100%"
+          >
+            <div
+              data-pencil-name="空状态图标底"
+              style="align-items: center; background-color: #E3EEFB; border-radius: 20px; box-sizing: border-box; display: flex; flex-direction: row; flex-shrink: 0; gap: 0px; height: 68px; justify-content: center; width: 68px"
+            >
+              <svg
+                data-pencil-name="空状态图标"
+                viewBox="0 0 30 30"
+                preserveAspectRatio="xMidYMid meet"
+                data-icon-name="message-circle-more"
+                data-icon-set="lucide"
+                xmlns="http://www.w3.org/2000/svg"
+                style="box-sizing: border-box; flex-shrink: 0; height: 30px; overflow: visible; width: 30px"
+              >
+                <path
+                  d="M14.583 1.26q-1.143 .029-2.359 .285-1.216 .257-2.292 .674-2.974 1.201-5.135 3.589-2.16 2.38-3.025 5.471-.659 2.344-.483 4.746 .183 2.395 1.172 4.615l.029 .088q.147 .3 .161 .483 .022 .176-.102 .63-.088 .329-.447 1.435l-.124 .301q-.66 2.102-.718 2.402-.03 .359 .058 .798 .096 .433 .301 .762 .124 .213 .373 .469 .257 .249 .469 .373 .359 .205 .776 .301 .425 .088 .813 .058 .271-.058 2.461-.688l.301-.095q1.171-.33 1.501-.418 .476-.117 .637-.102 .169 .014 .44 .131l.058 .03q1.89 .813 4.234 1.084 .359 .058 1.274 .058 .916 0 1.333-.058 1.831-.183 3.523-.813 1.699-.63 3.171-1.678 2.007-1.413 3.384-3.449 1.385-2.044 1.985-4.409 .601-2.374 .33-4.798-.271-2.432-1.385-4.658-1.435-2.908-4.079-4.885-2.637-1.985-5.845-2.52-1.355-.242-2.79-.212zM15.842 3.779q2.967 .242 5.384 1.846 2.417 1.604 3.794 4.248 .871 1.707 1.142 3.75 .059 .476 .059 1.377 0 .901-.059 1.414-.359 2.666-1.831 4.856-1.472 2.19-3.779 3.508-1.231 .696-2.674 1.084-1.435 .388-2.849 .388-2.307 0-4.555-.959-.425-.184-.681-.257-.25-.073-.616-.102-.505-.03-.974 .058-.461 .088-2.234 .601-2.16 .63-2.175 .615-.015-.015 .644-2.051 .66-2.043 .689-2.373 .154-.959-.3-1.955l-.301-.747q-.835-2.073-.776-4.366 .059-2.292 .989-4.336 .959-2.131 2.68-3.691 1.729-1.56 3.904-2.322 2.176-.762 4.519-.586zM9.602 13.828q-.395 .125-.622 .454-.22 .33-.22 .718 0 .513 .373 .886 .374 .374 .901 .344 .528-.029 .857-.358 .213-.213 .271-.389 .059-.183 .059-.512 0-.33-.088-.513-.183-.388-.571-.571-.184-.088-.498-.117-.315-.03-.462 .058zM14.67 13.799q-.542 .183-.813 .659-.087 .183-.087 .513 0 .329 .073 .512 .08 .176 .285 .389 .33 .329 .857 .358 .528 .03 .901-.344 .374-.373 .374-.886 0-.513-.359-.857-.359-.344-.842-.373-.301 0-.389 .029zM19.563 13.828q-.212 .095-.41 .278-.191 .176-.271 .345-.073 .161-.088 .249-.015 .088-.015 .3 0 .33 .088 .542 .242 .447 .689 .615 .454 .161 .901 0 .454-.168 .695-.615 .088-.212 .088-.542 0-.212-.014-.3-.015-.088-.074-.242-.124-.176-.307-.352-.176-.183-.388-.256-.205-.08-.462-.08-.256 0-.432 .058z"
+                  fill="#2e7cd6"
+                />
+              </svg>
+            </div>
+            <div
+              data-pencil-name="空状态标题"
+              style='box-sizing: border-box; color: #17293F; font-family: "Noto Sans SC", system-ui, sans-serif; font-size: 20px; font-style: normal; font-weight: 700; letter-spacing: 0px; line-height: normal; text-align: left; white-space: nowrap'
+            >
+              选择数据库，开始智能查询
+            </div>
+            <div
+              data-pencil-name="空状态描述"
+              style='box-sizing: border-box; color: #66788F; font-family: "Noto Sans SC", system-ui, sans-serif; font-size: 13px; font-style: normal; font-weight: 400; letter-spacing: 0px; line-height: normal; text-align: left; white-space: nowrap'
+            >
+              选择数据库并完成检查后，用自然语言开始提问。
+            </div>
+            <div
+              data-pencil-name="查询步骤引导"
+              style="align-items: center; box-sizing: border-box; display: flex; flex-direction: row; flex-shrink: 0; gap: 12px; height: fit-content; justify-content: flex-start; padding: 10px 0px 0px 0px; width: fit-content"
+            >
+              <div
+                data-pencil-name="步骤-选择数据库"
+                style="align-items: center; box-sizing: border-box; display: flex; flex-direction: row; flex-shrink: 0; gap: 8px; height: fit-content; justify-content: flex-start; width: fit-content"
+              >
+                <div
+                  data-pencil-name="步骤序号底"
+                  style="align-items: center; background-color: #E3EEFB; border-radius: 13px; box-sizing: border-box; display: flex; flex-direction: row; flex-shrink: 0; gap: 0px; height: 25px; justify-content: center; outline-offset: -0.5px; outline: 1px solid #C9DEF3; width: 25px"
+                >
+                  <div
+                    data-pencil-name="步骤序号"
+                    style='box-sizing: border-box; color: #2E7CD6; font-family: "Noto Sans SC", system-ui, sans-serif; font-size: 11px; font-style: normal; font-weight: 700; letter-spacing: 0px; line-height: normal; text-align: left; white-space: nowrap'
+                  >
+                    1
+                  </div>
+                </div>
+                <div
+                  data-pencil-name="步骤文字"
+                  style='box-sizing: border-box; color: #66788F; font-family: "Noto Sans SC", system-ui, sans-serif; font-size: 12px; font-style: normal; font-weight: 400; letter-spacing: 0px; line-height: normal; text-align: left; white-space: nowrap'
+                >
+                  选择数据库
+                </div>
+              </div>
+              <svg
+                data-pencil-name="步骤箭头"
+                viewBox="0 0 14 14"
+                preserveAspectRatio="xMidYMid meet"
+                data-icon-name="chevron-right"
+                data-icon-set="lucide"
+                xmlns="http://www.w3.org/2000/svg"
+                style="box-sizing: border-box; flex-shrink: 0; height: 14px; overflow: visible; width: 14px"
+              >
+                <path
+                  d="M5.096 2.939q-.253 .086-.379 .308-.041 .086-.041 .253 0 .167 .041 .253 .044 .082 1.623 1.664l1.583 1.583-1.583 1.583q-1.579 1.582-1.623 1.668-.041 .082-.041 .235 0 .154 .034 .24 .038 .082 .133 .181 .099 .095 .181 .133 .086 .034 .24 .034 .154 0 .242-.048 .093-.051 1.904-1.862 1.815-1.815 1.863-1.904 .051-.093 .051-.26 0-.167-.044-.25-.041-.085-1.86-1.907l-1.442-1.428q-.335-.335-.461-.417-.099-.072-.199-.072h-.041q-.14 0-.181 .013z"
+                  fill="#aab8c8"
+                />
+              </svg>
+              <div
+                data-pencil-name="步骤-自动完成检查"
+                style="align-items: center; box-sizing: border-box; display: flex; flex-direction: row; flex-shrink: 0; gap: 8px; height: fit-content; justify-content: flex-start; width: fit-content"
+              >
+                <div
+                  data-pencil-name="步骤序号底"
+                  style="align-items: center; background-color: #FFFFFF; border-radius: 13px; box-sizing: border-box; display: flex; flex-direction: row; flex-shrink: 0; gap: 0px; height: 25px; justify-content: center; outline-offset: -0.5px; outline: 1px solid #D9E3EF; width: 25px"
+                >
+                  <div
+                    data-pencil-name="步骤序号"
+                    style='box-sizing: border-box; color: #66788F; font-family: "Noto Sans SC", system-ui, sans-serif; font-size: 11px; font-style: normal; font-weight: 700; letter-spacing: 0px; line-height: normal; text-align: left; white-space: nowrap'
+                  >
+                    2
+                  </div>
+                </div>
+                <div
+                  data-pencil-name="步骤文字"
+                  style='box-sizing: border-box; color: #66788F; font-family: "Noto Sans SC", system-ui, sans-serif; font-size: 12px; font-style: normal; font-weight: 400; letter-spacing: 0px; line-height: normal; text-align: left; white-space: nowrap'
+                >
+                  自动完成检查
+                </div>
+              </div>
+              <svg
+                data-pencil-name="步骤箭头"
+                viewBox="0 0 14 14"
+                preserveAspectRatio="xMidYMid meet"
+                data-icon-name="chevron-right"
+                data-icon-set="lucide"
+                xmlns="http://www.w3.org/2000/svg"
+                style="box-sizing: border-box; flex-shrink: 0; height: 14px; overflow: visible; width: 14px"
+              >
+                <path
+                  d="M5.096 2.939q-.253 .086-.379 .308-.041 .086-.041 .253 0 .167 .041 .253 .044 .082 1.623 1.664l1.583 1.583-1.583 1.583q-1.579 1.582-1.623 1.668-.041 .082-.041 .235 0 .154 .034 .24 .038 .082 .133 .181 .099 .095 .181 .133 .086 .034 .24 .034 .154 0 .242-.048 .093-.051 1.904-1.862 1.815-1.815 1.863-1.904 .051-.093 .051-.26 0-.167-.044-.25-.041-.085-1.86-1.907l-1.442-1.428q-.335-.335-.461-.417-.099-.072-.199-.072h-.041q-.14 0-.181 .013z"
+                  fill="#aab8c8"
+                />
+              </svg>
+              <div
+                data-pencil-name="步骤-输入自然语言问题"
+                style="align-items: center; box-sizing: border-box; display: flex; flex-direction: row; flex-shrink: 0; gap: 8px; height: fit-content; justify-content: flex-start; width: fit-content"
+              >
+                <div
+                  data-pencil-name="步骤序号底"
+                  style="align-items: center; background-color: #FFFFFF; border-radius: 13px; box-sizing: border-box; display: flex; flex-direction: row; flex-shrink: 0; gap: 0px; height: 25px; justify-content: center; outline-offset: -0.5px; outline: 1px solid #D9E3EF; width: 25px"
+                >
+                  <div
+                    data-pencil-name="步骤序号"
+                    style='box-sizing: border-box; color: #66788F; font-family: "Noto Sans SC", system-ui, sans-serif; font-size: 11px; font-style: normal; font-weight: 700; letter-spacing: 0px; line-height: normal; text-align: left; white-space: nowrap'
+                  >
+                    3
+                  </div>
+                </div>
+                <div
+                  data-pencil-name="步骤文字"
+                  style='box-sizing: border-box; color: #66788F; font-family: "Noto Sans SC", system-ui, sans-serif; font-size: 12px; font-style: normal; font-weight: 400; letter-spacing: 0px; line-height: normal; text-align: left; white-space: nowrap'
+                >
+                  输入自然语言问题
+                </div>
+              </div>
+            </div>
+          </div>
+          <div
+            data-pencil-name="提问输入区"
+            style="align-items: flex-start; background-color: #FFFFFF; border-color: #D9E3EF; border-style: solid; border-width: 1px 0px 0px 0px; box-sizing: content-box; display: flex; flex-direction: column; flex-shrink: 0; gap: 12px; height: 195.5px; justify-content: flex-start; margin: -0.5px 0px 0px 0px; padding: 16px 24px 24px 24px; width: 1136px"
+          >
+            <div
+              data-pencil-name="数据库选择提醒"
+              style="align-items: center; background-color: #F7FAFD; border-radius: 10px; box-sizing: border-box; display: flex; flex-direction: row; flex-shrink: 0; gap: 8px; height: fit-content; justify-content: flex-start; padding: 10px 12px; width: 100%"
+            >
+              <svg
+                data-pencil-name="提醒图标"
+                viewBox="0 0 14 14"
+                preserveAspectRatio="xMidYMid meet"
+                data-icon-name="info"
+                data-icon-set="lucide"
+                xmlns="http://www.w3.org/2000/svg"
+                style="box-sizing: border-box; flex-shrink: 0; height: 14px; overflow: visible; width: 14px"
+              >
+                <path
+                  d="M6.692 .602q-1.162 .041-2.228 .505-1.063 .462-1.904 1.268-.837 .804-1.343 1.853-.489 1.008-.602 2.157-.027 .195-.027 .615 0 .42 .027 .615 .113 1.149 .602 2.157 .659 1.401 1.897 2.338 1.241 .936 2.751 1.203 .533 .099 1.135 .099 .755 0 1.432-.154 .68-.153 1.354-.475 1.261-.618 2.163-1.702 .903-1.083 1.255-2.444 .294-1.117 .181-2.252-.113-1.135-.602-2.171-.588-1.203-1.62-2.085-1.029-.881-2.314-1.275-1.008-.307-2.157-.252zM7.66 1.791q1.076 .14 1.992 .68 .916 .54 1.562 1.408 .828 1.104 1.009 2.547 .013 .167 .013 .574 0 .407-.013 .574-.14 1.162-.721 2.13-.582 .963-1.535 1.623-.475 .335-1.049 .561-.575 .222-1.19 .307-.253 .041-.728 .041-.475 0-.728-.041-1.077-.153-1.959-.687-.881-.533-1.527-1.387-.827-1.104-1.009-2.547-.013-.167-.013-.574 0-.407 .013-.574 .14-1.121 .67-2.051 .533-.93 1.432-1.589 .544-.407 1.207-.67 .666-.267 1.326-.325l.253-.027q.096-.014 .475 0 .38 .013 .52 .027zM6.901 4.102q-.181 .027-.321 .167-.209 .212-.154 .506 .054 .294 .321 .42 .099 .041 .253 .041 .253 0 .42-.167 .127-.127 .154-.308 .055-.294-.157-.502-.208-.212-.516-.157zM6.846 6.439q-.253 .086-.379 .308l-.041 .086v2.464q0 .181 .034 .266 .038 .083 .12 .168 .085 .082 .188 .133 .106 .048 .232 .048 .126 0 .229-.048 .106-.051 .188-.133 .085-.085 .12-.168 .037-.085 .037-.266v-2.464l-.041-.086q-.099-.181-.28-.267-.085-.041-.226-.047-.14-.007-.181 .006z"
+                  fill="#66788f"
+                />
+              </svg>
+              <div
+                data-pencil-name="提醒文字"
+                style='box-sizing: border-box; color: #66788F; font-family: "Noto Sans SC", system-ui, sans-serif; font-size: 12px; font-style: normal; font-weight: 400; letter-spacing: 0px; line-height: normal; text-align: left; white-space: nowrap'
+              >
+                请先在顶部选择数据库，完成后即可输入问题。
+              </div>
+            </div>
+            <div
+              data-pencil-name="自然语言输入框"
+              style="align-items: flex-start; background-color: #F7F9FC; border-radius: 16px; box-sizing: border-box; display: flex; flex-direction: column; flex-shrink: 0; gap: 18px; height: fit-content; justify-content: flex-start; outline-offset: -0.5px; outline: 1px solid #D9E3EF; padding: 16px 16px 14px 16px; width: 100%"
+            >
+              <div
+                data-pencil-name="输入框占位文字"
+                style='box-sizing: border-box; color: #8A99AC; font-family: "Noto Sans SC", system-ui, sans-serif; font-size: 13px; font-style: normal; font-weight: 400; letter-spacing: 0px; line-height: 21px; text-align: left; width: 100%'
+              >
+                用自然语言描述你的查询，例如：统计上个月各品类的销售额与环比变化…
+              </div>
+              <div
+                data-pencil-name="输入框操作栏"
+                style="align-items: center; box-sizing: border-box; display: flex; flex-direction: row; flex-shrink: 0; gap: 0px; height: fit-content; justify-content: space-between; width: 100%"
+              >
+                <div
+                  data-pencil-name="当前数据库状态"
+                  style="align-items: center; background-color: #FFFFFF; border-radius: 8px; box-sizing: border-box; display: flex; flex-direction: row; flex-shrink: 0; gap: 6px; height: fit-content; justify-content: flex-start; outline-offset: -0.5px; outline: 1px solid #D9E3EF; padding: 7px 10px; width: fit-content"
+                >
+                  <svg
+                    data-pencil-name="状态数据库图标"
+                    viewBox="0 0 13 13"
+                    preserveAspectRatio="xMidYMid meet"
+                    data-icon-name="database"
+                    data-icon-set="lucide"
+                    xmlns="http://www.w3.org/2000/svg"
+                    style="box-sizing: border-box; flex-shrink: 0; height: 13px; overflow: visible; width: 13px"
+                  >
+                    <path
+                      d="M6.033 .559q-.91 .025-1.742 .155-.832 .13-1.469 .352-1.483 .521-1.705 1.365-.025 .092-.025 .651v3.418 3.418q0 .559 .025 .651 .197 .755 1.378 1.247 .806 .327 1.936 .495 1.133 .169 2.342 .143 1.235-.025 2.326-.235 .807-.155 1.41-.409 .606-.254 .942-.571 .34-.318 .432-.67 .025-.092 .025-.638v-3.431-3.431q0-.546-.025-.638-.184-.714-1.276-1.193-1.092-.483-2.885-.641-.273-.026-.651-.038l-.479-.013q-.13 0-.559 .013zM7.097 1.638q1.914 .092 3.043 .571 .286 .13 .486 .273 .203 .143 .19 .235 .013 .025-.066 .105-.245 .26-.889 .488-.644 .226-1.514 .356-.495 .066-.828 .085-.33 .019-1.019 .019-.689 0-1.022-.019-.33-.019-.825-.085-.752-.105-1.34-.292-.583-.187-.895-.41-.092-.066-.165-.142-.069-.08-.069-.105 0-.092 .168-.222 .574-.442 1.917-.68 1.346-.241 2.828-.177zM2.536 4.237q.806 .34 1.974 .508 1.146 .155 2.38 .13 1.273-.038 2.352-.273 .819-.168 1.508-.482l.092-.038-.013 2.443-.038 .054q-.054 .064-.203 .169-.149 .104-.305 .18-.857 .416-2.352 .581-1.494 .162-2.951-.009-.676-.076-1.276-.226-.597-.149-.981-.336-.384-.19-.501-.346l-.051-.067-.013-2.443zM2.561 8.046q1.079 .431 2.768 .574 .314 .038 1.171 .038 .857 0 1.171-.038 1.428-.13 2.415-.444 .404-.143 .676-.273l.08-.038v2.431l-.051 .067q-.155 .219-.682 .441-.527 .219-1.216 .349-1.133 .222-2.393 .222-1.26 0-2.393-.222-.689-.13-1.216-.349-.526-.222-.682-.441l-.051-.067v-2.431l.105 .051q.089 .053 .298 .13z"
+                      fill="#66788f"
+                    />
+                  </svg>
+                  <div
+                    data-pencil-name="状态文字"
+                    style='box-sizing: border-box; color: #66788F; font-family: "Noto Sans SC", system-ui, sans-serif; font-size: 11px; font-style: normal; font-weight: 400; letter-spacing: 0px; line-height: normal; text-align: left; white-space: nowrap'
+                  >
+                    未选择数据库
+                  </div>
+                </div>
+                <div
+                  data-pencil-name="发送按钮-禁用"
+                  style="align-items: center; background-color: #DCE8F5; border-radius: 10px; box-sizing: border-box; display: flex; flex-direction: row; flex-shrink: 0; gap: 0px; height: 38px; justify-content: center; width: 38px"
+                >
+                  <svg
+                    data-pencil-name="发送图标"
+                    viewBox="0 0 17 17"
+                    preserveAspectRatio="xMidYMid meet"
+                    data-icon-name="arrow-up"
+                    data-icon-set="lucide"
+                    xmlns="http://www.w3.org/2000/svg"
+                    style="box-sizing: border-box; flex-shrink: 0; height: 17px; overflow: visible; width: 17px"
+                  >
+                    <path
+                      d="M8.313 2.855q-.103 .017-.191 .079-.083 .058-2.631 2.607l-2.021 2.058q-.444 .44-.565 .61-.066 .104-.066 .241v.05q0 .291 .22 .51 .137 .137 .34 .179 .204 .041 .39-.025 .104-.033 .39-.315 .291-.283 1.669-1.656 1.922-1.922 1.938-1.922 .017 0 .017 4.163v3.656q0 .544 .041 .648 .046 .099 .146 .203 .103 .1 .228 .162 .128 .058 .282 .058 .154 0 .278-.058 .129-.062 .228-.162 .104-.104 .146-.203 .045-.104 .045-.648v-3.656q0-4.163 .017-4.163 .017 0 1.938 1.922 1.378 1.373 1.664 1.656 .291 .282 .395 .315 .187 .066 .39 .025 .203-.042 .34-.179 .22-.219 .22-.51v-.05q0-.137-.066-.241-.121-.17-.565-.626l-2.038-2.042q-2.552-2.565-2.635-2.607-.083-.045-.195-.079-.112-.033-.17-.033-.058 0-.179 .033z"
+                      fill="#8faac7"
+                    />
+                  </svg>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </body>
+</html>

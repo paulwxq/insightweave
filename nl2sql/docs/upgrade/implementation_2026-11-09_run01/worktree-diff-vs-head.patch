@@ -1,0 +1,996 @@
+diff --git a/nl2sql/AGENTS.md b/nl2sql/AGENTS.md
+index 01da4cb..2c095e6 100644
+--- a/nl2sql/AGENTS.md
++++ b/nl2sql/AGENTS.md
+@@ -46,8 +46,6 @@ uv run pytest -m unit -v        # unit tests only
+ uv run pytest -m integration -v # integration tests only
+ uv run pytest -m slow -v        # slow tests only
+ 
+-# Run with coverage
+-uv run pytest --cov=src --cov-report=html --cov-report=term
+ ```
+ 
+ ### Code Formatting and Linting
+diff --git a/nl2sql/README.md b/nl2sql/README.md
+index 3fd4ce7..7f76da8 100644
+--- a/nl2sql/README.md
++++ b/nl2sql/README.md
+@@ -390,8 +390,6 @@ uv run pytest src/tests/unit/nl2sql_father/ -v
+ # 运行集成测试（需要真实数据库连接）
+ uv run pytest src/tests/integration/ -v
+ 
+-# 生成覆盖率报告
+-uv run pytest src/tests/unit/ --cov=src --cov-report=term-missing
+ ```
+ 
+ ---
+diff --git "a/nl2sql/docs/1_DeepAgents_0.7.34\345\215\207\347\272\247\350\257\204\344\274\260\344\270\216\345\256\236\346\226\275\345\273\272\350\256\256.md" "b/nl2sql/docs/1_DeepAgents_0.7.34\345\215\207\347\272\247\350\257\204\344\274\260\344\270\216\345\256\236\346\226\275\345\273\272\350\256\256.md"
+index a281592..de763c7 100644
+--- "a/nl2sql/docs/1_DeepAgents_0.7.34\345\215\207\347\272\247\350\257\204\344\274\260\344\270\216\345\256\236\346\226\275\345\273\272\350\256\256.md"
++++ "b/nl2sql/docs/1_DeepAgents_0.7.34\345\215\207\347\272\247\350\257\204\344\274\260\344\270\216\345\256\236\346\226\275\345\273\272\350\256\256.md"
+@@ -1,261 +1,439 @@
+-# DeepAgents 0.7.34 升级评估与实施建议
++# 最新 DeepAgents 基础上的 NL2SQL 依赖升级评估与实施建议
+ 
+ - 评估日期：2026-11-09
+-- 适用范围：`nl2sql` Python 项目，重点为 `src/modules/db_deepagent`
+-- 当前版本：`deepagents==0.7.25`
+-- 目标版本：`deepagents==0.7.34`
+-- 文档状态：升级评估与实施建议；尚未修改项目实际依赖及业务源码
++- 适用范围：整个 `nl2sql` Python 项目，包括 `db_deepagent`、旧父图/子图、模型与 embedding、数据库适配、API、Web 和开发工具
++- 当前 DeepAgents：`0.7.25`；核对日最新稳定版与本次目标：`0.7.34`
++- 升级策略：**保持 DeepAgents 最新，在兼容性允许时尽量升级其余依赖**
++- 实施状态：尚未实施扩大版本升级；审核后已单独清理项目未使用的依赖，见下方说明
++- 配套文档：[SDK 能力与自研替代分析](2_DeepAgents_0.7.34新特性与项目收益分析.md)
+ 
+-## 1. 评估结论
++**模块边界与 uv 管理约定（两份文档共同适用）：** 本文及配套 doc 2 指导的依赖调整、代码改造和测试仅限仓库内的 `nl2sql/` 模块。该模块由 uv 独立管理，以 `nl2sql/pyproject.toml` 声明依赖、`nl2sql/uv.lock` 锁定版本、`nl2sql/.venv` 运行。文中“项目根”“项目依赖”“整个依赖图”均指此模块；未带模块前缀的 `src/`、`tests/`、`frontend/` 路径均相对 `nl2sql/`，其中 `frontend/app.py` 是 `nl2sql/frontend/app.py`。不扩展到同仓库的 `metaweave/`、仓库根的 `frontend/` 或它们各自的依赖与环境，也不授权升级共享数据库服务端。
+ 
+-可以推进升级，建议采用最小联动升级：更新 DeepAgents 及满足其要求的依赖，并随升级将文件权限参数迁移到公开接口。旧权限参数在目标版本仍兼容，迁移属于建议一并完成的清理。
++在当前工作区执行模块命令前，先进入模块目录：
+ 
+-发布前建议对标准拒绝内容块补充回归测试，验证现有异常收尾。摘要交接的消息 ID 兼容属于未来改写历史消息时的条件风险，不列为本次升级必改项；新增模型拒绝专用错误分类也不是升级前置要求。
++```bash
++cd /opt/projects/insightweave/nl2sql
++```
++
++后续 `uv lock`、`uv sync`、`uv run` 均在此目录执行；测试使用 `uv run --extra dev pytest ...`，工具脚本使用 `uv run python ...`。`uv pip check` 应检查此模块环境，可显式指定 `uv pip check --python .venv/bin/python`。不要通过全局 pip 或其他模块环境维护本模块依赖；更新声明后通过 uv 更新锁文件并同步部署实际需要的 extras。文中 `/tmp` 候选验证是例外：在独立的 NL2SQL 候选目录及其虚拟环境中执行，不能将结果用于其他模块。
++
++**审核后依赖清理：** 用户确认不使用且不计划使用 Redis、pytest-asyncio、pytest-cov，项目已删除这三项声明及 Redis 版本约束，pytest 仅保留在 dev extra（`>=8.4.2`）。当前锁文件同步移除这三包及其不再需要的 coverage，其余包版本未变。下表“当前锁定”、41 项元数据、99/2/5 差异和 §5 回归仍描述清理前的评估基线；候选目录为历史快照，不能照搬并重新引入已删除的依赖。正式升级应从清理后的项目声明重新生成候选和验证记录。
++
++## 1. 结论与范围修正
++
++此前文档采用“只升级 DeepAgents 及其最低必要依赖”的最小联动策略。根据用户澄清，该策略不再作为主方案：LangGraph、checkpoint、PostgreSQL 持久化、SDK、模型适配和其他已声明依赖均重新评估，不因为旧版已能运行就默认保留。
++
++本次已查询 41 项直接依赖、显式约束及重点联动包的最新稳定版本，制作扩大升级候选，完成全新临时环境安装与同范围回归。当前证据支持候选包能共同安装，且所选测试没有出现新增失败；**这不是所有真实服务行为均兼容或已经可上线的结论**。
++
++主要候选包括：DeepAgents `0.7.34`、LangChain `1.4.9`、Core `1.7.6`、LangGraph `1.2.20`、checkpoint `4.3.1`、prebuilt `1.1.1`、SDK `0.4.14`、checkpoint-postgres `3.2.0`。
++
++PyMilvus 按服务端匹配选择：最新版 `3.0.2` 不是无需条件就能替换现有 `2.6.9`；主候选先使用最新 2.6 系列 `2.6.18`，正式实施前确认 Milvus 服务端版本。其他“候选”也须完成下文相关验收后才能成为生产目标。
++
++## 2. 版本清单
++
++“当前锁定”取自本次开始时的项目锁文件；“最新稳定版”来自 PyPI 发布元数据，排除预发布和无可用发布文件的撤回版本。“主候选”是本次实际安装、回归的组合。已是最新的包继续保持，是核对后的结果，不是沿用旧的暂缓清单。
+ 
+-本次已核对官方依赖声明，对比 SDK 源码，在临时目录完成依赖解析与新版包加载测试。新版组合下，现有相关测试共 **1011 项通过、4 项跳过**，没有发现需要重构业务工具的兼容问题。
++### 2.1 Agent 与编排生态
+ 
+-这些结果证明依赖解析和相关单元测试层面的兼容性。真实 Qwen 调用、数据库访问、长对话摘要与历史会话恢复仍需在正式升级后验收，不能仅凭本次结果认定已具备发布条件。
++| 包 | 当前锁定 | PyPI 最新稳定版 | 本次主候选 | 说明 |
++| --- | --- | --- | --- | --- |
++| [`deepagents`](https://pypi.org/project/deepagents/0.7.34/) | `0.7.25` | `0.7.34` | `0.7.34` | 纳入扩大范围升级 |
++| [`langchain`](https://pypi.org/project/langchain/1.4.9/) | `1.4.5` | `1.4.9` | `1.4.9` | 纳入扩大范围升级 |
++| [`langchain-core`](https://pypi.org/project/langchain-core/1.7.6/) | `1.6.10` | `1.7.6` | `1.7.6` | 纳入扩大范围升级 |
++| [`langgraph`](https://pypi.org/project/langgraph/1.2.20/) | `1.2.15` | `1.2.20` | `1.2.20` | 纳入扩大范围升级 |
++| [`langgraph-checkpoint`](https://pypi.org/project/langgraph-checkpoint/4.3.1/) | `4.3.0` | `4.3.1` | `4.3.1` | 纳入扩大范围升级 |
++| [`langgraph-prebuilt`](https://pypi.org/project/langgraph-prebuilt/1.1.1/) | `1.1.0` | `1.1.1` | `1.1.1` | 纳入扩大范围升级 |
++| [`langgraph-sdk`](https://pypi.org/project/langgraph-sdk/0.4.14/) | `0.4.7` | `0.4.14` | `0.4.14` | 纳入扩大范围升级 |
++| [`langgraph-checkpoint-postgres`](https://pypi.org/project/langgraph-checkpoint-postgres/3.2.0/) | `3.1.3` | `3.2.0` | `3.2.0` | 纳入扩大范围升级 |
++| [`langchain-openai`](https://pypi.org/project/langchain-openai/1.7.4/) | `1.7.1` | `1.7.4` | `1.7.4` | 纳入扩大范围升级 |
++| [`openai`](https://pypi.org/project/openai/3.46.0/) | `3.29.0` | `3.46.0` | `3.46.0` | 纳入扩大范围升级 |
++| [`langsmith`](https://pypi.org/project/langsmith/0.14.17/) | `0.14.8` | `0.14.17` | `0.14.17` | 纳入扩大范围升级 |
++| [`langchain-anthropic`](https://pypi.org/project/langchain-anthropic/1.7.10/) | `1.7.6` | `1.7.10` | `1.7.10` | 纳入扩大范围升级 |
++| [`langchain-google-genai`](https://pypi.org/project/langchain-google-genai/4.4.3/) | `4.4.2` | `4.4.3` | `4.4.3` | 纳入扩大范围升级 |
++| [`langchain-protocol`](https://pypi.org/project/langchain-protocol/0.0.21/) | `0.0.19` | `0.0.21` | `0.0.21` | 纳入扩大范围升级 |
++| [`langchain-community`](https://pypi.org/project/langchain-community/0.4.2/) | `0.4.2` | `0.4.2` | `0.4.2` | 已为最新稳定版 |
++| [`langchain-classic`](https://pypi.org/project/langchain-classic/1.0.8/) | `1.0.8` | `1.0.8` | `1.0.8` | 已为最新稳定版 |
++| [`langchain-text-splitters`](https://pypi.org/project/langchain-text-splitters/1.1.3/) | `1.1.3` | `1.1.3` | `1.1.3` | 已为最新稳定版 |
+ 
+-## 2. 升级收益与适用性
++### 2.2 数据访问与驱动
+ 
+-相对 `0.7.25`，本次升级对现有查询链最相关的变化包括：
++| 包 | 当前锁定 | PyPI 最新稳定版 | 本次主候选 | 说明 |
++| --- | --- | --- | --- | --- |
++| [`psycopg`](https://pypi.org/project/psycopg/3.3.8/) | `3.3.6` | `3.3.8` | `3.3.8` | 纳入扩大范围升级 |
++| [`psycopg-binary`](https://pypi.org/project/psycopg-binary/3.3.8/) | `3.3.6` | `3.3.8` | `3.3.8` | 纳入扩大范围升级 |
++| [`psycopg-pool`](https://pypi.org/project/psycopg-pool/3.3.3/) | `3.3.3` | `3.3.3` | `3.3.3` | 已为最新稳定版 |
++| [`pymilvus`](https://pypi.org/project/pymilvus/3.0.2/) | `2.6.9` | `3.0.2` | `2.6.18` | 先确认服务端；主候选保留 2.6 系列，3.0.2 为条件选项 |
++| [`neo4j`](https://pypi.org/project/neo4j/6.4.1/) | `6.1.0` | `6.4.1` | `6.4.1` | 纳入扩大范围升级 |
++| [`pgvector`](https://pypi.org/project/pgvector/0.5.1/) | `0.4.2` | `0.5.1` | `0.5.1` | 纳入扩大范围升级 |
+ 
+-| 变化 | 对本项目的意义 |
+-| --- | --- |
+-| 摘要边界增加 `cutoff_message_id` | 摘要边界之前的消息被删除或列表位置发生变化时，只要保留的边界消息 ID 仍可命中，就能定位保留上下文，避免单纯按旧位置计算导致偏移；不能据此保证任意历史内容编辑都与已有摘要一致 |
+-| 文件中间件支持公开的 `permissions` 参数 | 可以移除当前对 `_permissions` 私有构造参数的依赖 |
+-| 覆盖文件中间件时保留并检查 Agent 权限 | 自定义文件中间件和 Agent 的权限配置具有更明确的一致性约束 |
+-| 模型返回标准拒绝内容时默认抛出错误 | 拒绝结果进入明确的异常处理流程，需要验证项目的错误分类和用户侧输出 |
+-| 摘要中间件开放 `summarizer` 参数 | 后续可独立指定摘要模型或摘要函数，本次可继续保留现有摘要模型策略 |
++### 2.3 模型、SQL、API、Web 与通用运行依赖
+ 
+-近期新增的异步子 Agent 排队、状态通知与 webhook 等能力，当前不会直接改变查询链行为。现有实现通过 `subagents=[]` 并禁用默认通用子 Agent，运行单主 Agent。
++| 包 | 当前锁定 | PyPI 最新稳定版 | 本次主候选 | 说明 |
++| --- | --- | --- | --- | --- |
++| [`dashscope`](https://pypi.org/project/dashscope/2.0.4/) | `1.27.5` | `2.0.4` | `2.0.4` | 跨主版本候选，真实调用/服务行为仍待验收 |
++| [`sqlglot`](https://pypi.org/project/sqlglot/30.30.0/) | `30.22.0` | `30.30.0` | `30.30.0` | 需同步更新 cli.py 的 doctor 版本常量 |
++| [`sqlparse`](https://pypi.org/project/sqlparse/0.6.1/) | `0.5.5` | `0.6.1` | `0.6.1` | 纳入扩大范围升级 |
++| [`fastapi`](https://pypi.org/project/fastapi/0.162.2/) | `0.143.0` | `0.162.2` | `0.162.2` | 纳入扩大范围升级 |
++| [`pydantic`](https://pypi.org/project/pydantic/2.14.3/) | `2.14.1` | `2.14.3` | `2.14.3` | 纳入扩大范围升级 |
++| [`uvicorn`](https://pypi.org/project/uvicorn/0.54.0/) | `0.54.0` | `0.54.0` | `0.54.0` | 已为最新稳定版 |
++| [`streamlit`](https://pypi.org/project/streamlit/1.67.0/) | `1.65.0` | `1.67.0` | `1.67.0` | 纳入扩大范围升级 |
++| [`python-dotenv`](https://pypi.org/project/python-dotenv/1.2.4/) | `1.2.4` | `1.2.4` | `1.2.4` | 已为最新稳定版 |
++| [`pyyaml`](https://pypi.org/project/pyyaml/6.0.3/) | `6.0.3` | `6.0.3` | `6.0.3` | 已为最新稳定版 |
++| [`rich`](https://pypi.org/project/rich/15.0.0/) | `15.0.0` | `15.0.0` | `15.0.0` | 已为最新稳定版 |
++| [`requests`](https://pypi.org/project/requests/2.34.2/) | `2.34.2` | `2.34.2` | `2.34.2` | 已为最新稳定版 |
++| [`redis`](https://pypi.org/project/redis/8.1.0/) | `7.3.0` | `8.1.0` | `8.1.0`（历史候选快照） | 项目未使用；仅因遗留 optional 声明进入全 extras 安装记录，不属于本次业务升级或验收对象 |
++| [`certifi`](https://pypi.org/project/certifi/2026.10.23/) | `2026.2.25` | `2026.10.23` | `2026.10.23` | 纳入扩大范围升级 |
+ 
+-## 3. 依赖联动范围
++### 2.4 测试与开发依赖
+ 
+-### 3.1 需要升级的包
++| 包 | 当前锁定 | PyPI 最新稳定版 | 本次主候选 | 说明 |
++| --- | --- | --- | --- | --- |
++| [`pytest`](https://pypi.org/project/pytest/9.2.0/) | `9.0.2` | `9.2.0` | `9.2.0` | 纳入扩大范围升级 |
++| [`pytest-asyncio`](https://pypi.org/project/pytest-asyncio/1.4.1.post1/) | `1.3.0` | `1.4.1.post1` | `1.4.1.post1`（历史快照） | 审核后已从项目删除，不再纳入升级 |
++| [`pytest-cov`](https://pypi.org/project/pytest-cov/7.1.0/) | `7.0.0` | `7.1.0` | `7.1.0`（历史快照） | 审核后已从项目删除，不再纳入升级 |
++| [`black`](https://pypi.org/project/black/26.10.1/) | `26.3.0` | `26.10.1` | `26.10.1` | 纳入扩大范围升级 |
++| [`ruff`](https://pypi.org/project/ruff/0.17.4/) | `0.15.5` | `0.17.4` | `0.17.4` | 纳入扩大范围升级 |
+ 
+-保留现有锁文件，在临时项目中修改必要约束后，`uv lock` 解析成功，共更新以下 8 个包：
++### 2.5 间接依赖也纳入解析
+ 
+-| 包 | 当前版本 | 本次验证版本 | 升级原因 |
++在隔离副本中更新直接声明和约束后，执行 `uv lock --upgrade`，不是只更新前次 8 个包。相对原锁文件，主候选 **99 项版本更新、2 项新增、5 项移除**；新锁文件共 138 个包条目，实际 Linux/Python 3.12 环境安装并检查 135 个包。
++
++完整差异见 [resolved_changes.csv](upgrade/candidate_2026-11-09/resolved_changes.csv)。历史候选中较大的间接版本变化包括 Pandas `2.3.3 → 3.1.1`、Starlette `0.52.1 → 1.10.0`、cryptography `46.0.5 → 50.0.2`、SQLAlchemy `2.0.48 → 2.1.8`、Anthropic SDK `1.13.0 → 2.6.0` 和 Google GenAI `2.30.1 → 3.0.0`。其中前三包已在审核后按实际直接 import 补为显式依赖，现状及升级决策见 §2.6，不能继续按间接依赖处理。包元数据允许安装和 mock 测试通过，不能替代它们各自的真实接口验收。
++
++QuickJS、浏览器或沙箱等尚未使用的额外集成，不因“尽量更新已有依赖”而自动加入本次安装。未来启用时另行评估。
++
++### 2.6 审核后补齐的三项直接依赖：保留声明，分别决定目标版本
++
++以下三包未列入历史 41 项版本表，但代码直接使用，已按 §11 补齐项目声明。该表补充当前实施决策，不改写历史 41 项元数据。历史候选形成于补齐声明之前，没有这三行，不应解读为有意删除直接依赖。
++
++| 包 | 当前显式声明 | 历史候选实际解析 | 正式升级时的决策与验收 |
+ | --- | --- | --- | --- |
+-| `deepagents` | `0.7.25` | `0.7.34` | 升级目标 |
+-| `langchain` | `1.4.5` | `1.4.9` | 新版 DeepAgents 要求 `>=1.4.9,<2.0.0` |
+-| `langchain-core` | `1.6.10` | `1.7.6` | 新版 DeepAgents 要求 `>=1.7.6,<2.0.0` |
+-| `langsmith` | `0.14.8` | `0.14.17` | 新版 DeepAgents 要求 `>=0.14.17` |
+-| `langchain-anthropic` | `1.7.6` | `1.7.10` | 新版 DeepAgents 要求 `>=1.7.10,<2.0.0` |
+-| `langchain-google-genai` | `4.4.2` | `4.4.3` | 新版 DeepAgents 要求 `>=4.4.3,<5.0.0` |
+-| `langchain-protocol` | `0.0.19` | `0.0.21` | 新版 Core 要求 `>=0.0.20`；本次锁文件解析选择 `0.0.21` |
+-| `certifi` | `2026.2.25` | `2026.10.23` | 新版 Core 要求 `>=2026.10.19`；本次锁文件解析选择 `2026.10.23` |
+-
+-表中“本次验证版本”是已实际解析、加载并测试的组合，不表示每个包都必须使用这一精确版本才能满足上游要求。
+-
+-即使业务模型使用 Qwen，Anthropic 和 Google 两个集成包仍需升级，因为它们是目标版本 DeepAgents 声明的必需依赖。
+-
+-### 3.2 可以保留的依赖
+-
+-以下版本在本次解析及相关测试中保持不变：
+-
+-| 包或组件 | 保留版本 |
+-| --- | --- |
+-| `langgraph` | `1.2.15` |
+-| `langgraph-checkpoint` | `4.3.0` |
+-| `langgraph-prebuilt` | `1.1.0` |
+-| `langgraph-sdk` | `0.4.7` |
+-| `langgraph-checkpoint-postgres` | `3.1.3` |
+-| `langchain-openai` | `1.7.1` |
+-| `openai` | `3.29.0` |
+-| `langchain-community` | `0.4.2` |
+-| `langchain-classic` | `1.0.8` |
+-| `langchain-text-splitters` | `1.1.3` |
+-
+-数据库驱动、Milvus、Neo4j、SQLGlot、FastAPI 等依赖也无需因本次升级而调整。目标版本支持 Python `>=3.11,<4.0`，与项目要求的 Python `>=3.12` 兼容；本次测试解释器为 Python `3.12.13`。
+-
+-### 3.3 项目依赖文件的修改建议
+-
+-在 `pyproject.toml` 中修改以下 4 处版本约束，并更新相关注释：
+-
+-```toml
+-[project]
+-dependencies = [
+-    # 仅列出需要调整的条目，其余依赖保留。
+-    "langchain==1.4.9",
+-    "deepagents==0.7.34",
+-]
+-
+-[project.optional-dependencies]
+-monitoring = [
+-    "langsmith==0.14.17",
+-    # 其余条目保留。
+-]
+-
+-[tool.uv]
+-constraint-dependencies = [
+-    "langchain-core==1.7.6",
+-    # 其余约束保留。
+-]
+-```
++| starlette | 主依赖 `==0.52.1` | `1.10.0`，当时为间接依赖 | 保留主依赖；将 `1.10.0` 作为待验候选，与目标 FastAPI 一起解析并验证生命周期、响应封装、异常及 Host/认证约束；验收后才改精确版本 |
++| pandas | web extra `==2.3.3` | `3.1.1`，当时由 Streamlit 带入 | 保留 web 直接依赖；将 `3.1.1` 作为待验候选，验证实际 DataFrame 构造、数据类型和 Streamlit 表格展示；验收后才改精确版本 |
++| cryptography | 主依赖 `==46.0.5` | `50.0.2`，当时为间接依赖 | 保留主依赖；将 `50.0.2` 单列为跨主版本待验候选，核对 Fernet API、Python/平台 wheel 支持，验证升级前登记密文的解密及现有错误处理；验收后才改精确版本 |
+ 
+-以上只是需要修改条目的示意，不能整体替换现有配置段。
++这里给出的是待验目标，不是本次已经修改的版本。当前精确锁继续有效，直接对当前声明执行 `uv lock --upgrade` 不会越过这三个 `==`；须显式修改所选约束，再生成候选。若保留旧版本，应同时确认它与目标 FastAPI/Streamlit 等约束能共同解析；不满足时记录阻断并调整组合，不能删除直接声明来掩盖冲突。鉴于三包均被直接使用，本方案不采用“有意改为传递依赖”。
+ 
+-`langsmith` 虽然显式锁定在 `monitoring` 可选依赖中，但 DeepAgents 本身也依赖它，旧的 `0.14.8` 约束必须同步更新，否则会与新版要求冲突。
++## 3. 已核对的约束与服务端边界
+ 
+-其余联动包通过重新生成 `uv.lock` 固定。保留原锁文件并进行定向更新，检查最终差异，避免无关依赖随之升级。
++### 3.1 Agent 生态能够共同解析
+ 
+-## 4. 代码影响与修改建议
++- DeepAgents `0.7.34` 要求 LangChain `>=1.4.9,<2`、Core `>=1.7.6,<2`，以及相应 Anthropic、Google 和 LangSmith 最低版本。
++- LangChain `1.4.9` 要求 LangGraph `>=1.2.12,<1.3`，最新稳定版 `1.2.20` 在范围内。
++- LangGraph `1.2.20` 要求 checkpoint `>=4.3.0,<5`、prebuilt `>=1.1.0,<1.2`、SDK `>=0.4.6,<0.5`；本次分别选择 `4.3.1`、`1.1.1`、`0.4.14`。
++- checkpoint-postgres `3.2.0` 要求 checkpoint `>=4.3.0,<5`，与主候选一致。
++- 主候选以 Python `3.12.13` 真实安装验证，无需仅为本方案升级解释器。
+ 
+-### 4.1 文件系统中间件：迁移公开权限参数
++来源：上述版本的 PyPI `Requires-Dist` 发布元数据及候选锁文件。最新版本是在上游约束内选择的，不把 DeepAgents 声明的最低要求当作所有依赖的固定目标。
+ 
+-位置：`src/modules/db_deepagent/agent.py` 的 `build_filesystem_middleware()`。
++### 3.2 数据库 SDK 与服务端分别决定
+ 
+-当前使用：
++[PyMilvus 官方兼容表](https://github.com/milvus-io/pymilvus#compatibility)建议 Milvus 2.6 对应 PyMilvus 2.6.x，Milvus 3.0 对应 PyMilvus 3.0.x。全最新版候选 `pymilvus==3.0.2` 的依赖解析同样成功，但本次未安装和验证该组合；不能仅因解析成功就绕过服务端匹配。
+ 
+-```python
+-FilesystemMiddleware(
+-    backend=backend,
+-    tools=list(_FILE_TOOLS),
+-    tool_token_limit_before_evict=cfg.filesystem.tool_token_limit_before_evict,
+-    _permissions=permissions,
+-)
+-```
++`neo4j==6.4.1`、`pgvector==0.5.1` 已进入主候选，不再因旧评估暂缓就排除。但实际 Neo4j 服务端、PostgreSQL/pgvector 扩展版本和调用行为仍须验收。Python `pgvector` 包升级不等于数据库扩展已升级；PostgreSQL 服务端和数据迁移不由 `uv sync` 完成。
++
++### 3.3 跨主版本依赖的真实调用门槛
++
++DashScope `2.0.4` 已在主候选中安装并通过本次所选 mock/单元级检查。其 `TextEmbedding` 与 ChatTongyi 使用路径、自定义模型 ID/参数/超时/重试仍须真实调用。没有真实验收结果前，不应把候选写成已经保证兼容。
++
++## 4. 必须处理的代码与行为影响
++
++### 4.1 DeepAgents 公开权限参数
++
++在 [agent.py](../src/modules/db_deepagent/agent.py) 的 `build_filesystem_middleware()` 将 `_permissions=permissions` 改为 `permissions=permissions`，其余 backend、只读工具集合和阈值保留。旧参数在 `0.7.34` 仍兼容，但从 `0.7.31` 起弃用，计划在 `0.9.0` 移除；不能同时传新旧参数。
++
++目标 SDK 对自定义文件中间件覆盖实例继承 Agent 权限并检查冲突。保留 Agent 级 `permissions`，并让 `FilesystemMiddleware` 传同一组规则；不要只改一边或传不同列表。实施时验证隐藏文件、只读路径、写入拒绝及装配工具集合。
++
++### 4.2 SQLGlot doctor 的精确版本约束
++
++**本次扩大范围新发现的配套修改：** [cli.py](../src/modules/db_deepagent/cli.py) 的 `_LOCKED_VERSIONS` 仍为 `{"sqlglot": "30.22.0"}`。在主候选中直接运行不接触数据库的 `_collect_dependency_report()`，实际返回 `30.30.0（要求 30.22.0）` 的失败结果。
++
++因此，正式升级到 `sqlglot==30.30.0` 时须同步更新该常量及相关版本说明，并保留 AST、授权 SQL 文本一致、时间/维度守卫回归。不能只改 pyproject 和锁文件，也不能以单元测试总体未新增失败代替 doctor 验收。
++
++### 4.3 LangGraph 与持久化
++
++- `1.2.16` 修复恢复时 Command 更新重复应用、已完成子任务被重跑等路径；`1.2.20` 为同任务内每次 interrupt 提供独立 ID，并增加严格恢复模式。已有暂停会话的 ID、重复恢复与父子图恢复应做专项验证。
++- `1.2.18` 将一般 DeltaChannel 默认快照频率从 1000 更新为 100。但 DeepAgents `0.7.25` 与 `0.7.34` 均为 messages 显式设置 `snapshot_frequency=50`；当前项目继承该通道，因此不能声称本次消息快照频率自动从 1000 变为 100。
++- checkpoint-postgres `3.2.0` 增加 `prune()`。**`keep_latest` 明确拒绝 DeltaChannel 线程，不能替换当前 DeepAgents 活跃线程清理。** `strategy="delete"` 仅可在现有会话锁、保留期、归属和事务约束之下评估低层复用，不能替代整个维护服务。
++- 本次静态对比 PostgresSaver 的 10 条迁移和 PostgresStore 的 4 条迁移，列表与原版本一致。这不等于已经验证数据库副本恢复、并发、prune 或生产迁移。
++
++能力细节与使用边界见配套文档 §9。来源：[LangGraph 1.2.16](https://github.com/langchain-ai/langgraph/releases/tag/1.2.16)、[1.2.18](https://github.com/langchain-ai/langgraph/releases/tag/1.2.18)、[1.2.20](https://github.com/langchain-ai/langgraph/releases/tag/1.2.20)、[PostgreSQL 3.2.0](https://github.com/langchain-ai/langgraph/releases/tag/checkpointpostgres%3D%3D3.2.0) 发布记录及已安装 wheel 源码。
++
++### 4.4 标准拒答、摘要与私有接口
++
++DeepAgents `0.7.33` 起默认安装标准拒答中间件。目标版中间件发现标准 refusal 块会抛 `ModelRefusalError`，但应用验收必须覆盖完整主 Agent 图，确认异常没有被其他中间件或图内处理转换为正常返回。若异常逃出 `invoke()`，现有 Runner 将其记为 P1 runtime，`_evaluate()` 优先按 runtime 判失败，不会先归为“未提交最终答案”；已打开的预算条目仍在 finally 中调用 `close_run()`。应构造标准 refusal 块，核对异常是否传播、失败分类、预算关闭、日志和 Web 返回；若 `invoke()` 正常返回，检查是否被转换及无最终答案的实际判定，不能伪称已覆盖异常收尾。普通文本拒答不是同一种协议，不要求 Qwen 必然返回标准块。
++
++摘要事件新增 `cutoff_message_id`：SDK 按命中 ID 优先定位、找不到时回退索引。项目 `read_summary_for_handoff()` 在线程轮换时读取摘要，但同时严格检查事件结构：`summary_message` 必须是 HumanMessage，`cutoff_index` 必须是非 bool 的非负整数且不大于消息数，其他可选字段也有类型检查。事件缺失或为 None 才返回“尚无摘要”；结构非法会抛 `AssemblyVerificationError` 并导致轮换失败，不会静默跳过。当前读取器不消费 `cutoff_message_id`，也未发现常规代码主动裁剪原线程消息列表，因此新增字段本身不是当前必改故障。升级仍需触发一次由目标 SDK 实际生成的摘要事件，验证旧字段与消息类型、持久化后冷读及轮换交接；未来实施历史裁剪时再验证 ID 命中与索引回退。
++
++模型标识、Harness Profile 与摘要私有状态依赖仍应集中在现有 adapter。前次最小方案对源码兼容的判断不能自动覆盖所有本次新增依赖；本轮回归只证明实际覆盖的调用路径。
++
++## 5. 本次实际验证结果
++
++### 5.1 安装与依赖
++
++在 `/tmp` 隔离副本中更新候选约束，两个候选均 `uv lock --upgrade` 成功；主候选执行 `uv sync --locked --all-extras --no-install-project`，创建全新 Python 3.12.13 环境。`uv pip check` 检查实际安装的 135 个包，未发现依赖冲突。项目原 `.venv` 没有被替换。
++
++这里“全最新版候选”只做解析；“主候选”才做完整安装和下列回归。不要混用两者证据。
++
++隔离的是候选依赖声明、锁文件和虚拟环境；两套环境的回归均针对 `/opt/projects/insightweave/nl2sql` 下同一份当时工作区源码执行，而非独立代码副本。结果绑定该次工作区状态，不代表后续源码修订已验证。
++
++### 5.2 同范围回归
+ 
+-建议将 `_permissions=permissions` 改为 `permissions=permissions`。
++| 环境 | 收集 | 通过 | 失败 | 跳过 |
++| --- | --- | --- | --- | --- |
++| 当前原环境 | 1166 | 1152 | 10 | 4 |
++| 扩大升级主候选 | 1166 | 1152 | 10 | 4 |
+ 
+-旧参数在 `0.7.34` 中仍可使用，但从 `0.7.31` 起已弃用，计划在 `0.9.0` 移除。新旧参数不能同时传入。
++两环境失败用例 ID 完全相同，均在旧 `tests/unit/api/test_api_routes.py`。这些测试用 TestClient 默认的 `testserver` 访问接口，被现有 `HostAllowlistGuard` 拒绝为 HTTP 400；不是候选版本新增失败。未为了获得全通过结果而放开应用 Host 白名单或修改测试。
+ 
+-新版在自定义 `FilesystemMiddleware` 覆盖默认实例时，会继承 Agent 权限，并拒绝冲突的非空规则。项目当前向 Agent 和文件中间件传递同一份权限规则，本次装配和权限测试通过。
++所选范围包含 db_deepagent 单元测试、API v2、旧父图、SQL 子图核心用例、LLM 工厂、embedding、历史读取、向量适配、检索工具和旧 API 路由。准确路径与失败 ID 见 [validation_summary.json](upgrade/candidate_2026-11-09/validation_summary.json)。**这不是整个仓库测试库全部通过；4 项数据库相关跳过不算真实数据库验收。**
+ 
+-建议本次一并完成参数迁移，验证只读路径、隐藏文件拒绝、写入拒绝，以及默认 15 个工具的集合保持符合项目约定。
++复跑时须继续显式传入该 JSON 的完整 `test_paths` 列表。`pytest.ini` 默认 `testpaths = src/tests` 不包含 `tests/unit/api/test_api_routes.py` 等模块根 `tests/` 路径；仅运行默认 `uv run --extra dev pytest` 无法复现这里的范围和 10 个已知失败。
+ 
+-### 4.2 摘要交接：条件风险与可选兼容
++测试子进程移除了代理环境变量，避免本机 SOCKS 环境干扰；未打印凭据，也未将该环境问题当作升级缺陷。
+ 
+-位置：`src/modules/db_deepagent/agent.py` 的 `read_summary_for_handoff()`。
++### 5.3 内存 checkpoint 跨版本探针
+ 
+-当前函数读取 `_summarization_event`，并要求 `cutoff_index` 不超过当前消息数。新版摘要事件增加可选字段 `cutoff_message_id`，SDK 优先按消息 ID 定位边界，找不到 ID 时回退到旧索引。
++使用无模型、无数据库的 StateGraph 与 DeepAgents 消息 DeltaChannel：原版本写入一轮消息，保存内存 Saver 的原始存储；新版恢复后追加一轮并从新编译图冷读；最后由旧版本读取新版存储。三步均通过（消息数分别为 2、4、4）。
+ 
+-当前调用路径与现有读取方式兼容，无需为升级强制修改交接函数。`runner.py` 只在线程轮换时通过 `_handoff()` 调用该函数，交接函数只读取摘要文本，并不负责为模型重建上下文。
++探针只加载自己生成的本地样本，证明该样本的序列化/增量重放可跨版本，不覆盖真实 PostgreSQL、所有私有账本、长线程、正在暂停的旧会话或任意降级路径。
+ 
+-项目使用 DeepAgents 的 `SummarizationMiddleware`：摘要事件记录在私有状态中，原始 `messages` 日志保留；它与会使用 `RemoveMessage` 重写历史的 LangChain 同名中间件不同。当前项目代码中未发现 `RemoveMessage`、`REMOVE_ALL_MESSAGES`、`trim_messages` 或主动缩短原线程消息列表的调用；维护服务按线程清理 checkpoint，也不是删除保留线程内的前序消息。因此，本次未发现常规运行能触发旧摘要索引超过消息数的路径。
++### 5.4 尚未完成的兼容性验收
+ 
+-本次仅用人工构造的摘要事件和缩短后的消息列表验证了以下条件性差异，并非复现真实业务链路产生的故障：
++- 在数据库副本上恢复旧 PostgreSQL checkpoint、完整证据账本、长线程和线程轮换；验证升级后写入、冷读与回退。
++- 真实 Qwen、DashScope embedding、自定义 base_url、超时及工具调用；跨主版本模型 SDK 的真实请求行为。
++- 确认 Milvus、Neo4j、PostgreSQL 与 pgvector 扩展实际版本，并验证相应驱动。
++- 将 cryptography `46.0.5 → 50.0.2` 按 §2.6 单独验收：在受控环境配置 `SOURCE_CREDENTIAL_KEY`，使用升级前生成的有效登记密文验证解密，覆盖缺失密钥、错误密钥和损坏密文的现有错误路径，确认不泄露密钥或明文。普通 mock 路径通过不能替代 Fernet 兼容验证。
++- 在启用 PgVector 的部署中，验证 `pg_connection.py` 初始化时的 `register_vector` 及后续池连接上的实际向量参数适配/结果解码。当前仅对初始化时借出的一条连接注册，`get_connection()` 不重复注册；应同时持有多条连接并核对不同 PostgreSQL backend PID，覆盖另一条物理连接及扩池新建连接。简单归还再借可能复用原连接，启动日志成功不足以证明池中所有连接都已注册；若复现缺失适配，另行修复连接初始化策略并回归，不能直接归因于升级新增故障。
++- 触发目标 SDK 实际摘要，验证 `_summarization_event.cutoff_index`、HumanMessage 类型及 §4.4 的结构约束，覆盖持久化冷读和线程轮换；构造非法事件确认按既有协议明确失败。以标准 refusal 块覆盖完整主 Agent 图到 Runner 的异常传播及预算收尾，记录 `invoke()` 是抛错还是正常返回。
++- 对两处 `sqlparse` 校验入口执行 SQL 解析回归。DashScope `2.0.4` 与 Starlette `1.10.0` 属跨主版本候选，优先完成真实模型/embedding 调用与 API 生命周期/响应验收，不能以“0 个新增单测失败”代替这些路径覆盖。
++- 验收 Pandas `3.1.1` 下 Streamlit 页面和数据表格行为。
++- 新 FastAPI/Starlette 生命周期、所有对外 API、Streamlit 页面、数据表格及认证/Host 约束。
++- 修复或隔离旧 API 测试的 Host 前提，并完成固定验收题集。相关真实服务与回退验证通过后，才能确认生产兼容性。
+ 
+-1. 摘要事件保留旧的 `cutoff_index=5`，并记录一个有效的 `cutoff_message_id`。
+-2. 人工模拟删除摘要边界之前的历史，当前消息列表只剩 1 条，消息 ID 仍可命中。
+-3. 新 SDK 能正确恢复“摘要 + 保留消息”。
+-4. 项目交接函数抛出 `AssemblyVerificationError`，原因是旧索引超过当前消息数。
++## 6. 面向 Agent 的实施步骤与完成条件
+ 
+-只有未来引入历史消息裁剪或外部改写 checkpoint 消息列表等能力时，才需要重新评估此差异。届时可做最小兼容：只有 `cutoff_message_id` 在当前消息中实际命中时，才按命中的位置检查边界；ID 缺失或未命中时仍回退旧索引并保留结构校验，不能仅凭字段存在就跳过校验。
++本节是执行计划，所有复选框初始均为未完成，不代表已经实施。执行者应逐步落实并更新状态；无需重新执行 §10–§11 已完成的依赖清理和补齐，但必须检查其未被覆盖。本文的模块/uv 约定、§2.6 的直接依赖决策和 §5.4 的验收边界共同约束所有步骤。
+ 
+-本次保留现有摘要与交接回归测试；若未来实施上述兼容，再补充命中 ID 和回退索引的针对性用例。读取摘要文本的职责保持不变，不新增边界模型，也不把 SDK 私有状态直接复制到新线程。真实摘要生成和持久化恢复仍属于第 5.3 节待验收范围，与本节人工构造验证不同。
++**目标：** 在 `nl2sql/` 内完成 DeepAgents 0.7.34 及兼容依赖升级、必要配套修订和分层验收，保留可恢复的原环境与记录。
+ 
+-### 4.3 模型拒绝：验证错误分类与返回结果
++**实施方式：** 从当前模块声明重建候选，先验证解析与代码，再在受控服务和数据副本上验收；doc 2 的可选能力接入不随本次依赖升级实施。
+ 
+-位置：`src/modules/db_deepagent/runner.py`，以及 Web API v2 的结果映射。
++**技术与输入：** uv、Python 3.12、当前模块源码/锁文件、本文件 §2–§5、当前部署服务版本与所用 extras。历史候选仅用于比较版本和复核旧证据。
+ 
+-新版默认添加 `ModelRefusalMiddleware`，对标准拒绝内容块抛出 `ModelRefusalError`。它不会仅凭普通文本推断模型拒绝。
++### 6.1 保存当前基线并确认验收环境
+ 
+-当前 Runner 已捕获执行异常并归类为运行失败，可以进入收尾流程。建议作为升级行为回归，人工构造标准 `refusal` 内容块，验证新增中间件抛出异常后：
++- [ ] 在 `nl2sql/` 目录检查当前 `pyproject.toml`、`uv.lock`、`.venv` 版本与工作区修改，保留用户已有内容。将当前源码提交号、未提交差异、依赖文件副本、Python/uv 版本和实际启用的 extras 写入本次实施记录；仅记录依赖版本，不导出环境变量或凭据。
++- [ ] 新建本次记录目录，例如 `docs/upgrade/implementation_2026-11-09_run01/`，已有同名目录则使用新后缀。下文以 `NL2SQL_REPORT_DIR` 表示该目录；历史 `candidate_2026-11-09/` 不覆盖、不充当升级补丁。
++- [ ] 确认 Milvus、Neo4j、PostgreSQL、pgvector 扩展实际版本，以及模型、embedding、数据库副本和 Web 验收入口；检查所需密钥可通过既有配置机制提供。缺少真实服务时，先完成不依赖它的步骤，并将对应验收标记“未执行/阻塞”，不能写成通过。
++- [ ] 在原环境运行下方同范围回归并保存为 baseline；记录测试开始时的源码状态。当前 10 个旧 API Host 失败允许作为对照基线保留，不允许以关闭生产 Host 守卫获得全绿。
+ 
+-- 不会被误判为查询成功或普通的“未提交最终答案”。
+-- 错误信息、模型调用观测与预算收尾保持一致。
+-- Web 返回和日志能清楚表达失败原因。
++**基线产物：** 当前依赖/源码状态、原环境版本清单、服务版本及可用性、baseline XML/日志。切换环境前应保留可复建原环境的锁文件及安装来源；涉及数据副本时保存可恢复备份，禁止默认对共享生产库试运行。
+ 
+-该回归测试无需调用真实模型。真实模型验收时，仅当模型返回标准拒绝内容块，才验证这一异常路径；不要求 Qwen 必须产生该块，也不把普通文本拒答认定为同一行为。是否单独增加模型拒绝错误分类，可根据产品错误协议决定，不是依赖升级的前置要求。
++正式模块环境将在 §6.3 删除重建。删除前应在独立基线目录用保存的旧声明/锁文件重建并验证旧环境，记录其 Python 路径，供后续原/新环境对照和跨版本探针使用；不要依赖即将删除的 `nl2sql/.venv` 作为唯一旧环境。
+ 
+-### 4.4 已核对且未发现必须修改的部分
++**同范围回归命令（baseline 与升级后 candidate 各运行一次）：** 先在模块目录设置本次新目录与标签；升级后使用同一目录，将 `NL2SQL_TEST_LABEL` 改为 `candidate`。以下命令仅运行现有显式测试列表，退出码按实际 pytest 结果保留。
+ 
+-对比 `0.7.25` 与 `0.7.34` 的 SDK 源码后：
++```bash
++export NL2SQL_REPORT_DIR=docs/upgrade/implementation_2026-11-09_run01
++export NL2SQL_TEST_LABEL=baseline
++uv run --locked --extra dev python - <<'PYTEST_RUN'
++import json
++import os
++from pathlib import Path
++import subprocess
++import sys
+ 
+-- `_models.py` 和 Harness Profile 解析文件未变化，项目使用的模型标识与 Profile 私有接口仍兼容。
+-- `PatchToolCallsMiddleware` 源码未变化。
+-- `CompositeBackend` 构造签名保持兼容。
+-- `DeepAgentState` 继承、消息 `DeltaChannel`、工具 Schema 和默认工具集合通过现有测试。
+-- 现有业务工具无需因本次升级重构。
++report = Path(os.environ["NL2SQL_REPORT_DIR"])
++report.mkdir(parents=True, exist_ok=True)
++label = os.environ["NL2SQL_TEST_LABEL"]
++if label not in {"baseline", "candidate"}:
++    raise ValueError("测试标签必须为 baseline 或 candidate")
++paths = json.loads(Path(
++    "docs/upgrade/candidate_2026-11-09/validation_summary.json"
++).read_text())["test_paths"]
++xml = report / f"{label}-tests.xml"
++log = report / f"{label}-tests.log"
++if xml.exists() or log.exists():
++    raise FileExistsError("本标签已有记录，请使用新的实施目录")
++with log.open("w") as stream:
++    result = subprocess.run(
++        [sys.executable, "-m", "pytest", *paths, "-q", f"--junitxml={xml}"],
++        stdout=stream, stderr=subprocess.STDOUT,
++    )
++print(f"pytest exit={result.returncode}; XML={xml}; log={log}")
++raise SystemExit(result.returncode)
++PYTEST_RUN
++```
+ 
+-私有接口仍需在后续升级中继续核对；本次兼容不代表上游承诺长期稳定。
++执行者须读取日志并解析 XML，比较收集/通过/失败/跳过数量及完整失败 ID 集合，不只比较最后一行。若代理等本机环境问题干扰测试，定位并记录必要的子进程环境调整，两次采用相同条件。历史 1166 项是参考；新增必要测试后数量可以增加，须说明差异。
+ 
+-## 5. 已完成的验证与边界
++### 6.2 落定版本并重建候选
+ 
+-### 5.1 验证方式
++- [ ] 从当前模块声明制作隔离的 NL2SQL 候选目录，复制当前 pyproject 和锁文件；候选使用独立 `.venv`，不借用其他模块环境。按 §2 表及 §2.6 写下每个目标版本和保留旧版的理由；这一步先确定发布目标，不在执行中无记录地改追另一批“最新版”。
++- [ ] 保留 starlette、cryptography 主依赖和 pandas 的 web 直接声明；分别显式选择新精确版本或记录旧版限制。保留 pytest 仅在 dev；不恢复 Redis、pytest-asyncio、pytest-cov，也不添加 QuickJS、异步 Agent Server 等可选集成。
++- [ ] 在候选目录更新直接版本与 uv 约束，再执行 `uv lock --upgrade`、`uv sync --locked --all-extras --no-install-project`，并用候选 `.venv/bin/python` 显式执行依赖检查。全部 extras 用于本次开发/Web 验证；部署安装另以实际所需组为准。解析失败须定位冲突链，按实际约束调整组合，不通过删除在用直接依赖规避冲突。
++- [ ] 对比当前与新锁文件，输出直接依赖决策表、全包增删/版本差异、安装和 `uv pip check --python .venv/bin/python` 日志；核对 Python/平台支持及 §3 的服务端边界。
+ 
+-1. 从 PyPI 获取目标版本元数据和发布 wheel，核对实际依赖与 API。
+-2. 将项目 `pyproject.toml`、`uv.lock` 复制到临时目录，修改必要约束后执行 `uv lock`。
+-3. 将上述 8 个新版包安装到临时目录，通过 `PYTHONPATH` 优先加载；其余依赖沿用原虚拟环境。
+-4. 确认实际加载的 DeepAgents 为 `0.7.34`，LangChain 为 `1.4.9`，Core 为 `1.7.6`。
+-5. 分别运行当前版本基线与新版组合的相关测试。
++**完成条件：** 新组合可安装且依赖检查通过；三项直接依赖决策明确；原环境仍可用于对照。不宣称真实业务已经兼容。
+ 
+-这不是一次从空环境执行的完整 `uv sync` 安装验证。项目原虚拟环境中的包未被替换。
++### 6.3 修改必要代码并纳入当前模块
+ 
+-### 5.2 测试结果
++下表列出本步的改动与验证对应关系，不表示改完一项就立即在旧环境测试。新公开权限参数和 doctor 目标版本依赖新环境；表中运行验证必须等本节 `.venv` 删除重建且版本检查通过后执行，不将旧 SDK/旧依赖中的预期不匹配当作升级回归失败。
+ 
+-| 环境 | 测试范围 | 结果 |
++| 文件（相对 `nl2sql/`） | 必要改动 | 对应验证 |
+ | --- | --- | --- |
+-| 当前版本基线 | `src/tests/db_deepagent/unit/` | 602 通过，4 跳过 |
+-| 新版本组合 | `src/tests/db_deepagent/unit/` 与 `src/tests/unit/api/v2/` | 779 通过，4 跳过 |
+-| 新版本组合 | 旧父图、SQL 子图与 LLM 工厂单元测试 | 232 通过 |
+-
+-新版组合合计 **1011 通过、4 跳过**；当前版本基线不重复计入新版总数。
+-
+-首次基线执行遇到本机 SOCKS 代理配置与缺失 `socksio` 的环境问题。在测试子进程中移除代理环境变量后，基线通过；新版对照使用同样处理。这一问题并非升级引入，也没有因此修改项目依赖。
+-
+-### 5.3 尚未覆盖的验证
+-
+-- 在全新虚拟环境中按新锁文件完成完整安装。
+-- 真实 Qwen 模型的工具调用、超时和摘要调用；标准拒绝异常路径尚未做专项验证，不能假定普通文本拒答会产生标准内容块。
+-- PostgreSQL、Milvus、Neo4j 的真实业务链路。
+-- PostgreSQL 持久化中的旧会话恢复、摘要状态兼容与线程轮换。
+-- 固定验收题集的端到端结果。
+-
+-### 5.4 临时证据位置
+-
+-本次依赖解析副本、下载源码和测试日志位于：
+-
+-```text
+-/tmp/insightweave-deepagents-eval-rpqywuqe/
+-├── pyproject.toml
+-├── uv.lock
+-├── site/                        # 8 个新版包及其发布元数据
+-├── wheels/                      # 下载并解压的 SDK 与依赖源码
+-├── baseline-tests.log
+-├── baseline-tests.xml
+-├── upgrade-tests.log
+-├── upgrade-tests.xml
+-├── legacy-upgrade-tests.log
+-└── legacy-upgrade-tests.xml
++| `pyproject.toml`、`uv.lock` | 将 §6.2 已确认的声明与新锁纳入，保留当前依赖分组与清理结果 | 锁文件一致性、全包差异、直接 import 和实际安装版本 |
++| `src/modules/db_deepagent/agent.py` | `build_filesystem_middleware()` 改用公开 `permissions=`；Agent 与文件中间件继续传同一规则 | `test_assembly.py`、`test_backend_permissions.py`，核对默认 15 工具与隐藏文件/只读/写拒绝 |
++| `src/modules/db_deepagent/cli.py` | `_LOCKED_VERSIONS` 的 SQLGlot 值与最终声明版本一致 | `test_cli_wiring.py`、`test_cli_json.py` 及 `_collect_dependency_report()` 的实际输出 |
++| `AGENTS.md`、`docs/v4/5_db_deepagent详细设计.md` | 更新已选择 SDK 版本/可用源码位置，标明旧基线实测范围，保留原设计 | 引用指向存在且版本对应的材料，不把历史结果改写为新结果 |
++
++- [ ] 准备权限、doctor 中确实缺失的最小行为测试及表中代码改动；已有覆盖可复用。此时可先落盘测试，运行验证留到下述目标环境重建并核对版本后；对拒答、摘要结构、连接池适配按下一步补行为验证，不为简单依赖行增删编写同构测试。
++- [ ] 确认 §6.1 的基线记录和独立旧环境已保存、§6.2 的新锁已验证后，停止使用本模块环境的开发/测试进程，退出已激活的旧虚拟环境。明确删除 **`/opt/projects/insightweave/nl2sql/.venv`**，再由 uv 按新锁文件创建全新环境；仅执行同步旧环境不满足本步骤。
++- [ ] 重建后核对 `sys.executable`、Python 版本、安装包版本，运行 `uv lock --check`、`uv pip check --python .venv/bin/python`，将结果保存至本次实施目录。依赖已切换时，使用 `uv run --locked --extra dev ...` 运行测试与工具，避免执行期间隐式重解锁文件。
++- [ ] 在已验证的新环境中运行表中对应测试与 `_collect_dependency_report()`。需要新增行为测试时，先在该目标环境确认测试能暴露待修行为，再完成实现并确认通过；已提前准备的实现须核对测试能识别原问题，避免在旧依赖环境中错误归因。完成本步定向验证后，再执行 §6.4 的同范围回归。
++- [ ] 不为升级顺带启用 Todo、Memory、技能动态工具、Rubric、子 Agent、QuickJS、审批暂停或新 prune 策略；它们属于 doc 2 的独立能力实验。发现真实兼容缺陷时才扩展代码修复，并记录原因和回归。
++
++**正式模块环境删除与重建命令（仅在执行本步骤时运行）：**
++
++```bash
++cd /opt/projects/insightweave/nl2sql || exit 1
++test "$(pwd -P)" = /opt/projects/insightweave/nl2sql || exit 1
++test -f pyproject.toml && test -f uv.lock || exit 1
++rm -rf -- .venv
++uv sync --locked --all-extras --no-install-project --python 3.12.13
++uv run --locked --extra dev python -c 'import sys; print(sys.executable); print(sys.version)'
++uv lock --check
++uv pip check --python .venv/bin/python
++```
++
++上述删除范围仅是 `nl2sql/.venv`，不是文件系统根目录的 `/.venv`，也不涉及其他模块的环境。Python `3.12.13` 沿用本次已验证解释器；若正式环境需要不同补丁版本，应先记录并重新验证。任一命令失败时停止后续验收，处理原因后重建，不把不完整安装作为通过；执行者应逐条检查退出码。该命令块写入文档不代表已经执行删除。
++
++**完成条件：** 正式模块的旧 `.venv` 已删除，uv 从新锁创建的全新 `.venv` 安装与依赖检查通过；必改代码与最终依赖声明一致，目标版本可构建 Agent，当前预算、证据守卫、工具集合及最终答案协议保持有效。
++
++### 6.4 完成离线与受控场景回归
++
++- [ ] 将同范围回归标签改为 `candidate`，在升级后的模块环境执行 §6.1 命令，归档新 XML/日志。逐项确认失败 ID；基线相同失败可保留为已知问题，任何新增失败必须定位和处理。若修订旧 API 测试前提，使用受允许的 Host，并对修订后的同一源码范围重新做原/新依赖对照，不放开生产白名单。
++- [ ] 用已安装目标 SDK 和受控 Fake 模型触发实际摘要，验证 §4.4 的合法事件、非法结构错误、冷读与线程轮换。优先扩展 `src/tests/db_deepagent/unit/test_summary_context.py` 和相关 Runner 测试；仅手工拼合法字典不足以证明 SDK 事件兼容。
++- [ ] 用标准 refusal 块走完整主图至 Runner，确认 `ModelRefusalError` 是否传播、P1 runtime 与无最终答案的判定优先级、`close_run()` 和 Web 返回；同时保留普通文本拒答的对照。可扩展 `test_runner_persistence.py` 及 API v2 测试，不能只向 Runner 人工抛一个异常代替目标图路径。
++- [ ] 复用历史内存 checkpoint 探针，在本次旧/新环境和全新样本上重跑旧写→新读写→旧读；保存本次脚本、版本、断言和输出。其通过只覆盖本地内存样本。
++- [ ] 运行 SQL AST、授权文本、时间/维度守卫及 source_registry 的真实 Fernet 算法单元测试；确认两处 sqlparse 使用路径均在回归内。
++
++**完成条件：** 没有未解释的新增失败；每项记录明确测试环境、覆盖范围和结果。尚未具备的集成场景留待 §6.5，不拿单元通过替代它们。
++
++### 6.5 在副本与真实服务上完成兼容性验收
++
++- [ ] 在 §6.3 重建模块 `.venv`、§6.4 回归完成后，按 §6.5.1 使用用户提供的命令实际启动后端并完成 HTTP/CORS 冒烟检查；不能仅凭导入成功或 TestClient 测试通过认定服务可启动。
++- [ ] 用已有模块 CLI 在受控环境运行 `uv run --locked --extra dev python -m src.modules.db_deepagent.cli doctor --stage env --json`；该阶段包含环境/服务检查，不是纯离线版本查询。再对已验证归属的实际源运行 `doctor --stage all --source-id <实际短ID> --json`，保存脱敏报告，不能把示例 ID 当真实源。
++- [ ] 按 §5.4 验证旧 PostgreSQL 会话、完整证据账本、长线程、轮换、升级后写入/冷读及回退。对需要的旧暂停会话记录恢复结果；没有此类样本时披露未覆盖，不能推定全部兼容。
++- [ ] 完成真实 Qwen、DashScope embedding、自定义模型参数/超时/工具调用；核对 Milvus/Neo4j/pgvector 对应服务。若启用 PgVector，按不同 backend PID 覆盖池内及扩池连接的向量适配；若复现注册缺陷，最小修复后重跑相关测试。
++- [ ] 在受控密钥下验证升级前登记密文的实际解密及 §5.4 错误路径；验收最终选定的 pandas/Streamlit 页面和 FastAPI/Starlette 全部对外接口、生命周期、异常封装及认证/Host 约束。
++- [ ] 检查验收题集所需源与服务配置后，运行现有 `uv run --locked --extra dev python -m src.modules.db_deepagent.cli acceptance run --rounds 3`，检查其实际业务/静态子进程结果和 `workspace/acceptance/` 报告。该命令会调用真实模型/数据库；只在本步受控环境执行。它不覆盖所有上列专项，不能代替逐项记录。
++
++**完成条件：** 所有实际部署路径的必需验收有可复核结果。未启用的可选后端写明“不适用”及依据；缺少服务、样本或配置写明“未验证”，保持上线条件未满足。
++
++#### 6.5.1 升级后实际启动 NL2SQL 后端（必做）
++
++用户已停止原后端，要求升级后重新启动服务。在本步骤执行时确认端口 8002 可用，再从 `nl2sql/` 目录使用以下原始启动命令：
++
++```bash
++cd /opt/projects/insightweave/nl2sql || exit 1
++NL2SQL_CORS_ORIGINS='http://127.0.0.1:5173,http://localhost:5173' uv run --no-sync uvicorn src.api.main:app --host 127.0.0.1 --port 8002
++```
++
++`--no-sync` 要求 §6.3 已完成新环境安装，启动过程不自动同步依赖。用可持续运行的终端/进程会话承载服务并记录 PID、命令、实际解释器、启动日志与 HTTP 检查结果；测试请求从另一终端发出。不添加 reload 或多 worker 来改变本次运行条件，端口被占用时先确认占用进程归属，不直接终止未知进程。
++
++- [ ] 观察启动完成和应用 lifespan 日志，确认没有导入失败、版本不兼容、配置异常或端口绑定错误；HTTP 检查后进程仍存活，无新增异常 traceback。
++- [ ] 请求真实监听地址的 `/api/v2/health`，验证 HTTP 200、JSON 统一封装及 trace_id；该接口不连接数据库，成功仅证明服务启动和 HTTP 基础链路可用。
++- [ ] 分别对两个允许的 Origin 发起 GET 与 OPTIONS 预检，验证响应的 `Access-Control-Allow-Origin` 与请求 Origin 一致；对未允许 Origin 检查既有 HTTP 403 拒绝行为，保留 Host/Origin 守卫。
++- [ ] 启动通过后继续执行本节真实服务、业务接口与题集验收，不能把 health 成功当作数据库、模型或运行提交路径已通过。交付时保留用户要求启动的后端，报告地址、PID/会话及日志位置；若后续检查要求重启，只管理本次启动的进程。用户另行要求停止时按其指示处理。
++
++可用以下请求检查基础链路；对 `http://localhost:5173` 重复 Origin 检查，未允许 Origin 采用测试值 `http://localhost:5999`：
++
++```bash
++curl --noproxy '*' -i http://127.0.0.1:8002/api/v2/health
++curl --noproxy '*' -i -H 'Origin: http://127.0.0.1:5173' http://127.0.0.1:8002/api/v2/health
++curl --noproxy '*' -i -X OPTIONS -H 'Origin: http://127.0.0.1:5173' -H 'Access-Control-Request-Method: GET' http://127.0.0.1:8002/api/v2/health
+ ```
+ 
+-`/tmp` 中的文件可能被系统清理。正式实施时应重新生成并保存 CI 或升级记录，不将临时文件作为长期验收依据。
++本节记录的是升级后的执行要求；当前编辑文档时不提前启动服务。
++
++### 6.6 汇总结果并完成交付
++
++- [ ] 将本次精确依赖、版本差异、必改代码、验证命令、XML/日志、专项报告和未验证项汇总到本次实施目录。将 doc 1 的实施状态更新为真实进度，不覆盖 §5 与旧候选的历史结果。
++- [ ] 检查 `git diff --check` 和本次变更范围；只包含 `nl2sql/`，保留用户其他修改，不夹带凭据、数据库备份或可解密的业务数据。运行与实际变更相关的格式/静态检查，记录输出。
++- [ ] 交付时分别说明“依赖与代码实施完成”“真实环境验收完成”“可发布条件是否满足”，附遗留失败/阻塞。资料不足时交付已完成成果和准确阻塞项，不能标记整个升级已完成。
+ 
+-临时 `pyproject.toml` 是当时的验证副本，不是实施模板；其中 monitoring 注释仍残留 `langsmith>=0.14.8` 的旧说明，正确要求为 `>=0.14.17`，依赖条目本身已是 `langsmith==0.14.17`。该注释不影响解析结果，保留原副本作为评估证据；正式实施应以第 3.3 节为准修改项目文件并更新注释，不直接覆盖为临时副本。
++### 6.7 发布与回退
+ 
+-## 6. 建议实施顺序与验收条件
++发布通过既有流程进行，实施本文件不自动包含切换共享生产环境。发布前确认验收与备份完整，保留原源码/锁文件及可恢复数据。回退演练须核对旧版本读取新写入 checkpoint/证据数据的能力；不能只执行旧锁文件同步就宣称数据格式已恢复。若无法证明可逆，使用已验证的备份恢复方案并记录其数据时间边界。
+ 
+-1. 保存升级前的依赖文件和可恢复的运行状态，明确本次代码变更范围。
+-2. 修改 4 处版本约束，生成并检查新锁文件，确认包变更范围与本次评估一致。
+-3. 建议将文件中间件迁移到 `permissions` 参数，并补充人工构造标准拒绝内容块的回归测试；保留现有摘要交接实现与测试，不强制引入第 4.2 节的条件性兼容改造。
+-4. 在隔离的新虚拟环境中按锁文件安装并运行相关回归测试。
+-5. 执行真实模型及数据库验收，重点覆盖单表、多表 JOIN、时间和维度证据、结果分析、多轮追问、摘要与线程轮换。
+-6. 验证升级前已存在的持久化会话能够恢复，再按既有发布流程部署。
++用户要求的“尽量更新”不等于无条件使用每个包的最高版本；仅当存在实际上游约束、服务端匹配或已证实的行为问题时，才保留较低版本，并写明限制及复查条件。
+ 
+-单元测试可沿用本次已验证范围；真实集成验收参考：
++## 7. 可复核的候选与证据
+ 
+-- `src/tests/db_deepagent/integration/test_model_capability.py`
+-- `src/tests/db_deepagent/integration/test_model_summary_window.py`
+-- `src/tests/db_deepagent/integration/test_business_cases.py`
+-- `src/modules/db_deepagent/config/acceptance_cases.yaml`
++- [候选说明](upgrade/candidate_2026-11-09/README.md)、[候选 pyproject](upgrade/candidate_2026-11-09/pyproject.toml)、[候选锁文件](upgrade/candidate_2026-11-09/uv.lock)。这些位于文档目录，尚未成为项目实际依赖。
++- [41 项版本元数据摘要](upgrade/candidate_2026-11-09/latest_versions.json)、[全依赖变更 CSV](upgrade/candidate_2026-11-09/resolved_changes.csv)、[验证摘要](upgrade/candidate_2026-11-09/validation_summary.json)。
++- 两份 pytest 日志/XML、checkpoint 探针脚本与结果、安装日志已原样归档至 [evidence](upgrade/candidate_2026-11-09/evidence/README.md)，可独立核对 §5 的统计与断言；该目录另存本轮复核的 pip check 和依赖 doctor 输出，并区分历史原件与新增检查。
++- 原始 PyPI 响应、两个临时候选、虚拟环境及发布记录仍在 `/tmp/insightweave-full-upgrade-amqb1psp/`；临时目录可能被清理。归档未包含完整虚拟环境及旧源码快照，正式实施应生成自己的长期验收记录，不能仅凭本次记录认定重新运行会得到相同结果。
++- Context7 用于了解 LangGraph 持久化与迁移机制；版本、依赖要求和本项目适用性以固定发布元数据、安装包源码和实际检查为准。
++- 本次 GLM-5.3 独立审核及主协调者逐项处置见 [审核记录](upgrade/candidate_2026-11-09/glm_review.md)：共两轮，第二轮确认修订与不修改理由合理，无新增实质问题，无需第三轮；不替代 §5.4 的正式验收。
++
++## 8. 前次最小联动验证的地位
++
++前次仅升级 DeepAgents 及 8 个必要联动包，LangGraph 保留 `1.2.15`，相关测试共 1011 通过、4 跳过。那是旧范围的历史结果，不能当作本次扩大组合已经验收的证明。
++
++此前审核针对该最小范围提出的权限、拒答、摘要边界等结论仍可作为参考，不能替代扩大范围后的独立审核。当前兼容性判断以 §5 的新证据和待验收边界为准。
++
++## 9. 本次扩大范围的 Kimi 独立审核
++
++本次通过 Orca 启动 Kimi Code，同时审核 doc 1 与 doc 2；与此前仅针对 doc 2 的两轮审核分开计数，最多三轮。Kimi 实际查询 Context7 的 DeepAgents / LangGraph 文档，并核对固定版本源码、当前项目调用链、候选元数据和原始测试 XML。Context7 的主分支索引用于发现能力，精确版本结论仍以发布包和发布记录为准。
++
++第一轮：doc 1 无单独必改项；doc 2 的 E1-01 指出 QuickJS PTC 缺少异步入口前提。主协调者核对固定标签 README、eval 工具实现及当前 Runner 后采纳，补入 doc 2 §5.9、§8.2，未因此引入异步执行框架。
++
++第二轮：Kimi 复核修订及两文审核记录，确认 E1-01 已关闭，未发现新增问题，文档审核通过。本次共两轮，无遗留争议，无需第三轮。文档审核不代替 §5.4 的真实服务验收。
++
++## 10. 审核后已实施的未使用依赖清理（2026-11-09）
++
++用户确认 Redis、pytest-asyncio、pytest-cov 当前未使用且未来不计划使用，并要求将 pytest 从主依赖移至 dev extra。本项已实际修改项目文件并同步本地环境，独立于尚未实施的 DeepAgents 扩大版本升级；没有修改业务 Python 代码。
++
++| 清理项 | 核实依据 | 已实施修改 |
++| --- | --- | --- |
++| Redis | 未发现运行时代码导入；遗留缓存配置默认关闭，用户明确不计划使用 | 从 `pyproject.toml` 的 monitoring extra 删除 `redis>=5.0.0`，从 uv 约束删除 `redis==7.3.0`；保留未使用的旧缓存配置，本次没有改配置加载逻辑 |
++| pytest-asyncio | 测试中没有对应导入、异步测试/fixture 或 asyncio 标记 | 从 dev extra 删除 `pytest-asyncio>=0.24.0` |
++| pytest-cov | 仅有 README、AGENTS.md 中的覆盖率命令及 pytest.ini 注释，没有自动执行入口；用户明确不计划使用 | 从 dev extra 删除 `pytest-cov>=4.1.0`，同步删除上述覆盖率命令与注释 |
++| pytest 重复声明 | 主依赖 `>=8.4.2` 与 dev extra `>=7.4.0` 重复，属于开发测试工具 | 删除主依赖声明，仅保留 dev extra 的 `pytest>=8.4.2`，不降低原有效版本下限 |
++| coverage 间接依赖 | 删除 pytest-cov 后不再被依赖 | 随锁文件重算和环境同步移除，无新增直接依赖声明 |
++
++实际修改文件为项目 `pyproject.toml`、`uv.lock`、`pytest.ini`、`README.md`、`AGENTS.md`，以及本次相关评估文档。通过 `uv lock --offline` 更新锁文件，再执行 `uv sync --locked --all-extras --no-install-project --offline` 同步项目 `.venv`。锁文件从 141 个包条目变为 137 个，仅移除 redis、pytest-asyncio、pytest-cov、coverage，其余保留包版本未变；未实施 DeepAgents 或其他包的版本升级。开发环境须启用 dev extra 才会按项目声明安装 pytest。
++
++清理后验证：
++
++- `uv lock --check --offline` 通过；`uv pip check` 检查本地 134 个已安装包，依赖兼容。
++- 移除插件后重跑 §5.2 的同范围 1166 项回归：1152 通过、10 失败、4 跳过；10 个失败 ID 与历史基线集合完全一致，均为旧 API 路由的 Host 白名单前提失败，没有新增失败。本项不代表全仓库或真实服务验收通过。
++- 核对新旧锁文件，确认仅删除上述 4 个包且没有改变保留包版本；`git diff --check` 通过。
++
++`docs/upgrade/candidate_2026-11-09/` 中的候选 pyproject、锁文件、41 项元数据、变更 CSV 和原始测试记录保留为清理前的历史证据，未改写历史结果。正式升级须从清理后的项目声明重新生成候选，不能从该快照恢复已删除的依赖。本节是用户后续要求的依赖清理记录，不属于此前 GLM 两轮文档审核的已审范围。
++
++## 11. 审核后已补齐的直接依赖与版本脚本修复（2026-11-09）
++
++用户指出以下包被业务代码直接导入，但此前仅通过其他包间接安装。已在项目 `pyproject.toml` 中显式声明，使用当前锁定版本，不在本次修补中升级：
++
++| 包 | 当前直接使用位置 | 已补声明 |
++| --- | --- | --- |
++| pandas | `frontend/app.py` 的 Streamlit 数据展示 | web extra：`pandas==2.3.3` |
++| starlette | `src/api/main.py` 的 Headers、`src/api/v2/envelope.py` 的 HTTPException | 主依赖：`starlette==0.52.1` |
++| cryptography | `src/modules/db_deepagent/source_registry.py` 的 Fernet 源库凭据解密 | 主依赖：`cryptography==46.0.5` |
+ 
+-建议发布验收条件：依赖安装成功，相关测试通过，权限限制有效，旧摘要和旧会话可恢复，固定题集结果符合既有标准。标准拒绝内容块的异常收尾通过构造用例验证；真实模型若返回该块，再核对实际链路，不将普通文本拒答或新增专用错误分类作为这一项的前提。
++同时将 `tests/check_langgraph_version.py` 中两处 `pkg_resources.get_distribution(...).version` 替换为标准库 `importlib.metadata.version(...)`，包不存在时捕获 `PackageNotFoundError`。该脚本的版本查询不再依赖 setuptools 提供的遗留 API，后续数据库检查逻辑保留。
+ 
+-如需回退，恢复升级前的依赖文件和配套代码，并重建运行环境。新版本写入的 checkpoint 能否由旧版本读取，尚未在本次评估中验证；正式发布前应使用测试会话演练恢复流程。
++已重新执行 `uv lock --offline` 和锁定环境同步；锁文件仍为 137 个包条目、本地仍为 134 个已安装包，补齐声明没有新增包或改变包版本。`uv pip check` 通过；离线执行脚本中数据库 URI 构造之前的实际版本报告代码，成功读取 LangGraph `1.2.15` 与 checkpoint-postgres `3.1.3`，没有运行脚本后半段的数据库检查。正式扩大升级时应从当前直接依赖声明出发更新这些版本，历史候选快照不代表已经补齐本节声明。本节亦不属于此前 GLM 两轮审核范围。
+ 
+-同时更新 `AGENTS.md` 中的目标 SDK 版本和源码参考，以及相关设计文档中已不再适用的版本或私有接口说明。
++本次修改后再次执行 §5.2 的同范围回归（包含 API v2 与真实 Fernet 算法的源登记解密单元测试）：1152 通过、4 跳过、10 个旧 API Host 白名单失败，失败 ID 集合与基线完全一致，没有新增失败；未运行真实数据库、模型或 Streamlit 页面验收。
+ 
+-## 7. 官方参考
++## 12. 本文实施计划的 GLM-5.3[1m] 专项审核
+ 
+-- [DeepAgents 0.7.34 发布记录](https://github.com/langchain-ai/deepagents/releases/tag/deepagents==0.7.34)
+-- [目标版本依赖声明](https://github.com/langchain-ai/deepagents/blob/deepagents==0.7.34/libs/deepagents/pyproject.toml)
+-- [PyPI 0.7.34 元数据](https://pypi.org/pypi/deepagents/0.7.34/json)
+-- [摘要消息 ID 边界变更：PR #7567](https://github.com/langchain-ai/deepagents/pull/7567)
+-- [文件中间件权限保留与公开参数：PR #7166](https://github.com/langchain-ai/deepagents/pull/7166)
+-- [模型拒绝等行为变更：0.7.33 发布记录](https://github.com/langchain-ai/deepagents/releases/tag/deepagents==0.7.33)
++本次专项审核覆盖 doc 1 全文，重点是后续补充的 §6 实施计划及 §10–§11 已实施记录，与 §7 所引历史两文审核分开计数。共两轮，由主协调者结合当前代码独立核实反馈后修订；没有执行依赖升级、删除 `.venv` 或启动服务。
+ 
+-API 文档通过 Context7 查询；最终依赖要求与接口兼容性以本次获取的目标版本发布元数据和 wheel 源码为准。
++- 第一轮发现 D1R1-01（P2）：§6.3 原文可能引导执行者在旧环境中改用公开 `permissions=`、更新 doctor 版本常量后立即测试。当前 DeepAgents 0.7.25 只有 `_permissions`，因此旧环境的预期不匹配会被误当作升级失败。主协调者检查实际安装签名后采纳，将顺序明确为准备改动→保存基线并重建模块 `.venv`→核对目标版本→定向测试→同范围回归；本轮无拒绝项。
++- 第二轮复核确认 D1R1-01 已关闭，未发现新增实质问题，文档审核通过，无需第三轮。审核通过只说明计划与当前代码、依赖及证据边界一致，不代表 §6 已执行或 §5.4 的真实环境验收通过。
+diff --git a/nl2sql/pyproject.toml b/nl2sql/pyproject.toml
+index 2cb85ce..5f94b88 100644
+--- a/nl2sql/pyproject.toml
++++ b/nl2sql/pyproject.toml
+@@ -7,11 +7,13 @@ requires-python = ">=3.12"
+ dependencies = [
+     # LangGraph核心
+     "fastapi==0.143.0",
++    "starlette==0.52.1",
+     "langchain==1.4.5",
+     "langgraph==1.2.15",
+     "uvicorn==0.54.0",
+     # 数据库驱动
+     "psycopg[binary]==3.3.6",
++    "cryptography==46.0.5",
+     "pgvector>=0.2.0",
+     "neo4j>=5.15.0",
+     # SQL处理和验证
+@@ -27,7 +29,6 @@ dependencies = [
+     "PyYAML>=6.0.0",
+     "langchain-community==0.4.2",
+     "psycopg-pool==3.3.3",
+-    "pytest>=8.4.2",
+     "pymilvus>=2.6.5",
+     "langgraph-checkpoint-postgres==3.1.3",
+     "rich==15.0.0",
+@@ -37,19 +38,17 @@ dependencies = [
+ 
+ [project.optional-dependencies]
+ dev = [
+-    "pytest>=7.4.0",
+-    "pytest-asyncio>=0.24.0",
+-    "pytest-cov>=4.1.0",
++    "pytest>=8.4.2",
+     "black>=23.0.0",
+     "ruff>=0.1.0",
+ ]
+ monitoring = [
+     # deepagents==0.7.25 要求 langsmith>=0.14.8（docs/v4/5 §2.1）
+     "langsmith==0.14.8",
+-    "redis>=5.0.0",
+ ]
+ web = [
+     "streamlit==1.65.0",
++    "pandas==2.3.3",
+     "requests==2.34.2",
+ ]
+ 
+@@ -68,5 +67,4 @@ constraint-dependencies = [
+     "pgvector==0.4.2",
+     "pymilvus==2.6.9",
+     "sqlparse==0.5.5",
+-    "redis==7.3.0",
+ ]
+diff --git a/nl2sql/pytest.ini b/nl2sql/pytest.ini
+index 8f9982e..c44b646 100644
+--- a/nl2sql/pytest.ini
++++ b/nl2sql/pytest.ini
+@@ -29,6 +29,3 @@ markers =
+ log_cli = false
+ log_cli_level = INFO
+ log_file_level = DEBUG
+-
+-# 覆盖率选项（如果使用 pytest-cov）
+-# addopts = --cov=src --cov-report=html --cov-report=term
+diff --git a/nl2sql/tests/check_langgraph_version.py b/nl2sql/tests/check_langgraph_version.py
+index 47a7e96..9b1f42f 100644
+--- a/nl2sql/tests/check_langgraph_version.py
++++ b/nl2sql/tests/check_langgraph_version.py
+@@ -2,6 +2,7 @@
+ 
+ import sys
+ import os
++from importlib.metadata import PackageNotFoundError, version
+ 
+ project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+ sys.path.insert(0, project_root)
+@@ -11,7 +12,6 @@ load_dotenv()
+ 
+ from langgraph.checkpoint.postgres import PostgresSaver
+ from src.services.langgraph_persistence.postgres import build_db_uri_from_config
+-import pkg_resources
+ 
+ 
+ def check_versions():
+@@ -21,15 +21,15 @@ def check_versions():
+     print("=" * 80)
+     
+     try:
+-        lg_version = pkg_resources.get_distribution("langgraph").version
++        lg_version = version("langgraph")
+         print(f"\nlanggraph 版本: {lg_version}")
+-    except Exception as e:
++    except PackageNotFoundError as e:
+         print(f"无法获取 langgraph 版本: {e}")
+     
+     try:
+-        lgcp_version = pkg_resources.get_distribution("langgraph-checkpoint-postgres").version
++        lgcp_version = version("langgraph-checkpoint-postgres")
+         print(f"langgraph-checkpoint-postgres 版本: {lgcp_version}")
+-    except Exception as e:
++    except PackageNotFoundError as e:
+         print(f"无法获取 langgraph-checkpoint-postgres 版本: {e}")
+     
+     print("\n" + "=" * 80)
+diff --git a/nl2sql/uv.lock b/nl2sql/uv.lock
+index 8510f52..c591baa 100644
+--- a/nl2sql/uv.lock
++++ b/nl2sql/uv.lock
+@@ -19,7 +19,6 @@ constraints = [
+     { name = "pgvector", specifier = "==0.4.2" },
+     { name = "psycopg-binary", specifier = "==3.3.6" },
+     { name = "pymilvus", specifier = "==2.6.9" },
+-    { name = "redis", specifier = "==7.3.0" },
+     { name = "sqlparse", specifier = "==0.5.5" },
+ ]
+ 
+@@ -398,90 +397,6 @@ wheels = [
+     { url = "https://files.pythonhosted.org/packages/d1/d6/3965ed04c63042e047cb6a3e6ed1a63a35087b6a609aa3a15ed8ac56c221/colorama-0.4.6-py2.py3-none-any.whl", hash = "sha256:4f1d9991f5acc0ca119f9d443620b77f9d6b33703e51011c16baf57afb285fc6", size = 25335, upload-time = "2022-10-25T02:36:20.889Z" },
+ ]
+ 
+-[[package]]
+-name = "coverage"
+-version = "7.13.4"
+-source = { registry = "https://pypi.org/simple" }
+-sdist = { url = "https://files.pythonhosted.org/packages/24/56/95b7e30fa389756cb56630faa728da46a27b8c6eb46f9d557c68fff12b65/coverage-7.13.4.tar.gz", hash = "sha256:e5c8f6ed1e61a8b2dcdf31eb0b9bbf0130750ca79c1c49eb898e2ad86f5ccc91", size = 827239, upload-time = "2026-02-09T12:59:03.86Z" }
+-wheels = [
+-    { url = "https://files.pythonhosted.org/packages/d1/81/4ce2fdd909c5a0ed1f6dedb88aa57ab79b6d1fbd9b588c1ac7ef45659566/coverage-7.13.4-cp312-cp312-macosx_10_13_x86_64.whl", hash = "sha256:02231499b08dabbe2b96612993e5fc34217cdae907a51b906ac7fca8027a4459", size = 219449, upload-time = "2026-02-09T12:56:54.889Z" },
+-    { url = "https://files.pythonhosted.org/packages/5d/96/5238b1efc5922ddbdc9b0db9243152c09777804fb7c02ad1741eb18a11c0/coverage-7.13.4-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:40aa8808140e55dc022b15d8aa7f651b6b3d68b365ea0398f1441e0b04d859c3", size = 219810, upload-time = "2026-02-09T12:56:56.33Z" },
+-    { url = "https://files.pythonhosted.org/packages/78/72/2f372b726d433c9c35e56377cf1d513b4c16fe51841060d826b95caacec1/coverage-7.13.4-cp312-cp312-manylinux1_i686.manylinux_2_28_i686.manylinux_2_5_i686.whl", hash = "sha256:5b856a8ccf749480024ff3bd7310adaef57bf31fd17e1bfc404b7940b6986634", size = 251308, upload-time = "2026-02-09T12:56:57.858Z" },
+-    { url = "https://files.pythonhosted.org/packages/5d/a0/2ea570925524ef4e00bb6c82649f5682a77fac5ab910a65c9284de422600/coverage-7.13.4-cp312-cp312-manylinux1_x86_64.manylinux_2_28_x86_64.manylinux_2_5_x86_64.whl", hash = "sha256:2c048ea43875fbf8b45d476ad79f179809c590ec7b79e2035c662e7afa3192e3", size = 254052, upload-time = "2026-02-09T12:56:59.754Z" },
+-    { url = "https://files.pythonhosted.org/packages/e8/ac/45dc2e19a1939098d783c846e130b8f862fbb50d09e0af663988f2f21973/coverage-7.13.4-cp312-cp312-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:b7b38448866e83176e28086674fe7368ab8590e4610fb662b44e345b86d63ffa", size = 255165, upload-time = "2026-02-09T12:57:01.287Z" },
+-    { url = "https://files.pythonhosted.org/packages/2d/4d/26d236ff35abc3b5e63540d3386e4c3b192168c1d96da5cb2f43c640970f/coverage-7.13.4-cp312-cp312-manylinux2014_ppc64le.manylinux_2_17_ppc64le.manylinux_2_28_ppc64le.whl", hash = "sha256:de6defc1c9badbf8b9e67ae90fd00519186d6ab64e5cc5f3d21359c2a9b2c1d3", size = 257432, upload-time = "2026-02-09T12:57:02.637Z" },
+-    { url = "https://files.pythonhosted.org/packages/ec/55/14a966c757d1348b2e19caf699415a2a4c4f7feaa4bbc6326a51f5c7dd1b/coverage-7.13.4-cp312-cp312-manylinux_2_31_riscv64.manylinux_2_39_riscv64.whl", hash = "sha256:7eda778067ad7ffccd23ecffce537dface96212576a07924cbf0d8799d2ded5a", size = 251716, upload-time = "2026-02-09T12:57:04.056Z" },
+-    { url = "https://files.pythonhosted.org/packages/77/33/50116647905837c66d28b2af1321b845d5f5d19be9655cb84d4a0ea806b4/coverage-7.13.4-cp312-cp312-musllinux_1_2_aarch64.whl", hash = "sha256:e87f6c587c3f34356c3759f0420693e35e7eb0e2e41e4c011cb6ec6ecbbf1db7", size = 253089, upload-time = "2026-02-09T12:57:05.503Z" },
+-    { url = "https://files.pythonhosted.org/packages/c2/b4/8efb11a46e3665d92635a56e4f2d4529de6d33f2cb38afd47d779d15fc99/coverage-7.13.4-cp312-cp312-musllinux_1_2_i686.whl", hash = "sha256:8248977c2e33aecb2ced42fef99f2d319e9904a36e55a8a68b69207fb7e43edc", size = 251232, upload-time = "2026-02-09T12:57:06.879Z" },
+-    { url = "https://files.pythonhosted.org/packages/51/24/8cd73dd399b812cc76bb0ac260e671c4163093441847ffe058ac9fda1e32/coverage-7.13.4-cp312-cp312-musllinux_1_2_ppc64le.whl", hash = "sha256:25381386e80ae727608e662474db537d4df1ecd42379b5ba33c84633a2b36d47", size = 255299, upload-time = "2026-02-09T12:57:08.245Z" },
+-    { url = "https://files.pythonhosted.org/packages/03/94/0a4b12f1d0e029ce1ccc1c800944a9984cbe7d678e470bb6d3c6bc38a0da/coverage-7.13.4-cp312-cp312-musllinux_1_2_riscv64.whl", hash = "sha256:ee756f00726693e5ba94d6df2bdfd64d4852d23b09bb0bc700e3b30e6f333985", size = 250796, upload-time = "2026-02-09T12:57:10.142Z" },
+-    { url = "https://files.pythonhosted.org/packages/73/44/6002fbf88f6698ca034360ce474c406be6d5a985b3fdb3401128031eef6b/coverage-7.13.4-cp312-cp312-musllinux_1_2_x86_64.whl", hash = "sha256:fdfc1e28e7c7cdce44985b3043bc13bbd9c747520f94a4d7164af8260b3d91f0", size = 252673, upload-time = "2026-02-09T12:57:12.197Z" },
+-    { url = "https://files.pythonhosted.org/packages/de/c6/a0279f7c00e786be75a749a5674e6fa267bcbd8209cd10c9a450c655dfa7/coverage-7.13.4-cp312-cp312-win32.whl", hash = "sha256:01d4cbc3c283a17fc1e42d614a119f7f438eabb593391283adca8dc86eff1246", size = 221990, upload-time = "2026-02-09T12:57:14.085Z" },
+-    { url = "https://files.pythonhosted.org/packages/77/4e/c0a25a425fcf5557d9abd18419c95b63922e897bc86c1f327f155ef234a9/coverage-7.13.4-cp312-cp312-win_amd64.whl", hash = "sha256:9401ebc7ef522f01d01d45532c68c5ac40fb27113019b6b7d8b208f6e9baa126", size = 222800, upload-time = "2026-02-09T12:57:15.944Z" },
+-    { url = "https://files.pythonhosted.org/packages/47/ac/92da44ad9a6f4e3a7debd178949d6f3769bedca33830ce9b1dcdab589a37/coverage-7.13.4-cp312-cp312-win_arm64.whl", hash = "sha256:b1ec7b6b6e93255f952e27ab58fbc68dcc468844b16ecbee881aeb29b6ab4d8d", size = 221415, upload-time = "2026-02-09T12:57:17.497Z" },
+-    { url = "https://files.pythonhosted.org/packages/db/23/aad45061a31677d68e47499197a131eea55da4875d16c1f42021ab963503/coverage-7.13.4-cp313-cp313-macosx_10_13_x86_64.whl", hash = "sha256:b66a2da594b6068b48b2692f043f35d4d3693fb639d5ea8b39533c2ad9ac3ab9", size = 219474, upload-time = "2026-02-09T12:57:19.332Z" },
+-    { url = "https://files.pythonhosted.org/packages/a5/70/9b8b67a0945f3dfec1fd896c5cefb7c19d5a3a6d74630b99a895170999ae/coverage-7.13.4-cp313-cp313-macosx_11_0_arm64.whl", hash = "sha256:3599eb3992d814d23b35c536c28df1a882caa950f8f507cef23d1cbf334995ac", size = 219844, upload-time = "2026-02-09T12:57:20.66Z" },
+-    { url = "https://files.pythonhosted.org/packages/97/fd/7e859f8fab324cef6c4ad7cff156ca7c489fef9179d5749b0c8d321281c2/coverage-7.13.4-cp313-cp313-manylinux1_i686.manylinux_2_28_i686.manylinux_2_5_i686.whl", hash = "sha256:93550784d9281e374fb5a12bf1324cc8a963fd63b2d2f223503ef0fd4aa339ea", size = 250832, upload-time = "2026-02-09T12:57:22.007Z" },
+-    { url = "https://files.pythonhosted.org/packages/e4/dc/b2442d10020c2f52617828862d8b6ee337859cd8f3a1f13d607dddda9cf7/coverage-7.13.4-cp313-cp313-manylinux1_x86_64.manylinux_2_28_x86_64.manylinux_2_5_x86_64.whl", hash = "sha256:b720ce6a88a2755f7c697c23268ddc47a571b88052e6b155224347389fdf6a3b", size = 253434, upload-time = "2026-02-09T12:57:23.339Z" },
+-    { url = "https://files.pythonhosted.org/packages/5a/88/6728a7ad17428b18d836540630487231f5470fb82454871149502f5e5aa2/coverage-7.13.4-cp313-cp313-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:7b322db1284a2ed3aa28ffd8ebe3db91c929b7a333c0820abec3d838ef5b3525", size = 254676, upload-time = "2026-02-09T12:57:24.774Z" },
+-    { url = "https://files.pythonhosted.org/packages/7c/bc/21244b1b8cedf0dff0a2b53b208015fe798d5f2a8d5348dbfece04224fff/coverage-7.13.4-cp313-cp313-manylinux2014_ppc64le.manylinux_2_17_ppc64le.manylinux_2_28_ppc64le.whl", hash = "sha256:f4594c67d8a7c89cf922d9df0438c7c7bb022ad506eddb0fdb2863359ff78242", size = 256807, upload-time = "2026-02-09T12:57:26.125Z" },
+-    { url = "https://files.pythonhosted.org/packages/97/a0/ddba7ed3251cff51006737a727d84e05b61517d1784a9988a846ba508877/coverage-7.13.4-cp313-cp313-manylinux_2_31_riscv64.manylinux_2_39_riscv64.whl", hash = "sha256:53d133df809c743eb8bce33b24bcababb371f4441340578cd406e084d94a6148", size = 251058, upload-time = "2026-02-09T12:57:27.614Z" },
+-    { url = "https://files.pythonhosted.org/packages/9b/55/e289addf7ff54d3a540526f33751951bf0878f3809b47f6dfb3def69c6f7/coverage-7.13.4-cp313-cp313-musllinux_1_2_aarch64.whl", hash = "sha256:76451d1978b95ba6507a039090ba076105c87cc76fc3efd5d35d72093964d49a", size = 252805, upload-time = "2026-02-09T12:57:29.066Z" },
+-    { url = "https://files.pythonhosted.org/packages/13/4e/cc276b1fa4a59be56d96f1dabddbdc30f4ba22e3b1cd42504c37b3313255/coverage-7.13.4-cp313-cp313-musllinux_1_2_i686.whl", hash = "sha256:7f57b33491e281e962021de110b451ab8a24182589be17e12a22c79047935e23", size = 250766, upload-time = "2026-02-09T12:57:30.522Z" },
+-    { url = "https://files.pythonhosted.org/packages/94/44/1093b8f93018f8b41a8cf29636c9292502f05e4a113d4d107d14a3acd044/coverage-7.13.4-cp313-cp313-musllinux_1_2_ppc64le.whl", hash = "sha256:1731dc33dc276dafc410a885cbf5992f1ff171393e48a21453b78727d090de80", size = 254923, upload-time = "2026-02-09T12:57:31.946Z" },
+-    { url = "https://files.pythonhosted.org/packages/8b/55/ea2796da2d42257f37dbea1aab239ba9263b31bd91d5527cdd6db5efe174/coverage-7.13.4-cp313-cp313-musllinux_1_2_riscv64.whl", hash = "sha256:bd60d4fe2f6fa7dff9223ca1bbc9f05d2b6697bc5961072e5d3b952d46e1b1ea", size = 250591, upload-time = "2026-02-09T12:57:33.842Z" },
+-    { url = "https://files.pythonhosted.org/packages/d4/fa/7c4bb72aacf8af5020675aa633e59c1fbe296d22aed191b6a5b711eb2bc7/coverage-7.13.4-cp313-cp313-musllinux_1_2_x86_64.whl", hash = "sha256:9181a3ccead280b828fae232df12b16652702b49d41e99d657f46cc7b1f6ec7a", size = 252364, upload-time = "2026-02-09T12:57:35.743Z" },
+-    { url = "https://files.pythonhosted.org/packages/5c/38/a8d2ec0146479c20bbaa7181b5b455a0c41101eed57f10dd19a78ab44c80/coverage-7.13.4-cp313-cp313-win32.whl", hash = "sha256:f53d492307962561ac7de4cd1de3e363589b000ab69617c6156a16ba7237998d", size = 222010, upload-time = "2026-02-09T12:57:37.25Z" },
+-    { url = "https://files.pythonhosted.org/packages/e2/0c/dbfafbe90a185943dcfbc766fe0e1909f658811492d79b741523a414a6cc/coverage-7.13.4-cp313-cp313-win_amd64.whl", hash = "sha256:e6f70dec1cc557e52df5306d051ef56003f74d56e9c4dd7ddb07e07ef32a84dd", size = 222818, upload-time = "2026-02-09T12:57:38.734Z" },
+-    { url = "https://files.pythonhosted.org/packages/04/d1/934918a138c932c90d78301f45f677fb05c39a3112b96fd2c8e60503cdc7/coverage-7.13.4-cp313-cp313-win_arm64.whl", hash = "sha256:fb07dc5da7e849e2ad31a5d74e9bece81f30ecf5a42909d0a695f8bd1874d6af", size = 221438, upload-time = "2026-02-09T12:57:40.223Z" },
+-    { url = "https://files.pythonhosted.org/packages/52/57/ee93ced533bcb3e6df961c0c6e42da2fc6addae53fb95b94a89b1e33ebd7/coverage-7.13.4-cp313-cp313t-macosx_10_13_x86_64.whl", hash = "sha256:40d74da8e6c4b9ac18b15331c4b5ebc35a17069410cad462ad4f40dcd2d50c0d", size = 220165, upload-time = "2026-02-09T12:57:41.639Z" },
+-    { url = "https://files.pythonhosted.org/packages/c5/e0/969fc285a6fbdda49d91af278488d904dcd7651b2693872f0ff94e40e84a/coverage-7.13.4-cp313-cp313t-macosx_11_0_arm64.whl", hash = "sha256:4223b4230a376138939a9173f1bdd6521994f2aff8047fae100d6d94d50c5a12", size = 220516, upload-time = "2026-02-09T12:57:44.215Z" },
+-    { url = "https://files.pythonhosted.org/packages/b1/b8/9531944e16267e2735a30a9641ff49671f07e8138ecf1ca13db9fd2560c7/coverage-7.13.4-cp313-cp313t-manylinux1_i686.manylinux_2_28_i686.manylinux_2_5_i686.whl", hash = "sha256:1d4be36a5114c499f9f1f9195e95ebf979460dbe2d88e6816ea202010ba1c34b", size = 261804, upload-time = "2026-02-09T12:57:45.989Z" },
+-    { url = "https://files.pythonhosted.org/packages/8a/f3/e63df6d500314a2a60390d1989240d5f27318a7a68fa30ad3806e2a9323e/coverage-7.13.4-cp313-cp313t-manylinux1_x86_64.manylinux_2_28_x86_64.manylinux_2_5_x86_64.whl", hash = "sha256:200dea7d1e8095cc6e98cdabe3fd1d21ab17d3cee6dab00cadbb2fe35d9c15b9", size = 263885, upload-time = "2026-02-09T12:57:47.42Z" },
+-    { url = "https://files.pythonhosted.org/packages/f3/67/7654810de580e14b37670b60a09c599fa348e48312db5b216d730857ffe6/coverage-7.13.4-cp313-cp313t-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:b8eb931ee8e6d8243e253e5ed7336deea6904369d2fd8ae6e43f68abbf167092", size = 266308, upload-time = "2026-02-09T12:57:49.345Z" },
+-    { url = "https://files.pythonhosted.org/packages/37/6f/39d41eca0eab3cc82115953ad41c4e77935286c930e8fad15eaed1389d83/coverage-7.13.4-cp313-cp313t-manylinux2014_ppc64le.manylinux_2_17_ppc64le.manylinux_2_28_ppc64le.whl", hash = "sha256:75eab1ebe4f2f64d9509b984f9314d4aa788540368218b858dad56dc8f3e5eb9", size = 267452, upload-time = "2026-02-09T12:57:50.811Z" },
+-    { url = "https://files.pythonhosted.org/packages/50/6d/39c0fbb8fc5cd4d2090811e553c2108cf5112e882f82505ee7495349a6bf/coverage-7.13.4-cp313-cp313t-manylinux_2_31_riscv64.manylinux_2_39_riscv64.whl", hash = "sha256:c35eb28c1d085eb7d8c9b3296567a1bebe03ce72962e932431b9a61f28facf26", size = 261057, upload-time = "2026-02-09T12:57:52.447Z" },
+-    { url = "https://files.pythonhosted.org/packages/a4/a2/60010c669df5fa603bb5a97fb75407e191a846510da70ac657eb696b7fce/coverage-7.13.4-cp313-cp313t-musllinux_1_2_aarch64.whl", hash = "sha256:eb88b316ec33760714a4720feb2816a3a59180fd58c1985012054fa7aebee4c2", size = 263875, upload-time = "2026-02-09T12:57:53.938Z" },
+-    { url = "https://files.pythonhosted.org/packages/3e/d9/63b22a6bdbd17f1f96e9ed58604c2a6b0e72a9133e37d663bef185877cf6/coverage-7.13.4-cp313-cp313t-musllinux_1_2_i686.whl", hash = "sha256:7d41eead3cc673cbd38a4417deb7fd0b4ca26954ff7dc6078e33f6ff97bed940", size = 261500, upload-time = "2026-02-09T12:57:56.012Z" },
+-    { url = "https://files.pythonhosted.org/packages/70/bf/69f86ba1ad85bc3ad240e4c0e57a2e620fbc0e1645a47b5c62f0e941ad7f/coverage-7.13.4-cp313-cp313t-musllinux_1_2_ppc64le.whl", hash = "sha256:fb26a934946a6afe0e326aebe0730cdff393a8bc0bbb65a2f41e30feddca399c", size = 265212, upload-time = "2026-02-09T12:57:57.5Z" },
+-    { url = "https://files.pythonhosted.org/packages/ae/f2/5f65a278a8c2148731831574c73e42f57204243d33bedaaf18fa79c5958f/coverage-7.13.4-cp313-cp313t-musllinux_1_2_riscv64.whl", hash = "sha256:dae88bc0fc77edaa65c14be099bd57ee140cf507e6bfdeea7938457ab387efb0", size = 260398, upload-time = "2026-02-09T12:57:59.027Z" },
+-    { url = "https://files.pythonhosted.org/packages/ef/80/6e8280a350ee9fea92f14b8357448a242dcaa243cb2c72ab0ca591f66c8c/coverage-7.13.4-cp313-cp313t-musllinux_1_2_x86_64.whl", hash = "sha256:845f352911777a8e722bfce168958214951e07e47e5d5d9744109fa5fe77f79b", size = 262584, upload-time = "2026-02-09T12:58:01.129Z" },
+-    { url = "https://files.pythonhosted.org/packages/22/63/01ff182fc95f260b539590fb12c11ad3e21332c15f9799cb5e2386f71d9f/coverage-7.13.4-cp313-cp313t-win32.whl", hash = "sha256:2fa8d5f8de70688a28240de9e139fa16b153cc3cbb01c5f16d88d6505ebdadf9", size = 222688, upload-time = "2026-02-09T12:58:02.736Z" },
+-    { url = "https://files.pythonhosted.org/packages/a9/43/89de4ef5d3cd53b886afa114065f7e9d3707bdb3e5efae13535b46ae483d/coverage-7.13.4-cp313-cp313t-win_amd64.whl", hash = "sha256:9351229c8c8407645840edcc277f4a2d44814d1bc34a2128c11c2a031d45a5dd", size = 223746, upload-time = "2026-02-09T12:58:05.362Z" },
+-    { url = "https://files.pythonhosted.org/packages/35/39/7cf0aa9a10d470a5309b38b289b9bb07ddeac5d61af9b664fe9775a4cb3e/coverage-7.13.4-cp313-cp313t-win_arm64.whl", hash = "sha256:30b8d0512f2dc8c8747557e8fb459d6176a2c9e5731e2b74d311c03b78451997", size = 222003, upload-time = "2026-02-09T12:58:06.952Z" },
+-    { url = "https://files.pythonhosted.org/packages/92/11/a9cf762bb83386467737d32187756a42094927150c3e107df4cb078e8590/coverage-7.13.4-cp314-cp314-macosx_10_15_x86_64.whl", hash = "sha256:300deaee342f90696ed186e3a00c71b5b3d27bffe9e827677954f4ee56969601", size = 219522, upload-time = "2026-02-09T12:58:08.623Z" },
+-    { url = "https://files.pythonhosted.org/packages/d3/28/56e6d892b7b052236d67c95f1936b6a7cf7c3e2634bf27610b8cbd7f9c60/coverage-7.13.4-cp314-cp314-macosx_11_0_arm64.whl", hash = "sha256:29e3220258d682b6226a9b0925bc563ed9a1ebcff3cad30f043eceea7eaf2689", size = 219855, upload-time = "2026-02-09T12:58:10.176Z" },
+-    { url = "https://files.pythonhosted.org/packages/e5/69/233459ee9eb0c0d10fcc2fe425a029b3fa5ce0f040c966ebce851d030c70/coverage-7.13.4-cp314-cp314-manylinux1_i686.manylinux_2_28_i686.manylinux_2_5_i686.whl", hash = "sha256:391ee8f19bef69210978363ca930f7328081c6a0152f1166c91f0b5fdd2a773c", size = 250887, upload-time = "2026-02-09T12:58:12.503Z" },
+-    { url = "https://files.pythonhosted.org/packages/06/90/2cdab0974b9b5bbc1623f7876b73603aecac11b8d95b85b5b86b32de5eab/coverage-7.13.4-cp314-cp314-manylinux1_x86_64.manylinux_2_28_x86_64.manylinux_2_5_x86_64.whl", hash = "sha256:0dd7ab8278f0d58a0128ba2fca25824321f05d059c1441800e934ff2efa52129", size = 253396, upload-time = "2026-02-09T12:58:14.615Z" },
+-    { url = "https://files.pythonhosted.org/packages/ac/15/ea4da0f85bf7d7b27635039e649e99deb8173fe551096ea15017f7053537/coverage-7.13.4-cp314-cp314-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:78cdf0d578b15148b009ccf18c686aa4f719d887e76e6b40c38ffb61d264a552", size = 254745, upload-time = "2026-02-09T12:58:16.162Z" },
+-    { url = "https://files.pythonhosted.org/packages/99/11/bb356e86920c655ca4d61daee4e2bbc7258f0a37de0be32d233b561134ff/coverage-7.13.4-cp314-cp314-manylinux2014_ppc64le.manylinux_2_17_ppc64le.manylinux_2_28_ppc64le.whl", hash = "sha256:48685fee12c2eb3b27c62f2658e7ea21e9c3239cba5a8a242801a0a3f6a8c62a", size = 257055, upload-time = "2026-02-09T12:58:17.892Z" },
+-    { url = "https://files.pythonhosted.org/packages/c9/0f/9ae1f8cb17029e09da06ca4e28c9e1d5c1c0a511c7074592e37e0836c915/coverage-7.13.4-cp314-cp314-manylinux_2_31_riscv64.manylinux_2_39_riscv64.whl", hash = "sha256:4e83efc079eb39480e6346a15a1bcb3e9b04759c5202d157e1dd4303cd619356", size = 250911, upload-time = "2026-02-09T12:58:19.495Z" },
+-    { url = "https://files.pythonhosted.org/packages/89/3a/adfb68558fa815cbc29747b553bc833d2150228f251b127f1ce97e48547c/coverage-7.13.4-cp314-cp314-musllinux_1_2_aarch64.whl", hash = "sha256:ecae9737b72408d6a950f7e525f30aca12d4bd8dd95e37342e5beb3a2a8c4f71", size = 252754, upload-time = "2026-02-09T12:58:21.064Z" },
+-    { url = "https://files.pythonhosted.org/packages/32/b1/540d0c27c4e748bd3cd0bd001076ee416eda993c2bae47a73b7cc9357931/coverage-7.13.4-cp314-cp314-musllinux_1_2_i686.whl", hash = "sha256:ae4578f8528569d3cf303fef2ea569c7f4c4059a38c8667ccef15c6e1f118aa5", size = 250720, upload-time = "2026-02-09T12:58:22.622Z" },
+-    { url = "https://files.pythonhosted.org/packages/c7/95/383609462b3ffb1fe133014a7c84fc0dd01ed55ac6140fa1093b5af7ebb1/coverage-7.13.4-cp314-cp314-musllinux_1_2_ppc64le.whl", hash = "sha256:6fdef321fdfbb30a197efa02d48fcd9981f0d8ad2ae8903ac318adc653f5df98", size = 254994, upload-time = "2026-02-09T12:58:24.548Z" },
+-    { url = "https://files.pythonhosted.org/packages/f7/ba/1761138e86c81680bfc3c49579d66312865457f9fe405b033184e5793cb3/coverage-7.13.4-cp314-cp314-musllinux_1_2_riscv64.whl", hash = "sha256:2b0f6ccf3dbe577170bebfce1318707d0e8c3650003cb4b3a9dd744575daa8b5", size = 250531, upload-time = "2026-02-09T12:58:26.271Z" },
+-    { url = "https://files.pythonhosted.org/packages/f8/8e/05900df797a9c11837ab59c4d6fe94094e029582aab75c3309a93e6fb4e3/coverage-7.13.4-cp314-cp314-musllinux_1_2_x86_64.whl", hash = "sha256:75fcd519f2a5765db3f0e391eb3b7d150cce1a771bf4c9f861aeab86c767a3c0", size = 252189, upload-time = "2026-02-09T12:58:27.807Z" },
+-    { url = "https://files.pythonhosted.org/packages/00/bd/29c9f2db9ea4ed2738b8a9508c35626eb205d51af4ab7bf56a21a2e49926/coverage-7.13.4-cp314-cp314-win32.whl", hash = "sha256:8e798c266c378da2bd819b0677df41ab46d78065fb2a399558f3f6cae78b2fbb", size = 222258, upload-time = "2026-02-09T12:58:29.441Z" },
+-    { url = "https://files.pythonhosted.org/packages/a7/4d/1f8e723f6829977410efeb88f73673d794075091c8c7c18848d273dc9d73/coverage-7.13.4-cp314-cp314-win_amd64.whl", hash = "sha256:245e37f664d89861cf2329c9afa2c1fe9e6d4e1a09d872c947e70718aeeac505", size = 223073, upload-time = "2026-02-09T12:58:31.026Z" },
+-    { url = "https://files.pythonhosted.org/packages/51/5b/84100025be913b44e082ea32abcf1afbf4e872f5120b7a1cab1d331b1e13/coverage-7.13.4-cp314-cp314-win_arm64.whl", hash = "sha256:ad27098a189e5838900ce4c2a99f2fe42a0bf0c2093c17c69b45a71579e8d4a2", size = 221638, upload-time = "2026-02-09T12:58:32.599Z" },
+-    { url = "https://files.pythonhosted.org/packages/a7/e4/c884a405d6ead1370433dad1e3720216b4f9fd8ef5b64bfd984a2a60a11a/coverage-7.13.4-cp314-cp314t-macosx_10_15_x86_64.whl", hash = "sha256:85480adfb35ffc32d40918aad81b89c69c9cc5661a9b8a81476d3e645321a056", size = 220246, upload-time = "2026-02-09T12:58:34.181Z" },
+-    { url = "https://files.pythonhosted.org/packages/81/5c/4d7ed8b23b233b0fffbc9dfec53c232be2e695468523242ea9fd30f97ad2/coverage-7.13.4-cp314-cp314t-macosx_11_0_arm64.whl", hash = "sha256:79be69cf7f3bf9b0deeeb062eab7ac7f36cd4cc4c4dd694bd28921ba4d8596cc", size = 220514, upload-time = "2026-02-09T12:58:35.704Z" },
+-    { url = "https://files.pythonhosted.org/packages/2f/6f/3284d4203fd2f28edd73034968398cd2d4cb04ab192abc8cff007ea35679/coverage-7.13.4-cp314-cp314t-manylinux1_i686.manylinux_2_28_i686.manylinux_2_5_i686.whl", hash = "sha256:caa421e2684e382c5d8973ac55e4f36bed6821a9bad5c953494de960c74595c9", size = 261877, upload-time = "2026-02-09T12:58:37.864Z" },
+-    { url = "https://files.pythonhosted.org/packages/09/aa/b672a647bbe1556a85337dc95bfd40d146e9965ead9cc2fe81bde1e5cbce/coverage-7.13.4-cp314-cp314t-manylinux1_x86_64.manylinux_2_28_x86_64.manylinux_2_5_x86_64.whl", hash = "sha256:14375934243ee05f56c45393fe2ce81fe5cc503c07cee2bdf1725fb8bef3ffaf", size = 264004, upload-time = "2026-02-09T12:58:39.492Z" },
+-    { url = "https://files.pythonhosted.org/packages/79/a1/aa384dbe9181f98bba87dd23dda436f0c6cf2e148aecbb4e50fc51c1a656/coverage-7.13.4-cp314-cp314t-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:25a41c3104d08edb094d9db0d905ca54d0cd41c928bb6be3c4c799a54753af55", size = 266408, upload-time = "2026-02-09T12:58:41.852Z" },
+-    { url = "https://files.pythonhosted.org/packages/53/5e/5150bf17b4019bc600799f376bb9606941e55bd5a775dc1e096b6ffea952/coverage-7.13.4-cp314-cp314t-manylinux2014_ppc64le.manylinux_2_17_ppc64le.manylinux_2_28_ppc64le.whl", hash = "sha256:6f01afcff62bf9a08fb32b2c1d6e924236c0383c02c790732b6537269e466a72", size = 267544, upload-time = "2026-02-09T12:58:44.093Z" },
+-    { url = "https://files.pythonhosted.org/packages/e0/ed/f1de5c675987a4a7a672250d2c5c9d73d289dbf13410f00ed7181d8017dd/coverage-7.13.4-cp314-cp314t-manylinux_2_31_riscv64.manylinux_2_39_riscv64.whl", hash = "sha256:eb9078108fbf0bcdde37c3f4779303673c2fa1fe8f7956e68d447d0dd426d38a", size = 260980, upload-time = "2026-02-09T12:58:45.721Z" },
+-    { url = "https://files.pythonhosted.org/packages/b3/e3/fe758d01850aa172419a6743fe76ba8b92c29d181d4f676ffe2dae2ba631/coverage-7.13.4-cp314-cp314t-musllinux_1_2_aarch64.whl", hash = "sha256:0e086334e8537ddd17e5f16a344777c1ab8194986ec533711cbe6c41cde841b6", size = 263871, upload-time = "2026-02-09T12:58:47.334Z" },
+-    { url = "https://files.pythonhosted.org/packages/b6/76/b829869d464115e22499541def9796b25312b8cf235d3bb00b39f1675395/coverage-7.13.4-cp314-cp314t-musllinux_1_2_i686.whl", hash = "sha256:725d985c5ab621268b2edb8e50dfe57633dc69bda071abc470fed55a14935fd3", size = 261472, upload-time = "2026-02-09T12:58:48.995Z" },
+-    { url = "https://files.pythonhosted.org/packages/14/9e/caedb1679e73e2f6ad240173f55218488bfe043e38da577c4ec977489915/coverage-7.13.4-cp314-cp314t-musllinux_1_2_ppc64le.whl", hash = "sha256:3c06f0f1337c667b971ca2f975523347e63ec5e500b9aa5882d91931cd3ef750", size = 265210, upload-time = "2026-02-09T12:58:51.178Z" },
+-    { url = "https://files.pythonhosted.org/packages/3a/10/0dd02cb009b16ede425b49ec344aba13a6ae1dc39600840ea6abcb085ac4/coverage-7.13.4-cp314-cp314t-musllinux_1_2_riscv64.whl", hash = "sha256:590c0ed4bf8e85f745e6b805b2e1c457b2e33d5255dd9729743165253bc9ad39", size = 260319, upload-time = "2026-02-09T12:58:53.081Z" },
+-    { url = "https://files.pythonhosted.org/packages/92/8e/234d2c927af27c6d7a5ffad5bd2cf31634c46a477b4c7adfbfa66baf7ebb/coverage-7.13.4-cp314-cp314t-musllinux_1_2_x86_64.whl", hash = "sha256:eb30bf180de3f632cd043322dad5751390e5385108b2807368997d1a92a509d0", size = 262638, upload-time = "2026-02-09T12:58:55.258Z" },
+-    { url = "https://files.pythonhosted.org/packages/2f/64/e5547c8ff6964e5965c35a480855911b61509cce544f4d442caa759a0702/coverage-7.13.4-cp314-cp314t-win32.whl", hash = "sha256:c4240e7eded42d131a2d2c4dec70374b781b043ddc79a9de4d55ca71f8e98aea", size = 223040, upload-time = "2026-02-09T12:58:56.936Z" },
+-    { url = "https://files.pythonhosted.org/packages/c7/96/38086d58a181aac86d503dfa9c47eb20715a79c3e3acbdf786e92e5c09a8/coverage-7.13.4-cp314-cp314t-win_amd64.whl", hash = "sha256:4c7d3cc01e7350f2f0f6f7036caaf5673fb56b6998889ccfe9e1c1fe75a9c932", size = 224148, upload-time = "2026-02-09T12:58:58.645Z" },
+-    { url = "https://files.pythonhosted.org/packages/ce/72/8d10abd3740a0beb98c305e0c3faf454366221c0f37a8bcf8f60020bb65a/coverage-7.13.4-cp314-cp314t-win_arm64.whl", hash = "sha256:23e3f687cf945070d1c90f85db66d11e3025665d8dafa831301a0e0038f3db9b", size = 222172, upload-time = "2026-02-09T12:59:00.396Z" },
+-    { url = "https://files.pythonhosted.org/packages/0d/4a/331fe2caf6799d591109bb9c08083080f6de90a823695d412a935622abb2/coverage-7.13.4-py3-none-any.whl", hash = "sha256:1af1641e57cf7ba1bd67d677c9abdbcd6cc2ab7da3bca7fa1e2b7e50e65f2ad0", size = 211242, upload-time = "2026-02-09T12:59:02.032Z" },
+-]
+-
+ [[package]]
+ name = "cryptography"
+ version = "46.0.5"
+@@ -1639,6 +1554,7 @@ name = "nl2sql-v3"
+ version = "0.1.0"
+ source = { virtual = "." }
+ dependencies = [
++    { name = "cryptography" },
+     { name = "dashscope" },
+     { name = "deepagents" },
+     { name = "fastapi" },
+@@ -1654,12 +1570,12 @@ dependencies = [
+     { name = "psycopg-pool" },
+     { name = "pydantic" },
+     { name = "pymilvus" },
+-    { name = "pytest" },
+     { name = "python-dotenv" },
+     { name = "pyyaml" },
+     { name = "rich" },
+     { name = "sqlglot" },
+     { name = "sqlparse" },
++    { name = "starlette" },
+     { name = "uvicorn" },
+ ]
+ 
+@@ -1667,15 +1583,13 @@ dependencies = [
+ dev = [
+     { name = "black" },
+     { name = "pytest" },
+-    { name = "pytest-asyncio" },
+-    { name = "pytest-cov" },
+     { name = "ruff" },
+ ]
+ monitoring = [
+     { name = "langsmith" },
+-    { name = "redis" },
+ ]
+ web = [
++    { name = "pandas" },
+     { name = "requests" },
+     { name = "streamlit" },
+ ]
+@@ -1683,6 +1597,7 @@ web = [
+ [package.metadata]
+ requires-dist = [
+     { name = "black", marker = "extra == 'dev'", specifier = ">=23.0.0" },
++    { name = "cryptography", specifier = "==46.0.5" },
+     { name = "dashscope", specifier = "==1.27.5" },
+     { name = "deepagents", specifier = "==0.7.25" },
+     { name = "fastapi", specifier = "==0.143.0" },
+@@ -1694,23 +1609,21 @@ requires-dist = [
+     { name = "langsmith", marker = "extra == 'monitoring'", specifier = "==0.14.8" },
+     { name = "neo4j", specifier = ">=5.15.0" },
+     { name = "openai", specifier = "==3.29.0" },
++    { name = "pandas", marker = "extra == 'web'", specifier = "==2.3.3" },
+     { name = "pgvector", specifier = ">=0.2.0" },
+     { name = "psycopg", extras = ["binary"], specifier = "==3.3.6" },
+     { name = "psycopg-pool", specifier = "==3.3.3" },
+     { name = "pydantic", specifier = "==2.14.1" },
+     { name = "pymilvus", specifier = ">=2.6.5" },
+-    { name = "pytest", specifier = ">=8.4.2" },
+-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.4.0" },
+-    { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.24.0" },
+-    { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=4.1.0" },
++    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.4.2" },
+     { name = "python-dotenv", specifier = "==1.2.4" },
+     { name = "pyyaml", specifier = ">=6.0.0" },
+-    { name = "redis", marker = "extra == 'monitoring'", specifier = ">=5.0.0" },
+     { name = "requests", marker = "extra == 'web'", specifier = "==2.34.2" },
+     { name = "rich", specifier = "==15.0.0" },
+     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.1.0" },
+     { name = "sqlglot", specifier = "==30.22.0" },
+     { name = "sqlparse", specifier = ">=0.4.4" },
++    { name = "starlette", specifier = "==0.52.1" },
+     { name = "streamlit", marker = "extra == 'web'", specifier = "==1.65.0" },
+     { name = "uvicorn", specifier = "==0.54.0" },
+ ]
+@@ -2506,33 +2419,6 @@ wheels = [
+     { url = "https://files.pythonhosted.org/packages/3b/ab/b3226f0bd7cdcf710fbede2b3548584366da3b19b5021e74f5bde2a8fa3f/pytest-9.0.2-py3-none-any.whl", hash = "sha256:711ffd45bf766d5264d487b917733b453d917afd2b0ad65223959f59089f875b", size = 374801, upload-time = "2025-12-06T21:30:49.154Z" },
+ ]
+ 
+-[[package]]
+-name = "pytest-asyncio"
+-version = "1.3.0"
+-source = { registry = "https://pypi.org/simple" }
+-dependencies = [
+-    { name = "pytest" },
+-    { name = "typing-extensions", marker = "python_full_version < '3.13'" },
+-]
+-sdist = { url = "https://files.pythonhosted.org/packages/90/2c/8af215c0f776415f3590cac4f9086ccefd6fd463befeae41cd4d3f193e5a/pytest_asyncio-1.3.0.tar.gz", hash = "sha256:d7f52f36d231b80ee124cd216ffb19369aa168fc10095013c6b014a34d3ee9e5", size = 50087, upload-time = "2025-11-10T16:07:47.256Z" }
+-wheels = [
+-    { url = "https://files.pythonhosted.org/packages/e5/35/f8b19922b6a25bc0880171a2f1a003eaeb93657475193ab516fd87cac9da/pytest_asyncio-1.3.0-py3-none-any.whl", hash = "sha256:611e26147c7f77640e6d0a92a38ed17c3e9848063698d5c93d5aa7aa11cebff5", size = 15075, upload-time = "2025-11-10T16:07:45.537Z" },
+-]
+-
+-[[package]]
+-name = "pytest-cov"
+-version = "7.0.0"
+-source = { registry = "https://pypi.org/simple" }
+-dependencies = [
+-    { name = "coverage" },
+-    { name = "pluggy" },
+-    { name = "pytest" },
+-]
+-sdist = { url = "https://files.pythonhosted.org/packages/5e/f7/c933acc76f5208b3b00089573cf6a2bc26dc80a8aece8f52bb7d6b1855ca/pytest_cov-7.0.0.tar.gz", hash = "sha256:33c97eda2e049a0c5298e91f519302a1334c26ac65c1a483d6206fd458361af1", size = 54328, upload-time = "2025-09-09T10:57:02.113Z" }
+-wheels = [
+-    { url = "https://files.pythonhosted.org/packages/ee/49/1377b49de7d0c1ce41292161ea0f721913fa8722c19fb9c1e3aa0367eecb/pytest_cov-7.0.0-py3-none-any.whl", hash = "sha256:3b8e9558b16cc1479da72058bdecf8073661c7f57f7d3c5f22a1c23507f2d861", size = 22424, upload-time = "2025-09-09T10:57:00.695Z" },
+-]
+-
+ [[package]]
+ name = "python-dateutil"
+ version = "2.9.0.post0"
+@@ -2647,15 +2533,6 @@ wheels = [
+     { url = "https://files.pythonhosted.org/packages/f1/12/de94a39c2ef588c7e6455cfbe7343d3b2dc9d6b6b2f40c4c6565744c873d/pyyaml-6.0.3-cp314-cp314t-win_arm64.whl", hash = "sha256:ebc55a14a21cb14062aa4162f906cd962b28e2e9ea38f9b4391244cd8de4ae0b", size = 149341, upload-time = "2025-09-25T21:32:56.828Z" },
+ ]
+ 
+-[[package]]
+-name = "redis"
+-version = "7.3.0"
+-source = { registry = "https://pypi.org/simple" }
+-sdist = { url = "https://files.pythonhosted.org/packages/da/82/4d1a5279f6c1251d3d2a603a798a1137c657de9b12cfc1fba4858232c4d2/redis-7.3.0.tar.gz", hash = "sha256:4d1b768aafcf41b01022410b3cc4f15a07d9b3d6fe0c66fc967da2c88e551034", size = 4928081, upload-time = "2026-03-06T18:18:16.287Z" }
+-wheels = [
+-    { url = "https://files.pythonhosted.org/packages/f0/28/84e57fce7819e81ec5aa1bd31c42b89607241f4fb1a3ea5b0d2dbeaea26c/redis-7.3.0-py3-none-any.whl", hash = "sha256:9d4fcb002a12a5e3c3fbe005d59c48a2cc231f87fbb2f6b70c2d89bb64fec364", size = 404379, upload-time = "2026-03-06T18:18:14.583Z" },
+-]
+-
+ [[package]]
+ name = "referencing"
+ version = "0.37.0"

@@ -39,7 +39,7 @@ filters:
     allowed_steps: ['generate-domains']
   dim_config_filter:
     (): metaweave.utils.logger.StepFilter
-    allowed_steps: ['dim_config']
+    allowed_steps: ['dim']
   sql_rag_generate_filter:
     (): metaweave.utils.logger.StepFilter
     allowed_steps: ['sql-rag-generate']

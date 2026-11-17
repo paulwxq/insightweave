@@ -1,0 +1,25 @@
+== git HEAD ==
+21ed26359f3fdd3abde1c36429b22bba0964d254
+21ed263 2026-11-09 10:56:28 +0800 docs: Vue 接入设计同步短 ID 与 publish_run_id 术语
+
+== git status (porcelain, nl2sql) ==
+ M nl2sql/AGENTS.md
+ M nl2sql/README.md
+ M "nl2sql/docs/1_DeepAgents_0.7.34\345\215\207\347\272\247\350\257\204\344\274\260\344\270\216\345\256\236\346\226\275\345\273\272\350\256\256.md"
+ M nl2sql/pyproject.toml
+ M nl2sql/pytest.ini
+ M nl2sql/tests/check_langgraph_version.py
+ M nl2sql/uv.lock
+?? "nl2sql/docs/2_DeepAgents_0.7.34\346\226\260\347\211\271\346\200\247\344\270\216\351\241\271\347\233\256\346\224\266\347\233\212\345\210\206\346\236\220.md"
+?? nl2sql/docs/upgrade/candidate_2026-11-09/
+?? nl2sql/docs/upgrade/implementation_2026-11-09_run01/
+
+== working-tree diff stat vs HEAD (nl2sql) ==
+ nl2sql/AGENTS.md                                   |   2 -
+ nl2sql/README.md                                   |   2 -
+ ...256\236\346\226\275\345\273\272\350\256\256.md" | 566 ++++++++++++++-------
+ nl2sql/pyproject.toml                              |  10 +-
+ nl2sql/pytest.ini                                  |   3 -
+ nl2sql/tests/check_langgraph_version.py            |  10 +-
+ nl2sql/uv.lock                                     | 137 +----
+ 7 files changed, 388 insertions(+), 342 deletions(-)

@@ -1,19 +1,24 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 
-const props = defineProps<{
-  initialText: string
-  initialSync: boolean
-}>()
+const props = withDefaults(
+  defineProps<{
+    initialText: string
+    /** 场景说明；默认是“写入版本”的口径，临时输入等场景由调用方覆盖 */
+    note?: string
+  }>(),
+  {
+    note: '保存作业后写入该版本。工作区还没有 db_domains.yaml 时，生成会用这段文字；文件已存在则不覆盖其中的描述。',
+  },
+)
 
 const emit = defineEmits<{
   cancel: []
-  save: [text: string, sync: boolean]
+  save: [text: string]
 }>()
 
-// textarea 与复选框都是草稿：保存只写入页面已保存状态；取消/叉号只丢弃草稿。
+// textarea 是草稿：保存只写入调用方的已保存状态；取消/叉号只丢弃草稿。
 const draft = ref(props.initialText)
-const syncChecked = ref(props.initialSync)
 const error = ref('')
 
 // 长度按 Unicode 码点计数（与后端 Python len 一致）；不用原生 maxlength——
@@ -30,7 +35,7 @@ function submit() {
     error.value = '描述不能超过 1000 个字符'
     return
   }
-  emit('save', text, syncChecked.value)
+  emit('save', text)
 }
 
 function close() {
@@ -53,19 +58,13 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
       aria-modal="true"
       aria-labelledby="domain-description-title"
     >
-      <button type="button" class="dialog-close" aria-label="关闭" @click="close">✕</button>
-      <p id="domain-description-title">Domain 生成描述</p>
-      <p class="dialog-note">
-        优先取本作业上次使用的描述，没有时取数据源登记的描述；这里的修改只用于当前作业。勾选下方选项后，点击执行时会把该描述同时保存到数据源信息。
-      </p>
+      <button type="button" class="dialog-close" aria-label="关闭" @click="close"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg></button>
+      <p id="domain-description-title">Domain 描述</p>
+      <p class="dialog-note">{{ note }}</p>
       <label class="field">
         <span>描述内容</span>
         <textarea v-model="draft" rows="5"></textarea>
         <span class="character-count">{{ charCount }}/1000</span>
-      </label>
-      <label class="dialog-check">
-        <input v-model="syncChecked" type="checkbox" />
-        <span>执行时同步到数据源描述</span>
       </label>
       <p v-if="error" class="status-message" role="alert">{{ error }}</p>
       <div class="dialog-actions">
@@ -74,3 +73,11 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
     </div>
   </div>
 </template>
+
+<style scoped>
+.field textarea {
+  font-size: 12px;
+  line-height: 1.5;
+  padding: 8px 10px;
+}
+</style>

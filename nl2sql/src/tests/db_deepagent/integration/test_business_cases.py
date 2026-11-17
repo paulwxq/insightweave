@@ -13,6 +13,10 @@ from pathlib import Path
 import pytest
 import yaml
 
+# 业务用例运行于真实单源环境；占位来源仅满足构造绑定（doc 4 §3/§4.7：
+# 正式多源验收以登记 source_id 为准，见交付说明）
+_TEST_SOURCE_ID = "db_src_1"  # doc 5.1 §1 短 ID（doc 12.2 M-1）
+
 pytestmark = [
     pytest.mark.integration,
     pytest.mark.requires_llm,
@@ -39,7 +43,7 @@ def runtime(db_agent_config):
     from src.modules.db_deepagent.services import build_services
 
     cfg = db_agent_config
-    services = build_services(cfg)
+    services = build_services(cfg, source_id=_TEST_SOURCE_ID)
     pool = build_platform_pool(cfg.platform_db)
     pool.open(wait=False)
     pool.wait()

@@ -8,7 +8,7 @@ from metaweave.core.loaders.dim_value_loader import ConfigurationError, DimValue
 
 
 SOURCE_ID = "11111111-1111-1111-1111-111111111111"
-PUBLISH_ID = "22222222-2222-2222-2222-222222222222"
+PUBLISH_RUN_ID = "22222222-2222-2222-2222-222222222222"
 
 
 class FakeMilvusClient:
@@ -20,8 +20,15 @@ class FakeMilvusClient:
     def test_connection(self) -> bool:
         return True
 
-    def ensure_collection(self, collection_name, schema, index_params, clean=False,
-                          validate_schema=False, index_field_name="embedding"):
+    def ensure_collection(
+        self,
+        collection_name,
+        schema,
+        index_params,
+        clean=False,
+        validate_schema=False,
+        index_field_name="embedding",
+    ):
         self.collection = collection_name
 
     def connect(self):
@@ -70,11 +77,23 @@ def _write_metadata_config(path: Path):
                 },
                 "embedding": {
                     "active": "qwen",
-                    "providers": {"qwen": {"model": "text-embedding-v3", "api_key": "k", "dimensions": 1024}},
+                    "providers": {
+                        "qwen": {
+                            "model": "text-embedding-v3",
+                            "api_key": "k",
+                            "dimensions": 1024,
+                        }
+                    },
                 },
                 "vector_database": {
                     "active": "milvus",
-                    "providers": {"milvus": {"host": "localhost", "port": 19530, "database": "nl2sql"}},
+                    "providers": {
+                        "milvus": {
+                            "host": "localhost",
+                            "port": 19530,
+                            "database": "nl2sql",
+                        }
+                    },
                 },
             }
         ),
@@ -98,7 +117,7 @@ def test_vector_db_config_missing_raises(tmp_path: Path):
             "metadata_config_file": str(metadata_path),
         },
         source_id=SOURCE_ID,
-        publish_id=PUBLISH_ID,
+        publish_run_id=PUBLISH_RUN_ID,
     )
 
     with pytest.raises(ConfigurationError):
@@ -138,7 +157,7 @@ def test_loader_loads_and_cleans_duplicate_values(tmp_path: Path):
         pg_manager_cls=FakePGManager,
         embedding_service_cls=FakeEmbeddingService,
         source_id=SOURCE_ID,
-        publish_id=PUBLISH_ID,
+        publish_run_id=PUBLISH_RUN_ID,
     )
 
     # 避免真实数据库访问
@@ -192,7 +211,7 @@ def test_validate_fails_when_collection_name_missing(tmp_path: Path):
         pg_manager_cls=FakePGManager,
         embedding_service_cls=FakeEmbeddingService,
         source_id=SOURCE_ID,
-        publish_id=PUBLISH_ID,
+        publish_run_id=PUBLISH_RUN_ID,
     )
 
     assert loader.validate() is False
@@ -230,7 +249,7 @@ def test_validate_fails_when_current_database_node_missing(tmp_path: Path):
         pg_manager_cls=FakePGManager,
         embedding_service_cls=FakeEmbeddingService,
         source_id=SOURCE_ID,
-        publish_id=PUBLISH_ID,
+        publish_run_id=PUBLISH_RUN_ID,
     )
 
     assert loader.validate() is False

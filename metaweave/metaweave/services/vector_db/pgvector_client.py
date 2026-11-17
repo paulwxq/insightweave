@@ -17,7 +17,13 @@ class PgVectorClient(BaseVectorClient):  # pragma: no cover - 预留占位
     def test_connection(self) -> bool:
         raise NotImplementedError("PgVectorClient 尚未实现")
 
-    def ensure_collection(self, collection_name: str, schema: Any, index_params: Dict[str, Any], clean: bool = False) -> Any:
+    def ensure_collection(
+        self,
+        collection_name: str,
+        schema: Any,
+        index_params: Dict[str, Any],
+        clean: bool = False,
+    ) -> Any:
         raise NotImplementedError("PgVectorClient 尚未实现")
 
     def insert_batch(self, collection_name: str, data: List[Dict[str, Any]]) -> int:
@@ -28,4 +34,3 @@ class PgVectorClient(BaseVectorClient):  # pragma: no cover - 预留占位
 
     def close(self) -> None:
         raise NotImplementedError("PgVectorClient 尚未实现")
-

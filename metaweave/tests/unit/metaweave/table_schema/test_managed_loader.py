@@ -1,4 +1,10 @@
-"""doc 20.1 §10.3：受管加载的调用顺序与失败边界（假 Embedding / Milvus）。"""
+"""doc 20.1 §10.3：受管加载的调用顺序与失败边界（假 Embedding / Milvus）。
+
+断代改造适配（doc 6）：source_id 为短 ID（db_src_1）、loader 的 job_id 槽
+装工作区短 ID（ws_1）、publish_run_id 为发布运行 UUID（normalize_run_uuid）。
+"""
+
+from uuid import uuid4
 
 import numpy as np
 import pytest
@@ -7,19 +13,29 @@ from metaweave.core.loaders import table_schema_loader as loader_module
 from metaweave.core.loaders.table_schema_loader import TableSchemaLoader
 from tests.unit.metaweave.table_schema.test_prepare_managed_input import (  # noqa: F401
     FULL,
+    MARKER_TEXT,
     NAME,
     SOURCE_ID,
     dirs,
     write_md,
 )
-from uuid import uuid4
 
-JOB_ID = uuid4()
+WORKSPACE_ID = "ws_1"
 DIM = 4
 METADATA_CONFIG = {
     "vector_database": {"active": "milvus", "providers": {"milvus": {"host": "fake"}}},
     "embedding": {"active": "x", "providers": {"x": {"dimensions": DIM}}},
 }
+
+
+class _NoClient:
+    def __init__(self, cfg):  # pragma: no cover - 构造期已拒绝
+        raise AssertionError("不应创建 Milvus 客户端")
+
+
+class _NoEmbedding:
+    def __init__(self, cfg):  # pragma: no cover - 构造期已拒绝
+        raise AssertionError("不应创建 Embedding 服务")
 
 
 class Env:
@@ -35,7 +51,7 @@ class Env:
         self.ensure_kwargs = None
 
 
-def build(dirs, env, publish_id=None, **options):
+def build(dirs, env, publish_run_id=None, **options):
     class FakeEmbedding:
         def __init__(self, cfg):
             pass
@@ -91,7 +107,7 @@ def build(dirs, env, publish_id=None, **options):
             "md_directory": str(dirs[1]),
             "json_llm_directory": str(dirs[0]),
             "source_id": str(SOURCE_ID),
-            "job_id": str(JOB_ID),
+            "job_id": str(WORKSPACE_ID),
             "options": options,
         }
     }
@@ -100,18 +116,66 @@ def build(dirs, env, publish_id=None, **options):
         milvus_client_cls=FakeMilvus,
         embedding_service_cls=FakeEmbedding,
         metadata_config=METADATA_CONFIG,
-        publish_id=publish_id,
+        publish_run_id=publish_run_id,
     )
 
 
-def test_validate_uses_create_database_connection_path(dirs):
-    write_md(dirs[1], "- order_id (integer) - 订单ID\n- amount (numeric(10,2)) - 金额\n")
+def test_managed_identity_uses_short_source_and_workspace_slot(dirs):
+    """受管身份（doc 6 §1/§5.1）：source_id 短 ID、job_id 槽装工作区短 ID、
+    publish_run_id 规范化为发布运行 UUID。"""
+    from uuid import uuid4
+
+    write_md(dirs[1], FULL)
     env = Env()
-    loader = build(dirs, env, str(uuid4()))
+    publish_run_id = str(uuid4())
+    loader = build(dirs, env, publish_run_id)
+    assert loader.managed is True
+    assert loader.source_id == SOURCE_ID
+    assert loader.job_id == WORKSPACE_ID
+    assert loader.publish_run_id == publish_run_id
+    assert loader.load()["success"]
+
+
+def test_managed_loader_rejects_non_short_source_id(dirs):
+    """旧 UUID source_id 在受管构造期即拒绝（doc 6 §1：短 ID 与 UUID 分开校验）。"""
+    from uuid import uuid4
+
+    env = Env()
+    cfg = {
+        "table_schema_loader": {
+            "collection_name": "schemas",
+            "md_directory": str(dirs[1]),
+            "json_llm_directory": str(dirs[0]),
+            "source_id": "b4a87275-7c37-4feb-bf1c-e5a8446c174f",
+            "job_id": WORKSPACE_ID,
+        }
+    }
+    with pytest.raises(ValueError, match="数据源"):
+        TableSchemaLoader(
+            cfg,
+            milvus_client_cls=_NoClient,
+            embedding_service_cls=_NoEmbedding,
+            metadata_config=METADATA_CONFIG,
+            publish_run_id=str(uuid4()),
+        )
+
+
+def test_validate_uses_create_database_connection_path(dirs):
+    write_md(
+        dirs[1], "- order_id (integer) - 订单ID\n- amount (numeric(10,2)) - 金额\n"
+    )
+    env = Env()
+    loader = build(dirs, env, str(_uuid()))
     loader.prepare_input()
 
     assert loader.validate() is True
     assert env.test_connection_create_database is True
+
+
+def _uuid():
+    from uuid import uuid4
+
+    return uuid4()
 
 
 def test_collection_schema_varchar_limits_match_varchar_limits(dirs):
@@ -120,9 +184,11 @@ def test_collection_schema_varchar_limits_match_varchar_limits(dirs):
 
     from metaweave.core.table_schema import VARCHAR_LIMITS
 
-    write_md(dirs[1], "- order_id (integer) - 订单ID\n- amount (numeric(10,2)) - 金额\n")
+    write_md(
+        dirs[1], "- order_id (integer) - 订单ID\n- amount (numeric(10,2)) - 金额\n"
+    )
     env = Env()
-    loader = build(dirs, env, str(uuid4()))
+    loader = build(dirs, env, str(_uuid()))
     loader.prepare_input()
     assert loader.load()["success"]
 
@@ -135,10 +201,12 @@ def test_collection_schema_varchar_limits_match_varchar_limits(dirs):
 
 
 def test_order_records_and_cleanup(dirs):
-    write_md(dirs[1], "- order_id (integer) - 订单ID\n- amount (numeric(10,2)) - 无注释\n")
+    write_md(
+        dirs[1], "- order_id (integer) - 订单ID\n- amount (numeric(10,2)) - 无注释\n"
+    )
     env = Env()
-    publish_id = str(uuid4())
-    loader = build(dirs, env, publish_id)
+    publish_run_id = str(_uuid())
+    loader = build(dirs, env, publish_run_id)
     loader.prepare_input()
     result = loader.load()
 
@@ -146,13 +214,17 @@ def test_order_records_and_cleanup(dirs):
     assert env.events == ["connect", "ensure", "embed", "upsert", "delete"]
     # 首次加载走可创建 database 的连接路径（否则全新 Milvus 无法初始化）
     assert env.connect_create_database is True
-    assert env.ensure_kwargs["clean"] is False and env.ensure_kwargs["validate_schema"] is True
+    assert (
+        env.ensure_kwargs["clean"] is False
+        and env.ensure_kwargs["validate_schema"] is True
+    )
     names = [f.name for f in env.ensure_kwargs["schema"].fields]
     assert names[0] == "entity_id" and len(names) == 11 and "job_id" not in names
     records = env.upserts[0]
     assert [r["object_id"] for r in records] == [NAME, f"{NAME}.order_id"]
     for r in records:
-        assert r["source_id"] == str(SOURCE_ID) and r["publish_id"] == publish_id
+        assert r["source_id"] == SOURCE_ID and r["publish_run_id"] == publish_run_id
+        # 短 ID 身份键（doc 6 §1）：entity_id = <source_id>:<object_id>
         assert r["entity_id"] == f"{SOURCE_ID}:{r['object_id']}"
         assert isinstance(r["embedding"], list) and len(r["embedding"]) == DIM
     # 空描述字段不进入 Embedding 文本，且只统计在 empty_desc_columns，不计失败跳过
@@ -160,8 +232,9 @@ def test_order_records_and_cleanup(dirs):
     assert result["empty_desc_columns"] == [f"{NAME}.amount"]
     assert result["objects_skipped"] == 0 and result["objects_loaded"] == 2
     assert result["replacement_started"] is True
+    # 按源替换条件使用短 ID + 本次发布运行 UUID（doc 6 §8.3）
     assert env.delete_expr == (
-        f'source_id == "{SOURCE_ID}" and publish_id != "{publish_id}"'
+        f'source_id == "{SOURCE_ID}" and publish_run_id != "{publish_run_id}"'
     )
 
 
@@ -172,7 +245,7 @@ def test_embedding_input_is_description_only(dirs):
     assert loader.load()["success"]
     texts = [t for call in env.embed_calls for t in call]
     assert "订单ID" in texts and "金额" in texts
-    assert not any(str(SOURCE_ID) in t for t in texts)
+    assert not any(SOURCE_ID in t for t in texts)
 
 
 def test_batches_and_numpy_vectors_stay_arrays_until_write(dirs):
@@ -181,7 +254,9 @@ def test_batches_and_numpy_vectors_stay_arrays_until_write(dirs):
     loader = build(dirs, env, batch_size=1)
     loader.prepare_input()
     loader._embedding_service = loader.embedding_service_cls({})
-    vectors, skipped = loader._embed_all([o for g in loader._prepared_objects for o in g])
+    vectors, skipped = loader._embed_all(
+        [o for g in loader._prepared_objects for o in g]
+    )
     assert skipped == 0
     assert all(isinstance(v, np.ndarray) for v in vectors.values())
     env.events.clear()
@@ -196,7 +271,9 @@ def test_batches_and_numpy_vectors_stay_arrays_until_write(dirs):
 
 
 def test_skip_disabled_with_empty_desc_touches_no_service(dirs):
-    write_md(dirs[1], "- order_id (integer) - 无注释\n- amount (numeric(10,2)) - 金额\n")
+    write_md(
+        dirs[1], "- order_id (integer) - 无注释\n- amount (numeric(10,2)) - 金额\n"
+    )
     env = Env()
     loader = build(dirs, env, skip_empty_desc=False)
     result = loader.load()

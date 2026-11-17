@@ -1,25 +1,14 @@
-"""DDL 当前态定义的读取与校验（doc 16 §5）。
+"""DDL 当前态定义的读取与校验（doc 16 §5、6.1 §15）。
 
-只负责把指定作业受管目录中的 `.sql` 产物完整读取并验证为整批
+只负责把当前工作区受管目录中的 `.sql` 产物完整读取并验证为整批
 `table_definition` 行，供 Web 发布事务使用；不自行提交，不写平台库。
-本阶段没有独立 CLI 加载入口（`meta_load` 仅覆盖 db）。
 """
 
 import json
 import logging
 import re
-from datetime import datetime
 from pathlib import Path
-from uuid import UUID
 
-from sqlalchemy.orm import Session
-
-from backend.data_sources.repository import get_db_source
-from backend.jobs.repository import assert_workspace_owner, get_step_row
-from backend.profile_loading.db_loader import (
-    MetaLoadSourceDisabledError,
-    MetaLoadSourceNotFoundError,
-)
 from metaweave.core.clean_targets import resolve_ddl_output_dir
 from metaweave.core.metadata.ddl_loader import DDLLoader, DDLLoaderError
 
@@ -39,33 +28,14 @@ class DDLInputError(ValueError):
     """DDL 产物不满足 table_definition 的发布输入契约。"""
 
 
-def inspect_ddl_definition_context(
-    session: Session, source_id: UUID, job_id: UUID
-) -> tuple[str | None, datetime | None]:
-    """检查数据源、工作区归属和 ddl 步骤状态。不读文件、不写库。
-
-    返回 (最近状态, 运行标识)，语义与 inspect_db_profile_context 一致。
-    """
-    source = get_db_source(session, source_id)
-    if source is None:
-        raise MetaLoadSourceNotFoundError("未找到指定 source_id 的数据源")
-    if not source.is_active:
-        raise MetaLoadSourceDisabledError("指定数据源已禁用，不能加载画像")
-    assert_workspace_owner(session, job_id, source_id)
-    step = get_step_row(session, job_id, DDL_STEP)
-    if step is None:
-        return None, None
-    return step.last_status, step.updated_at
-
-
-def check_ddl_output_ready(source_id: UUID, job_id: UUID) -> bool:
+def check_ddl_output_ready(source_id: str, workspace_id: str) -> bool:
     """预检：受管 DDL 目录可读、已有 `.sql` 文件且与采集清单一致。
 
     只判断文件就绪，不解析内容；清单核对失败时记 WARNING（含原因类别），
     页面仍只显示固定的不可发布原因。
     """
     try:
-        ddl_dir = resolve_ddl_output_dir(source_id, job_id)
+        ddl_dir = resolve_ddl_output_dir(source_id, workspace_id)
         if not ddl_dir.is_dir():
             return False
         names = {path.name for path in ddl_dir.glob("*.sql")}
@@ -75,17 +45,17 @@ def check_ddl_output_ready(source_id: UUID, job_id: UUID) -> bool:
         return True
     except DDLInputError as exc:
         logger.warning(
-            "DDL 预检清单核对未通过 source_id=%s job_id=%s reason=%s",
+            "DDL 预检清单核对未通过 source_id=%s workspace_id=%s reason=%s",
             source_id,
-            job_id,
+            workspace_id,
             str(exc),
         )
         return False
     except (ValueError, OSError) as exc:
         logger.warning(
-            "DDL 预检产物目录不可用 source_id=%s job_id=%s type=%s",
+            "DDL 预检产物目录不可用 source_id=%s workspace_id=%s type=%s",
             source_id,
-            job_id,
+            workspace_id,
             type(exc).__name__,
         )
         return False
@@ -134,7 +104,7 @@ def _header_database(content: str, file_name: str) -> str:
     return matches[0]
 
 
-def read_ddl_definitions(source_id: UUID, job_id: UUID) -> tuple[list[dict], Path]:
+def read_ddl_definitions(source_id: str, workspace_id: str) -> tuple[list[dict], Path]:
     """完整读取并校验本次作业的全部 DDL 文件，形成整批行。
 
     先核对目录现状与采集清单（manifest.json）完全一致：缺件、多出或
@@ -146,7 +116,7 @@ def read_ddl_definitions(source_id: UUID, job_id: UUID) -> tuple[list[dict], Pat
     文件失败都抛 `DDLInputError`，不返回部分结果。日志只写文件名、
     对象名与错误类别，不写 DDL 原文或样例值（doc 16 §5）。
     """
-    ddl_dir = resolve_ddl_output_dir(source_id, job_id)
+    ddl_dir = resolve_ddl_output_dir(source_id, workspace_id)
     if not ddl_dir.is_dir():
         raise DDLInputError(f"DDL 目录不存在: {ddl_dir}")
     files = sorted(path for path in ddl_dir.glob("*.sql"))
@@ -211,7 +181,6 @@ def read_ddl_definitions(source_id: UUID, job_id: UUID) -> tuple[list[dict], Pat
                 "db_name": file_db,
                 "object_type": object_type,
                 "define_text": content,
-                "job_id": job_id,
             }
         )
     if len({row["db_name"] for row in rows}) != 1:

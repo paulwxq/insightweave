@@ -20,6 +20,7 @@ from src.modules.db_deepagent.state import DbDeepAgentState
 from src.modules.db_deepagent.tools import build_business_tools
 from src.modules.db_deepagent.errors import (
     AssemblyVerificationError,
+    DbAgentConfigError,
     HarnessProfileError,
 )
 from src.utils.logger import get_module_logger
@@ -168,12 +169,16 @@ def read_summary_for_handoff(state_values: dict) -> str | None:
 
 
 def build_model(cfg: DbAgentConfig) -> BaseChatModel:
-    """构造主模型并设置请求超时（§11.1）。
+    """构造主模型并设置请求超时（§11.1；doc 6.2 §7.5.2）。
 
     OpenAI 兼容路径：timeout 作为工厂覆盖参数在构造时传入（映射为
     request_timeout，客户端按该值构建）；显式配置的 overrides.timeout 优先。
     ChatTongyi：工厂拒绝 timeout 覆盖（C12），构造后经 apply_request_timeout
     写入 model_kwargs（DashScope SDK 每次调用时读取）。
+
+    model.retry.enabled=true 时（doc 6.2 §7.5.2）：构造前强制主模型客户端
+    max_retries=0（单层重试，由项目中间件统一管理次数），构造后核验实际
+    同步/异步客户端确已为零——client 为 None 只表示无法确认，同样拒绝启用。
     """
     from src.services.config_loader import get_config
     from src.services.llm_factory import get_llm
@@ -183,10 +188,78 @@ def build_model(cfg: DbAgentConfig) -> BaseChatModel:
     overrides = dict(cfg.model.overrides)
     if provider != "dashscope":
         overrides.setdefault("timeout", cfg.model.request_timeout_seconds)
+    if cfg.model.retry.enabled:
+        if provider == "dashscope":
+            raise DbAgentConfigError(
+                "统一模型重试暂只支持 OpenAI 兼容主模型；"
+                "如需保持原行为，请设置 model.retry.enabled=false"
+            )
+        if "max_retries" in overrides and (
+            type(overrides["max_retries"]) is not int or overrides["max_retries"] != 0
+        ):
+            raise DbAgentConfigError(
+                "启用项目重试时，主模型客户端 max_retries 必须为 0"
+            )
+        overrides["max_retries"] = 0
     model = get_llm(cfg.model.llm_profile, **overrides).llm
     if provider == "dashscope":
         apply_request_timeout(model, cfg.model.request_timeout_seconds)
+    if cfg.model.retry.enabled:
+        # 版本依赖（doc 6.2 §7.5.2）：root_client/root_async_client 为
+        # langchain_openai 1.7.4 的公开字段（当前为急切构造）；升级 SDK 或
+        # 改变构造方式后必须复验本检查与实际 HTTP 次数。
+        from langchain_openai import ChatOpenAI
+
+        if not isinstance(model, ChatOpenAI):
+            raise DbAgentConfigError("主模型不支持已验证的单层重试配置")
+        verify_single_layer_retry_clients(model)
     return model
+
+
+def verify_single_layer_retry_clients(model: Any) -> None:
+    """核验主模型 SDK 内部重试确已关闭（doc 6.2 §7.5.2）。
+
+    model.max_retries 与同步/异步 root 客户端的 max_retries 均须为 0；
+    client 为 None 只表示本方案当前无法确认其重试配置（不等同于已证明
+    开启重试），首版一律按拒绝启用处理，不静默跳过。
+    """
+    if model.max_retries != 0 or any(
+        client is None or client.max_retries != 0
+        for client in (model.root_client, model.root_async_client)
+    ):
+        raise DbAgentConfigError(
+            "无法确认主模型 SDK 内部重试已关闭，请检查客户端初始化或适配"
+        )
+
+
+def build_summarizer_model(cfg: DbAgentConfig) -> BaseChatModel:
+    """按摘要专用 profile 创建模型并标记调用用途（doc 5.1 §4.2）。
+
+    与 build_model 同一套工厂与超时规则：OpenAI 兼容路径在构造前经 timeout
+    覆盖参数传入（显式 summarization.overrides.timeout 优先）；原生
+    DashScope 构造后经 apply_request_timeout 写入。摘要 overrides 独立于
+    cfg.model.overrides，不继承主模型参数。摘要模型不注册主 Agent Harness
+    （只写摘要，不承担工具调用装配）。
+    """
+    from src.services.config_loader import get_config
+    from src.services.llm_factory import get_llm
+
+    s = cfg.summarization
+    profile = get_config().get("llm_profiles", {}).get(s.llm_profile) or {}
+    provider = profile.get("provider", "")
+    overrides = dict(s.overrides)
+    if provider != "dashscope":
+        overrides.setdefault("timeout", s.request_timeout_seconds)
+
+    summary_model = get_llm(s.llm_profile, **overrides).llm
+    if provider == "dashscope":
+        apply_request_timeout(summary_model, s.request_timeout_seconds)
+
+    summary_model.metadata = {
+        **(summary_model.metadata or {}),
+        "dbda_call_kind": "summarization",
+    }
+    return summary_model
 
 
 # ============================================================================
@@ -204,11 +277,18 @@ _RETRIEVAL_TOOLS = ("search_schema", "inspect_tables", "plan_joins")
 _EVIDENCE_TOOLS = ("resolve_time_range", "probe_dimension_values", "reuse_evidence")
 _SQL_TOOLS = ("validate_sql", "execute_sql")
 _RESULT_TOOLS = ("read_result", "analyze_result")  # 步骤 5 交付
+_TASK_TOOLS = ("record_sub_tasks",)  # doc 6.3
 _SUBMIT_TOOL = "submit_final_answer"
 
-# 步骤 4：9（业务+提交）+ 4（文件）= 13；步骤 5：11 + 4 = 15（§10.6）
+# doc 6.3 §10：10 业务 + 提交 + 4 文件 = 15 → 11+1+4 = 16；todos 后 17。
+# include_result_tools=False 的阶段工具集同样包含任务工具（不能变成绕过入口）。
 STEP4_TOOLS = frozenset(
-    _FILE_TOOLS + _RETRIEVAL_TOOLS + _EVIDENCE_TOOLS + _SQL_TOOLS + (_SUBMIT_TOOL,)
+    _FILE_TOOLS
+    + _RETRIEVAL_TOOLS
+    + _EVIDENCE_TOOLS
+    + _SQL_TOOLS
+    + _TASK_TOOLS
+    + (_SUBMIT_TOOL,)
 )
 FULL_TOOLS = frozenset(set(STEP4_TOOLS) | set(_RESULT_TOOLS))
 
@@ -222,29 +302,29 @@ TOOL_VISIBLE_FIELDS: dict[str, tuple[list[str], list[str]]] = {
         ["base_table", "target_tables"],
     ),
     "resolve_time_range": (
-        [
-            "source_text",
-            "kind",
-            "relative",
-            "n",
-            "year",
-            "quarter",
-            "month",
-            "day",
-            "start_date",
-            "end_date_inclusive",
-            "boundary_date",
-            "relation",
-        ],
-        ["source_text", "kind"],
+        ["source_text", "context"],
+        ["source_text"],
     ),
     "probe_dimension_values": (
         ["table_id", "column", "mode", "value_text", "limit"],
         ["table_id", "column", "mode"],
     ),
-    "reuse_evidence": (["evidence_ids"], ["evidence_ids"]),
-    "validate_sql": (["sql"], ["sql"]),
-    "execute_sql": (["sql"], ["sql"]),
+    "reuse_evidence": (
+        ["evidence_ids", "source_evidence_refs", "sub_task_id", "sub_task_revision"],
+        [],
+    ),
+    "validate_sql": (
+        ["sql", "sub_task_id", "sub_task_revision"],
+        ["sql", "sub_task_id", "sub_task_revision"],
+    ),
+    "execute_sql": (
+        ["sql", "sub_task_id", "sub_task_revision"],
+        ["sql", "sub_task_id", "sub_task_revision"],
+    ),
+    "record_sub_tasks": (
+        ["expected_plan_version", "operations"],
+        ["expected_plan_version", "operations"],
+    ),
     _SUBMIT_TOOL: (
         [
             "status",
@@ -253,6 +333,7 @@ TOOL_VISIBLE_FIELDS: dict[str, tuple[list[str], list[str]]] = {
             "metric_definitions",
             "limitations",
             "open_questions",
+            "unresolved_task_refs",
         ],
         ["status", "answer"],
     ),
@@ -261,8 +342,15 @@ TOOL_VISIBLE_FIELDS: dict[str, tuple[list[str], list[str]]] = {
         ["result_ref"],
     ),
     "analyze_result": (
-        ["operation", "inputs", "params", "allow_pushdown"],
-        ["operation", "inputs", "params"],
+        [
+            "operation",
+            "inputs",
+            "params",
+            "allow_pushdown",
+            "sub_task_id",
+            "sub_task_revision",
+        ],
+        ["operation", "inputs", "params", "sub_task_id", "sub_task_revision"],
     ),
 }
 
@@ -289,6 +377,14 @@ _HIDDEN_PATHS = ["/**/.*", "/**/.*/**"]
 
 
 def build_session_dir(cfg: "DbAgentConfig", session_id: str) -> Path:
+    # ID 校验先于目录副作用（doc 2 §4.2）：非法 session_id 不得创建目录
+    from src.modules.db_deepagent.persistence.checkpoint import valid_web_id
+
+    if not valid_web_id(session_id):
+        raise ValueError(
+            f"session_id 非法（允许 [A-Za-z0-9_-]，长度 1–64，禁冒号）: "
+            f"{session_id!r}"
+        )
     session_dir = Path(cfg.workspace.root) / "sessions" / session_id
     (session_dir / "artifacts").mkdir(parents=True, exist_ok=True)
     (session_dir / "empty_root").mkdir(parents=True, exist_ok=True)
@@ -350,14 +446,19 @@ def build_backend(session_dir: Path, cfg: "DbAgentConfig"):
 
 
 def build_filesystem_middleware(backend, permissions, cfg: "DbAgentConfig"):
-    """§10.2 私有适配点：白名单实例，显式传 _permissions 与转存阈值。"""
+    """§10.2 适配点：白名单实例，显式传 permissions 与转存阈值。
+
+    DeepAgents 0.7.31 起公开 `permissions=`（`_permissions` 弃用，0.9.0 移除）；
+    0.7.34 对自定义文件中间件做 Agent 权限继承与冲突检查，本函数必须与
+    `create_deep_agent(permissions=...)` 传同一组规则（doc 1 §4.1）。
+    """
     from deepagents import FilesystemMiddleware
 
     return FilesystemMiddleware(
         backend=backend,
         tools=list(_FILE_TOOLS),
         tool_token_limit_before_evict=cfg.filesystem.tool_token_limit_before_evict,
-        _permissions=permissions,
+        permissions=permissions,
     )
 
 
@@ -453,9 +554,9 @@ def build_db_agent(
     """按 §10.1 顺序装配；verify_assembly 失败即抛错（步骤 5：15 件口径）。"""
     from deepagents import create_deep_agent
     from deepagents.middleware.summarization import SummarizationMiddleware
-    from deepagents.middleware.patch_tool_calls import PatchToolCallsMiddleware
 
     from src.modules.db_deepagent.middleware import (
+        BudgetAwareModelRetryMiddleware,
         FinalAnswerGateMiddleware,
         RequestAuditMiddleware,
         RunBudgetMiddleware,
@@ -473,13 +574,11 @@ def build_db_agent(
     file_mw = build_filesystem_middleware(backend, permissions, cfg)
 
     prompts = load_prompts()
-    summary_model = model.model_copy()
-    summary_model.metadata = {
-        **(model.metadata or {}),
-        "dbda_call_kind": "summarization",
-    }
+    # doc 5.1 §4.3：摘要模型独立构造（专用 profile/overrides/超时），不再复制主模型
+    summary_model = build_summarizer_model(cfg)
     summary_mw = SummarizationMiddleware(
-        summary_model,
+        model=model,
+        summarizer=summary_model,
         backend=backend,
         summary_prompt=build_summary_prompt(prompts),
         trigger=("tokens", cfg.summarization.summary_trigger_tokens),
@@ -490,14 +589,22 @@ def build_db_agent(
     extra_mw = [
         FinalAnswerGateMiddleware(services.budget, cfg.budget),
         RunBudgetMiddleware(services.budget, cfg.budget),
+    ]
+    # doc 6.2 §7.6：重试放在请求审计外层（wrapper 链以列表较前项为外层），
+    # 每次重试尝试重新经过工具集合核对；仅 model.retry.enabled 时装配。
+    if cfg.model.retry.enabled:
+        extra_mw.append(
+            BudgetAwareModelRetryMiddleware(services.budget, cfg.model.retry)
+        )
+    extra_mw.append(
         RequestAuditMiddleware(
             expected_tool_names=lambda: stage_expected_tool_names(
                 cfg, include_result_tools=include_result_tools
             ),
             budget=services.budget,
             workspace_root=Path(cfg.workspace.root),
-        ),
-    ]
+        )
+    )
     if cfg.features.todo_list:
         from langchain.agents.middleware import TodoListMiddleware
 
@@ -519,7 +626,11 @@ def build_db_agent(
             make_execute_sql_tool,
             make_validate_sql_tool,
         )
+        from src.modules.db_deepagent.tools.task_tools import (
+            make_record_sub_tasks_tool,
+        )
 
+        # doc 6.3 §10：阶段工具集同样包含任务工具，不能变成绕过入口
         tools = [
             make_search_schema_tool(services),
             make_inspect_tables_tool(services),
@@ -529,14 +640,15 @@ def build_db_agent(
             make_reuse_evidence_tool(services),
             make_validate_sql_tool(services),
             make_execute_sql_tool(services),
+            make_record_sub_tasks_tool(services),
         ]
-    tools.append(make_submit_final_answer_tool())
+    tools.append(make_submit_final_answer_tool(services))
 
     agent = create_deep_agent(
         model=model,
         system_prompt=prompts["agent"]["system_prompt"],
         tools=tools,
-        middleware=[file_mw, summary_mw, PatchToolCallsMiddleware(), *extra_mw],
+        middleware=[file_mw, summary_mw, *extra_mw],
         subagents=[],
         skills=["/skills/"],
         memory=(["/memory/memory_context.md"] if cfg.features.memory else None),

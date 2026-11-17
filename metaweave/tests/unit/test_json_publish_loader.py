@@ -12,13 +12,13 @@ from backend.profile_loading import json_loader
 from backend.profile_loading.json_loader import (
     JsonPublishInputError,
     build_profile_rows,
-    inspect_json_profile_context,
     read_managed_json_documents,
     read_registration_snapshot,
 )
 
-SOURCE_ID = UUID("b9a4943d-44d6-4f35-b553-d25207f9d8c1")
-JOB_ID = UUID("550e8400-e29b-41d4-a716-446655440000")
+# 新模型身份：source/workspace 短 ID + 发布运行 UUID（doc 6 §1）
+SOURCE_ID = "db_src_1"
+JOB_ID = "ws_1"  # 工作区定位槽位
 PUBLISH_ID = UUID("63221a9e-6a82-4311-a08c-9f74001da835")
 DB_NAME = "ordersdb"
 RUN_MARKER = datetime(2026, 10, 3, 10, 0, 0, tzinfo=timezone.utc)
@@ -165,7 +165,7 @@ def project_root(tmp_path, monkeypatch):
     monkeypatch.setattr(file_utils, "get_project_root", lambda: tmp_path)
 
 
-def _patch_context(monkeypatch, *, active=True, exists=True, step=None):
+def _patch_context(monkeypatch, *, active=True, exists=True):
     source = (
         SimpleNamespace(
             is_active=active,
@@ -177,38 +177,7 @@ def _patch_context(monkeypatch, *, active=True, exists=True, step=None):
         else None
     )
     monkeypatch.setattr(json_loader, "get_db_source", lambda session, sid: source)
-    monkeypatch.setattr(
-        json_loader, "assert_workspace_owner", lambda session, jid, sid: None
-    )
-    monkeypatch.setattr(json_loader, "get_step_row", lambda session, jid, name: step)
     return source
-
-
-class TestInspectJsonProfileContext:
-    def test_missing_source_raises(self, monkeypatch):
-        from backend.profile_loading.db_loader import MetaLoadSourceNotFoundError
-
-        _patch_context(monkeypatch, exists=False)
-        with pytest.raises(MetaLoadSourceNotFoundError):
-            inspect_json_profile_context(object(), SOURCE_ID, JOB_ID)
-
-    def test_disabled_source_raises(self, monkeypatch):
-        from backend.profile_loading.db_loader import MetaLoadSourceDisabledError
-
-        _patch_context(monkeypatch, active=False)
-        with pytest.raises(MetaLoadSourceDisabledError):
-            inspect_json_profile_context(object(), SOURCE_ID, JOB_ID)
-
-    def test_returns_status_and_marker(self, monkeypatch):
-        step = SimpleNamespace(last_status="success", updated_at=RUN_MARKER)
-        _patch_context(monkeypatch, step=step)
-        status, marker = inspect_json_profile_context(object(), SOURCE_ID, JOB_ID)
-        assert status == "success"
-        assert marker == RUN_MARKER
-
-    def test_missing_step_row_returns_none_pair(self, monkeypatch):
-        _patch_context(monkeypatch)
-        assert inspect_json_profile_context(object(), SOURCE_ID, JOB_ID) == (None, None)
 
 
 class TestReadRegistrationSnapshot:
@@ -283,9 +252,7 @@ class TestReadManagedJsonDocuments:
 
 class TestBuildProfileRowsValidation:
     def _build(self, documents, selected_schemas=("public",)):
-        return build_profile_rows(
-            SOURCE_ID, JOB_ID, PUBLISH_ID, documents, selected_schemas
-        )
+        return build_profile_rows(SOURCE_ID, PUBLISH_ID, documents, selected_schemas)
 
     def test_empty_column_profiles_rejected(self):
         document = sample_document()
@@ -392,9 +359,7 @@ class TestBuildProfileRowsValidation:
 
 class TestBuildProfileRowsMapping:
     def _build(self, documents, selected_schemas=("public",)):
-        return build_profile_rows(
-            SOURCE_ID, JOB_ID, PUBLISH_ID, documents, selected_schemas
-        )
+        return build_profile_rows(SOURCE_ID, PUBLISH_ID, documents, selected_schemas)
 
     def test_full_mapping(self):
         table_rows, column_rows = self._build([sample_document()])
@@ -405,8 +370,7 @@ class TestBuildProfileRowsMapping:
         assert row["object_name"] == "orders"
         assert row["db_name"] == DB_NAME
         assert row["object_type"] == "table"
-        assert row["publish_id"] == PUBLISH_ID
-        assert row["job_id"] == JOB_ID
+        assert row["publish_run_id"] == PUBLISH_ID
         assert row["metadata_version"] == "3.0"
         assert row["generated_timestamp"] is not None
         assert row["object_comment"] == "订单表"
@@ -427,7 +391,7 @@ class TestBuildProfileRowsMapping:
         assert row["json_sample_records"] == {"sample_method": "limit", "records": []}
         # 字段行
         order_id = next(c for c in column_rows if c["column_name"] == "order_id")
-        assert order_id["publish_id"] == PUBLISH_ID
+        assert order_id["publish_run_id"] == PUBLISH_ID
         assert order_id["ordinal_position"] == 1
         assert order_id["data_type"] == "integer"
         assert order_id["is_nullable"] is False
@@ -570,9 +534,7 @@ class TestNodeTypeChecks:
     """非 dict 的节点必须受控拒绝，不得被 or {} 吞成缺失（doc 19.2 §7.2）。"""
 
     def _build(self, documents, selected_schemas=("public",)):
-        return build_profile_rows(
-            SOURCE_ID, JOB_ID, PUBLISH_ID, documents, selected_schemas
-        )
+        return build_profile_rows(SOURCE_ID, PUBLISH_ID, documents, selected_schemas)
 
     def test_non_dict_physical_constraints_rejected(self):
         document = sample_document()
@@ -627,9 +589,7 @@ class TestAwareTimestampConstraint:
     """
 
     def _build(self, documents, selected_schemas=("public",)):
-        return build_profile_rows(
-            SOURCE_ID, JOB_ID, PUBLISH_ID, documents, selected_schemas
-        )
+        return build_profile_rows(SOURCE_ID, PUBLISH_ID, documents, selected_schemas)
 
     def test_naive_timestamp_rejected(self):
         document = sample_document()
@@ -658,3 +618,40 @@ class TestAwareTimestampConstraint:
         del document["generated_timestamp"]
         rows, _ = self._build([document])
         assert rows[0]["generated_timestamp"] is None
+
+
+# ---- doc 7.1 §8.13：画像新增推荐属性的发布兼容回归 ----
+
+
+class TestDimensionValueRecommendationPublishCompat:
+    def test_validate_accepts_valid_recommendation(self):
+        doc = sample_document()
+        doc["table_profile"]["dimension_value_columns"] = ["amount"]
+        doc["table_profile"]["dimension_value_confidence"] = 0.8
+        json_loader._validate_document(doc, ["public"])  # 不抛即通过
+
+    @pytest.mark.parametrize(
+        "extra",
+        [
+            {"dimension_value_columns": [], "dimension_value_confidence": None},
+            {},
+        ],
+        ids=["empty", "missing"],
+    )
+    def test_validate_accepts_empty_and_missing_variants(self, extra):
+        doc = sample_document()
+        doc["table_profile"].update(extra)
+        json_loader._validate_document(doc, ["public"])
+
+    def test_table_row_drops_recommendation_fields(self):
+        doc = sample_document()
+        doc["table_profile"]["dimension_value_columns"] = ["amount"]
+        doc["table_profile"]["dimension_value_confidence"] = 0.8
+
+        row = json_loader._table_row(
+            doc, source_id=SOURCE_ID, publish_run_id=PUBLISH_ID
+        )
+
+        assert "dimension_value_columns" not in row
+        assert "dimension_value_confidence" not in row
+        assert row["table_category"] == "fact"

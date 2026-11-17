@@ -21,23 +21,23 @@ import json
 import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
-from uuid import UUID, uuid4
+from uuid import uuid4
 
 from backend.data_sources.repository import get_db_source
-from backend.jobs.repository import assert_workspace_owner, get_step_row
+
 from backend.persistence.platform_db import PlatformSettings, platform_session
 from backend.profile_loading.file_utils import read_regular_text
 from backend.profile_loading.db_loader import (
     MetaLoadSourceDisabledError,
     MetaLoadSourceNotFoundError,
 )
-from backend.publishing.repository import lock_db_source_row
+
 from metaweave.core.clean_targets import resolve_json_output_dir, resolve_rel_output_dir
 from metaweave.core.metadata.execution import load_main_config_snapshot
 from metaweave.core.relationships.models import relation_from_json_entry
 from metaweave.core.relationships.writer import render_markdown_report
 from metaweave.utils.file_utils import resolve_project_path
-from metaweave.utils.source_id import normalize_source_id
+from metaweave.utils.source_id import normalize_workspace_id
 
 REL_CONFIG_STEP_NAME = "rel"
 JSON_MANIFEST_NAME = "manifest.json"
@@ -48,9 +48,11 @@ VALID_CARDINALITIES = {"N:1", "1:1", "M:N"}
 class RelConfigOutputMissingError(Exception):
     """404 rel_config_output_missing：rel 步骤行缺失/未成功或产物文件不存在。"""
 
-    def __init__(self, message: str):
-        super().__init__(message)
-        self.details: Dict[str, Any] = {}
+
+# 409 rel_publish_in_progress：同工作区有 running 的 Rel 发布（doc 8.1 §5.1.1）。
+# 错误类统一定义在 publishing.repository（domain/rel 配置保存共用），
+# 此处 re-export 供既有导入方使用。
+from backend.publishing.repository import RelPublishInProgressError  # noqa: F401,E402
 
 
 class RelConfigInvalidError(ValueError):
@@ -102,24 +104,31 @@ def _fingerprint(content: str) -> str:
     return hashlib.sha256(content.encode("utf-8")).hexdigest()[:16]
 
 
-def _resolve_identifiers(source_id, job_id) -> Tuple[UUID, UUID]:
-    return normalize_source_id(source_id), normalize_source_id(job_id)
+def _require_workspace(session, workspace_id: str):
+    """工作区归属核对：返回 (workspace, source_id)；并要求 rel 目录成功 marker。"""
+    from backend.workspaces.repository import get_workspace
+    from backend.workspace_files.markers import read_collection_marker
+    from metaweave.core.clean_targets import resolve_rel_output_dir
 
-
-def _require_rel_step_row(session, job_uuid: UUID):
-    """rel 步骤行存在且 success（§4.1：编辑面向正常采集产物）。"""
-    row = get_step_row(session, job_uuid, REL_CONFIG_STEP_NAME)
-    if row is None:
-        raise RelConfigOutputMissingError("该作业没有 Rel 步骤记录，请先执行 Rel")
-    if row.last_status != "success":
+    workspace = get_workspace(session, workspace_id)
+    if workspace is None:
+        raise RelConfigOutputMissingError("工作区不存在")
+    marker, error = read_collection_marker(
+        resolve_rel_output_dir(workspace.source_id, workspace_id)
+    )
+    if marker is None:
         raise RelConfigOutputMissingError(
-            "该作业的 Rel 步骤未成功，请先重跑 Rel 后再编辑"
+            error or "该工作区没有 Rel 采集 marker，请先执行 Rel"
         )
-    return row
+    if marker.status != "success":
+        raise RelConfigOutputMissingError(
+            "该工作区的 Rel 采集未成功，请先重跑 Rel 后再编辑"
+        )
+    return workspace
 
 
-def _require_registration(session, source_uuid: UUID):
-    source = get_db_source(session, source_uuid)
+def _require_registration(session, source_id: str):
+    source = get_db_source(session, source_id)
     if source is None:
         raise MetaLoadSourceNotFoundError("未找到指定 source_id 的数据源")
     if not source.is_active:
@@ -127,8 +136,8 @@ def _require_registration(session, source_uuid: UUID):
     return source
 
 
-def _artifact_paths(source_uuid: UUID, job_uuid: UUID, database_name: str):
-    rel_dir = resolve_rel_output_dir(source_uuid, job_uuid)
+def _artifact_paths(source_id: str, workspace_id: str, database_name: str):
+    rel_dir = resolve_rel_output_dir(source_id, workspace_id)
     return (
         rel_dir,
         rel_dir / f"{database_name}.relationships_global.json",
@@ -200,17 +209,24 @@ def _load_table_columns(json_dir: Path) -> Dict[str, List[str]]:
 # ---- GET rel-config（§4.1） ----
 
 
-def read_rel_config(settings: PlatformSettings, source_id, job_id) -> Dict[str, Any]:
-    source_uuid, job_uuid = _resolve_identifiers(source_id, job_id)
+def read_rel_config(settings: PlatformSettings, workspace_id) -> Dict[str, Any]:
+    workspace_id = normalize_workspace_id(workspace_id)
     with platform_session(settings) as session:
-        _require_rel_step_row(session, job_uuid)
-        source = _require_registration(session, source_uuid)
-        assert_workspace_owner(session, job_uuid, source_uuid)
+        # doc 8.1 §8.1：只读守卫（已删工作区 410；删除中仍可查看）
+        from backend.access_guards import require_workspace
 
-        _, json_path, _ = _artifact_paths(source_uuid, job_uuid, source.db_name)
+        require_workspace(session, workspace_id)
+        workspace = _require_workspace(session, workspace_id)
+        source = _require_registration(session, workspace.source_id)
+
+        _, json_path, _ = _artifact_paths(
+            workspace.source_id, workspace_id, source.db_name
+        )
         content, data = _load_rel_artifact(json_path)
 
-        catalog = _load_table_columns(resolve_json_output_dir(source_uuid, job_uuid))
+        catalog = _load_table_columns(
+            resolve_json_output_dir(workspace.source_id, workspace_id)
+        )
         try:
             main_config = load_main_config_snapshot(
                 resolve_project_path(METADATA_CONFIG)
@@ -235,15 +251,16 @@ def read_rel_config(settings: PlatformSettings, source_id, job_id) -> Dict[str, 
 
 
 def read_rel_object_columns(
-    settings: PlatformSettings, source_id, job_id, schema_name: str, object_name: str
+    settings: PlatformSettings, workspace_id, schema_name: str, object_name: str
 ) -> Dict[str, Any]:
-    source_uuid, job_uuid = _resolve_identifiers(source_id, job_id)
+    workspace_id = normalize_workspace_id(workspace_id)
     with platform_session(settings) as session:
-        _require_rel_step_row(session, job_uuid)
-        _require_registration(session, source_uuid)
-        assert_workspace_owner(session, job_uuid, source_uuid)
+        workspace = _require_workspace(session, workspace_id)
+        _require_registration(session, workspace.source_id)
 
-        catalog = _load_table_columns(resolve_json_output_dir(source_uuid, job_uuid))
+        catalog = _load_table_columns(
+            resolve_json_output_dir(workspace.source_id, workspace_id)
+        )
         columns = catalog.get(f"{schema_name}.{object_name}")
         if columns is None:
             raise RelConfigOutputMissingError(
@@ -542,10 +559,10 @@ def _make_temp_file(directory: Path) -> Tuple[int, Path]:
 
 
 def write_rel_config(
-    settings: PlatformSettings, source_id, job_id, payload: Dict[str, Any]
+    settings: PlatformSettings, workspace_id, payload: Dict[str, Any]
 ) -> Dict[str, Any]:
-    """PUT：持源行锁的指纹并发 + 校验 + 两阶段写回（§4.2/§4.3）。"""
-    source_uuid, job_uuid = _resolve_identifiers(source_id, job_id)
+    """PUT：工作区行锁下的指纹并发 + 校验 + 文件级备份 + 两阶段写回（§4.2/§4.3、doc 6.2 §5.2）。"""
+    workspace_id = normalize_workspace_id(workspace_id)
 
     # 主配置快照（渲染阈值用，§5.2；锁外加载，只读）
     try:
@@ -556,16 +573,40 @@ def write_rel_config(
         ) from None
 
     with platform_session(settings) as session:
-        source = lock_db_source_row(session, source_uuid)
-        if source is None:
-            raise MetaLoadSourceNotFoundError("未找到指定 source_id 的数据源")
+        from backend.access_guards import require_workspace
+        from backend.deletion.locks import lock_source_row, lock_workspace_row
+        from backend.persistence.models import WorkspaceInfo
+        from backend.workspace_files.backups import (
+            EditBackupFailedError,
+            backup_files_before_edit,
+        )
+
+        # doc 8.1 §5.1.1：定位父级 → 锁源 → 锁工作区，锁内复查冻结；
+        # 保留原指纹并发校验（409 rel_regenerated），层级锁不替代它
+        probe = session.get(WorkspaceInfo, workspace_id)
+        if probe is not None:
+            lock_source_row(session, probe.source_id)
+        workspace_row = lock_workspace_row(session, workspace_id)
+        if workspace_row is None:
+            raise RelConfigOutputMissingError("工作区不存在")
+        require_workspace(session, workspace_id, for_write=True)
+        # doc 8.1 §5.1.1 + doc 10.2 §5.2：发布运行中不得改变输入（双向保留，
+        # pending/running 均占用；409 workspace_publish_active）
+        from backend.publishing.repository import (
+            WorkspacePublishActiveError,
+            active_publish_run_for_workspace,
+        )
+
+        publish_active = active_publish_run_for_workspace(session, workspace_id)
+        if publish_active is not None:
+            raise WorkspacePublishActiveError(publish_active)
+        _require_workspace(session, workspace_id)
+        source = _require_registration(session, workspace_row.source_id)
         if not source.is_active:
             raise MetaLoadSourceDisabledError("指定数据源已禁用，不能编辑 Rel 产物")
-        assert_workspace_owner(session, job_uuid, source_uuid)
-        _require_rel_step_row(session, job_uuid)
 
         rel_dir, json_path, md_path = _artifact_paths(
-            source_uuid, job_uuid, source.db_name
+            workspace_row.source_id, workspace_id, source.db_name
         )
 
         # 1. 指纹核对（§4.2 第 1 步）+ 解析
@@ -576,7 +617,9 @@ def write_rel_config(
             raise RelRegeneratedError()
 
         # 2. 逐条校验与构造（§4.2 第 2 步）
-        catalog = _load_table_columns(resolve_json_output_dir(source_uuid, job_uuid))
+        catalog = _load_table_columns(
+            resolve_json_output_dir(workspace_row.source_id, workspace_id)
+        )
         entries = _validate_and_build(
             data["relationships"], payload.get("relationships"), catalog
         )
@@ -589,6 +632,15 @@ def write_rel_config(
         # 4+5. 渲染与两阶段写回（§4.3）：渲染→临时文件→替换（先 md 后 json）。
         # 渲染/写临时文件失败：两份原文件未动；替换失败：至多 md 领先、
         # json 未变 ⟹ 指纹有效 ⟹ 重试即恢复（对 md 为幂等重渲染）。
+        # 文件级备份（doc 6.2 §5.2）：只复制本次将被覆盖的两份旧版；
+        # 失败则本次保存终止，不写回、不删除任何现有内容，不触碰 marker。
+        try:
+            backup_files_before_edit(rel_dir, [json_path.name, md_path.name])
+        except EditBackupFailedError as exc:
+            raise RelWriteFailedError(
+                f"Rel 编辑备份失败，本次保存未执行：{exc}"
+            ) from None
+
         json_tmp: Optional[Path] = None
         md_tmp: Optional[Path] = None
         stage = "render"

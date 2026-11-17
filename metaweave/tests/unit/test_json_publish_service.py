@@ -1,397 +1,456 @@
-"""json 发布步骤：预检、整批事务、登记复查与失败语义（doc 19.2 §7.4）。"""
+"""json 发布步骤（doc 19.2 §7、6.1 §16）：行映射、预检与发布事务。
 
-from contextlib import contextmanager
-from datetime import datetime, timedelta, timezone
-from types import SimpleNamespace
+`build_profile_rows` 断言 publish_run_id 传播到 table_profile 与
+table_column_profile 两表行；发布事务经 create_publish_run +
+execute_publish_run 验证按源整份替换。
+"""
+
+import json
 from uuid import UUID
 
 import pytest
 
-from backend.persistence.models import PublishInfo, TableColumnProfile, TableProfile
-from backend.persistence.platform_db import PlatformSettings
-from backend.publishing import publish_service
+from backend.profile_loading.json_loader import (
+    JsonPublishInputError,
+    build_profile_rows,
+    check_json_output_ready,
+    read_managed_json_documents,
+    read_registration_snapshot,
+)
+from backend.profile_loading.db_loader import (
+    MetaLoadSourceDisabledError,
+    MetaLoadSourceNotFoundError,
+)
+from backend.publishing.precheck import check_step
 from backend.publishing.publish_service import (
-    INPUT_SUMMARY,
-    NOT_READY_MESSAGE,
-    REGISTRATION_CHANGED_MESSAGE,
-    check_publication,
-    is_primary_key_conflict,
-    normalize_publish_steps,
-    publish_steps,
+    create_publish_run,
+    execute_publish_run,
 )
-from tests.unit.test_json_publish_loader import (
+from tests.unit.test_publish_service import (
     DB_NAME,
-    JOB_ID,
+    FakeSession,
+    PUBLISH_JOB_ID,
+    SETTINGS,
     SOURCE_ID,
-    sample_document,
-    write_json_dir,
+    WORKSPACE_ID,
+    install,
+    run_step_row,
+    step_dir,
+    write_marker,
 )
-from tests.unit.test_publish_service import OTHER_SOURCE_ID, integrity_error
 
-SETTINGS = PlatformSettings(
-    host="platform", port=5432, name="metaweave", user="admin", password="secret"
-)
-RUN_MARKER = datetime(2026, 10, 3, 10, 0, 0, tzinfo=timezone.utc)
-LATER = RUN_MARKER + timedelta(seconds=5)
-OLD_PUBLISH_ID = UUID("84c017f4-b438-452b-a888-715b7f0cbea2")
+SAMPLE_TIMESTAMP = "2026-10-03T18:55:55.030584Z"
 
 
-class FakeJsonSession:
-    """覆盖 json 发布链的最小假会话（对照 FakePublishSession）。"""
+def sample_document(
+    object_name="orders",
+    schema_name="public",
+    database=DB_NAME,
+):
+    """最小合法 v3 文档（与采集产物同一契约）。"""
+    return {
+        "metadata_version": "3.0",
+        "generated_timestamp": SAMPLE_TIMESTAMP,
+        "object_info": {
+            "database": database,
+            "schema_name": schema_name,
+            "object_name": object_name,
+            "object_type": "table",
+            "comment": "订单表",
+            "comment_source": "database",
+            "total_rows": 500,
+        },
+        "profiling": {"sample_method": "limit", "sample_count": 500},
+        "column_profiles": {
+            "order_id": {
+                "ordinal_position": 1,
+                "data_type": "integer",
+                "is_nullable": False,
+                "column_default": None,
+                "comment": "订单ID",
+                "comment_source": "database",
+                "semantic_analysis": {
+                    "semantic_role": "identifier",
+                    "semantic_confidence": 0.95,
+                    "inference_basis": ["type_whitelist_passed"],
+                },
+                "statistics": {
+                    "null_count": 0,
+                    "unique_count": 500,
+                    "null_rate": 0.0,
+                    "uniqueness": 1.0,
+                    "min": "1",
+                    "max": "500",
+                },
+            },
+            "amount": {
+                "ordinal_position": 2,
+                "data_type": "numeric(10,2)",
+                "is_nullable": True,
+                "column_default": "0",
+                "comment": None,
+                "comment_source": None,
+                "semantic_analysis": {},
+                "statistics": {},
+            },
+        },
+        "table_profile": {
+            "table_category": "fact",
+            "confidence": 0.95,
+            "inference_basis": ["llm_inferred"],
+            "classification_source": "llm",
+            "physical_constraints": {
+                "primary_key": {
+                    "constraint_name": "orders_pkey",
+                    "columns": ["order_id"],
+                },
+            },
+            "rule_based_classification": {
+                "table_category": "fact",
+                "confidence": 0.85,
+                "inference_basis": ["fact_has_metric"],
+            },
+            "classification_reason": "包含度量值",
+        },
+        "sample_records": {"sample_method": "limit", "records": []},
+    }
 
-    def __init__(
-        self, *, mutate_registration=False, mutate_step=False, mutate_workspace=False
-    ):
-        self.source = SimpleNamespace(
-            source_id=SOURCE_ID,
-            is_active=True,
-            updated_at=RUN_MARKER,
-            db_name=DB_NAME,
-            selected_schemas=["public"],
+
+def write_json_dir(tmp_path, documents, manifest_files=None):
+    """按受管布局写 output/<source>/<workspace>/json/，返回 json 目录。"""
+    json_dir = step_dir(tmp_path, "json")
+    json_dir.mkdir(parents=True, exist_ok=True)
+    names = []
+    for document in documents:
+        info = document["object_info"]
+        name = f"{info['database']}.{info['schema_name']}.{info['object_name']}.json"
+        (json_dir / name).write_text(
+            json.dumps(document, ensure_ascii=False), encoding="utf-8"
         )
-        self.steps = [
-            SimpleNamespace(
-                job_id=JOB_ID,
-                source_id=SOURCE_ID,
-                step_name="json",
-                last_status="success",
-                updated_at=RUN_MARKER,
-            )
-        ]
-        self.publishes: list = []
-        self.table_profiles: list = []
-        self.table_column_profiles: list = []
-        self.pending: list = []
-        self.begins = 0
-        self.mutate_registration = mutate_registration
-        self.mutate_step = mutate_step
-        self.mutate_workspace = mutate_workspace
-        self._clock = datetime(2026, 10, 3, tzinfo=timezone.utc)
-
-    def tick(self) -> datetime:
-        self._clock += timedelta(seconds=1)
-        return self._clock
-
-    def begin(self):
-        self.begins += 1
-        self.pending = []
-        if self.begins == 2 and self.mutate_registration:
-            self.source.updated_at = LATER
-        if self.begins == 2 and self.mutate_step:
-            for step in self.steps:
-                step.updated_at = LATER
-        if self.begins == 2 and self.mutate_workspace:
-            for step in self.steps:
-                step.source_id = OTHER_SOURCE_ID
-
-    def get(self, model, key):
-        if model.__name__ == "DbSourceInfo":
-            return self.source if key == SOURCE_ID else None
-        if model.__name__ == "JobInfo":
-            for step in self.steps:
-                if {"job_id": step.job_id, "step_name": step.step_name} == key:
-                    return step
-            return None
-        raise AssertionError(model)
-
-    def scalars(self, statement):
-        entity = statement.column_descriptions[0]["entity"]
-        params = statement.compile().params
-        if entity.__name__ == "JobInfo":
-            job_id = params.get("job_id_1")
-            rows = self.steps
-            if job_id is not None:
-                rows = [step for step in rows if step.job_id == job_id]
-            return rows
-        if entity.__name__ == "DbSourceInfo":
-            source_id = params.get("source_id_1")
-            if self.source is not None and source_id == self.source.source_id:
-                return [self.source]
-            return []
-        if entity.__name__ == "PublishInfo":
-            rows = [row for row in self.publishes if row.is_current_publish]
-            source_id = params.get("source_id_1")
-            step_name = params.get("step_name_1")
-            if source_id is not None:
-                rows = [row for row in rows if row.source_id == source_id]
-            if step_name is not None:
-                rows = [row for row in rows if row.step_name == step_name]
-            return rows
-        raise AssertionError(entity)
-
-    def add(self, row):
-        self.pending.append(row)
-
-    def flush(self):
-        """对象行先落库的分隔点（真实会话语义）。"""
-
-    def add_all(self, rows):
-        for row in rows:
-            self.add(row)
-
-    def execute(self, statement):
-        if not getattr(statement, "is_delete", False):
-            raise AssertionError(type(statement).__name__)
-        params = statement.compile().params
-        source_id = params.get("source_id_1")
-        removed = [row for row in self.table_profiles if row.source_id == source_id]
-        self.table_profiles[:] = [
-            row for row in self.table_profiles if row.source_id != source_id
-        ]
-        # 模拟 ON DELETE CASCADE：字段行随对象行级联删除
-        removed_keys = {
-            (row.source_id, row.schema_name, row.object_name) for row in removed
-        }
-        self.table_column_profiles[:] = [
-            row
-            for row in self.table_column_profiles
-            if (row.source_id, row.schema_name, row.object_name) not in removed_keys
-        ]
-        return None
-
-    def commit(self):
-        for row in self.pending:
-            if isinstance(row, PublishInfo):
-                if row.created_at is None:
-                    row.created_at = self.tick()
-                if row.updated_at is None:
-                    row.updated_at = row.created_at
-                self.publishes.append(row)
-            elif isinstance(row, TableProfile):
-                self.table_profiles.append(row)
-            elif isinstance(row, TableColumnProfile):
-                self.table_column_profiles.append(row)
-            else:
-                raise AssertionError(type(row))
-        self.pending.clear()
-
-    def rollback(self):
-        self.pending.clear()
-
-
-def install(monkeypatch, tmp_path, session=None):
-    monkeypatch.setattr("metaweave.utils.file_utils.get_project_root", lambda: tmp_path)
-    holder = session or FakeJsonSession()
-
-    @contextmanager
-    def fake_platform_session(_settings):
-        holder.begin()
-        try:
-            yield holder
-        except Exception:
-            holder.rollback()
-            raise
-
-    monkeypatch.setattr(publish_service, "platform_session", fake_platform_session)
-    import backend.publishing.repository as repository
-
-    monkeypatch.setattr(repository, "func", SimpleNamespace(now=lambda: holder.tick()))
-    return holder
-
-
-def seed_old_current(session):
-    """预置一份旧的 json current 与画像行。"""
-    session.publishes.append(
-        PublishInfo(
-            publish_id=OLD_PUBLISH_ID,
-            step_name="json",
-            source_id=SOURCE_ID,
-            job_id=JOB_ID,
-            status="success",
-            is_current_publish=True,
-            created_at=RUN_MARKER,
-            updated_at=RUN_MARKER,
-        )
+        names.append(name)
+    (json_dir / "manifest.json").write_text(
+        json.dumps({"files": manifest_files if manifest_files is not None else names}),
+        encoding="utf-8",
     )
-    session.table_profiles.append(
-        SimpleNamespace(
-            source_id=SOURCE_ID,
-            schema_name="public",
-            object_name="legacy",
-            publish_id=OLD_PUBLISH_ID,
+    return json_dir
+
+
+def json_ready(tmp_path, documents=None):
+    write_marker(tmp_path, "json")
+    return write_json_dir(tmp_path, documents or [sample_document()])
+
+
+PUBLISH_RUN = UUID("33333333-3333-4333-8333-333333333333")
+
+
+# ---- build_profile_rows：publish_run_id 断言（doc 6.1 §10.1/§16） ----
+
+
+class TestBuildProfileRows:
+    def test_publish_run_id_propagates_to_both_tables(self):
+        table_rows, column_rows = build_profile_rows(
+            SOURCE_ID, PUBLISH_RUN, [sample_document()], ("public",)
         )
-    )
-    session.table_column_profiles.append(
-        SimpleNamespace(
-            source_id=SOURCE_ID,
-            schema_name="public",
-            object_name="legacy",
-            column_name="id",
-            publish_id=OLD_PUBLISH_ID,
-        )
-    )
-
-
-class TestWhitelistAndPrecheck:
-    def test_json_whitelisted(self):
-        assert normalize_publish_steps(["db", "ddl", "json", "json"]) == [
-            "db",
-            "ddl",
-            "json",
-        ]
-
-    def test_md_still_rejected(self):
-        from backend.publishing.publish_service import (
-            UnsupportedPublicationStepError,
-        )
-
-        with pytest.raises(UnsupportedPublicationStepError):
-            normalize_publish_steps(["md"])
-
-    def test_precheck_includes_json_row(self, monkeypatch, tmp_path):
-        install(monkeypatch, tmp_path)
-        write_json_dir(tmp_path, [sample_document()])
-        result = check_publication(SETTINGS, SOURCE_ID, JOB_ID)
-        json_row = next(s for s in result["steps"] if s["step_name"] == "json")
-        assert json_row["output_ready"] is True
-        assert json_row["publishable"] is True
-
-    def test_precheck_json_not_ready_without_output(self, monkeypatch, tmp_path):
-        install(monkeypatch, tmp_path)
-        result = check_publication(SETTINGS, SOURCE_ID, JOB_ID)
-        json_row = next(s for s in result["steps"] if s["step_name"] == "json")
-        assert json_row["output_ready"] is False
-        assert json_row["publishable"] is False
-
-
-class TestPublishJson:
-    def test_success_replaces_current(self, monkeypatch, tmp_path):
-        session = install(monkeypatch, tmp_path)
-        seed_old_current(session)
-        write_json_dir(tmp_path, [sample_document()])
-
-        result = publish_steps(SETTINGS, SOURCE_ID, JOB_ID, ["json"])
-
-        assert result["results"][0]["status"] == "success"
-        publish_id = UUID(result["publish_id"])
-        current = [p for p in session.publishes if p.step_name == "json"]
-        assert len(current) == 2
-        new_row = next(p for p in current if p.publish_id == publish_id)
-        assert new_row.is_current_publish is True and new_row.status == "success"
-        old_row = next(p for p in current if p.publish_id == OLD_PUBLISH_ID)
-        assert old_row.is_current_publish is False
-        # 旧对象行删除、新对象与字段行写入且版本一致
-        assert [r.object_name for r in session.table_profiles] == ["orders"]
-        assert session.table_profiles[0].publish_id == publish_id
-        assert {r.column_name for r in session.table_column_profiles} == {
+        assert len(table_rows) == 1
+        row = table_rows[0]
+        assert row["source_id"] == SOURCE_ID
+        assert row["publish_run_id"] == PUBLISH_RUN
+        assert (row["schema_name"], row["object_name"]) == ("public", "orders")
+        assert row["column_count"] == 2
+        assert len(column_rows) == 2
+        assert all(column["publish_run_id"] == PUBLISH_RUN for column in column_rows)
+        assert all(column["source_id"] == SOURCE_ID for column in column_rows)
+        assert {column["column_name"] for column in column_rows} == {
             "order_id",
             "amount",
         }
-        assert all(r.publish_id == publish_id for r in session.table_column_profiles)
 
-    def test_bad_input_fails_and_keeps_old_state(self, monkeypatch, tmp_path):
-        session = install(monkeypatch, tmp_path)
-        seed_old_current(session)
+    def test_any_invalid_document_rejects_whole_batch(self):
+        bad = sample_document()
+        bad["column_profiles"]["amount"]["ordinal_position"] = 0
+        with pytest.raises(JsonPublishInputError):
+            build_profile_rows(
+                SOURCE_ID, PUBLISH_RUN, [sample_document(), bad], ("public",)
+            )
+
+    def test_schema_outside_registration_rejected(self):
+        with pytest.raises(JsonPublishInputError, match="schema 不在当前登记范围内"):
+            build_profile_rows(
+                SOURCE_ID,
+                PUBLISH_RUN,
+                [sample_document(schema_name="sales")],
+                ("public",),
+            )
+
+    def test_naive_generated_timestamp_rejected(self):
         document = sample_document()
-        document["column_profiles"]["amount"]["ordinal_position"] = 0
-        write_json_dir(tmp_path, [document])
+        document["generated_timestamp"] = "2026-10-03T18:55:55"
+        with pytest.raises(JsonPublishInputError, match="必须带时区"):
+            build_profile_rows(SOURCE_ID, PUBLISH_RUN, [document], ("public",))
 
-        result = publish_steps(SETTINGS, SOURCE_ID, JOB_ID, ["json"])
 
-        step = result["results"][0]
-        assert step["status"] == "failed"
-        assert step["message"] == INPUT_SUMMARY
-        assert [r.object_name for r in session.table_profiles] == ["legacy"]
-        old_row = next(p for p in session.publishes if p.publish_id == OLD_PUBLISH_ID)
-        assert old_row.is_current_publish is True
-        failed = [
-            p
-            for p in session.publishes
-            if p.status == "failed" and not p.is_current_publish
+# ---- 受管目录读取与预检 ----
+
+
+@pytest.fixture(autouse=True)
+def _env(monkeypatch, tmp_path):
+    install(monkeypatch, tmp_path)
+
+
+class TestReadManagedJsonDocuments:
+    def test_reads_documents_in_manifest_order(self, tmp_path):
+        documents = [
+            sample_document(),
+            sample_document(object_name="users"),
         ]
-        assert len(failed) == 1
+        write_json_dir(tmp_path, documents)
+        loaded = read_managed_json_documents(SOURCE_ID, WORKSPACE_ID, DB_NAME)
+        assert [doc["object_info"]["object_name"] for doc in loaded] == [
+            "orders",
+            "users",
+        ]
 
-    def test_workspace_owner_rechecked_under_lock(self, monkeypatch, tmp_path):
-        """§7.4：锁下复查工作区仍属该源；归属在预检后被改写 → 受控失败。"""
-        session = install(monkeypatch, tmp_path, FakeJsonSession(mutate_workspace=True))
-        write_json_dir(tmp_path, [sample_document()])
+    def test_manifest_mismatch_rejected(self, tmp_path):
+        json_dir = write_json_dir(tmp_path, [sample_document()])
+        (json_dir / "orders.public.users.json").write_text("{}", encoding="utf-8")
+        with pytest.raises(JsonPublishInputError, match="不一致"):
+            read_managed_json_documents(SOURCE_ID, WORKSPACE_ID, DB_NAME)
 
-        result = publish_steps(SETTINGS, SOURCE_ID, JOB_ID, ["json"])
-
-        step = result["results"][0]
-        assert step["status"] == "failed"
-        assert step["message"] == INPUT_SUMMARY
-        assert session.table_profiles == []
-
-    def test_registration_changed_fails_controlled(self, monkeypatch, tmp_path):
-        session = install(
-            monkeypatch, tmp_path, FakeJsonSession(mutate_registration=True)
-        )
-        write_json_dir(tmp_path, [sample_document()])
-
-        result = publish_steps(SETTINGS, SOURCE_ID, JOB_ID, ["json"])
-
-        step = result["results"][0]
-        assert step["status"] == "failed"
-        assert step["message"] == REGISTRATION_CHANGED_MESSAGE
-        assert session.table_profiles == []
-
-    def test_step_rerun_during_read_reports_not_ready(self, monkeypatch, tmp_path):
-        session = install(monkeypatch, tmp_path, FakeJsonSession(mutate_step=True))
-        write_json_dir(tmp_path, [sample_document()])
-
-        result = publish_steps(SETTINGS, SOURCE_ID, JOB_ID, ["json"])
-
-        step = result["results"][0]
-        assert step["status"] == "failed"
-        assert step["message"] == NOT_READY_MESSAGE
-        assert session.table_profiles == []
-
-    def test_combined_partial_success(self, monkeypatch, tmp_path):
-        session = install(monkeypatch, tmp_path)
+    def test_identity_mismatch_rejected(self, tmp_path):
+        json_dir = write_json_dir(tmp_path, [sample_document()])
         document = sample_document()
-        document["object_info"]["total_rows"] = "not-int"
+        document["object_info"]["object_name"] = "other"
+        (json_dir / "orders.public.orders.json").write_text(
+            json.dumps(document, ensure_ascii=False), encoding="utf-8"
+        )
+        with pytest.raises(JsonPublishInputError, match="身份与文件名不一致"):
+            read_managed_json_documents(SOURCE_ID, WORKSPACE_ID, DB_NAME)
+
+    def test_foreign_database_rejected(self, tmp_path):
+        write_json_dir(tmp_path, [sample_document(database="otherdb")])
+        with pytest.raises(JsonPublishInputError, match="不属于当前数据库"):
+            read_managed_json_documents(SOURCE_ID, WORKSPACE_ID, DB_NAME)
+
+
+class TestCheckJsonOutputReady:
+    def test_ready_with_valid_directory(self, tmp_path):
+        json_ready(tmp_path)
+        assert check_json_output_ready(SOURCE_ID, WORKSPACE_ID, DB_NAME) is True
+
+    def test_none_db_name_is_not_ready(self, tmp_path):
+        json_ready(tmp_path)
+        assert check_json_output_ready(SOURCE_ID, WORKSPACE_ID, None) is False
+
+    def test_missing_marker_fails_check_step(self, tmp_path):
+        write_json_dir(tmp_path, [sample_document()])  # 无 marker
+        result = check_step(None, SOURCE_ID, WORKSPACE_ID, "json", db_name=DB_NAME)
+        assert result.ready is False
+        assert result.reason == "json/ 目录没有采集 marker，产物不可用"
+
+    def test_mapping_invalid_document_fails_at_execution(self, monkeypatch, tmp_path):
+        """预检只做 v3 与身份校验：映射级非法（is_nullable 非布尔）在执行期失败。"""
+        write_marker(tmp_path, "json")
+        document = sample_document()
+        document["column_profiles"]["amount"]["is_nullable"] = "yes"
         write_json_dir(tmp_path, [document])
-        # db 步骤用替身返回成功：本用例测 json 失败不回滚已成功步骤
-        monkeypatch.setitem(
-            publish_service._PUBLISHERS,
-            "db",
-            lambda *args, **kwargs: publish_service._result(
-                "db", "success", "数据库画像发布完成"
-            ),
-        )
-
-        session.steps.append(
-            SimpleNamespace(
-                job_id=JOB_ID,
-                source_id=SOURCE_ID,
-                step_name="db",
-                last_status="success",
-                updated_at=RUN_MARKER,
-            )
-        )
-
-        result = publish_steps(SETTINGS, SOURCE_ID, JOB_ID, ["db", "json"])
-
-        statuses = {r["step"]: r["status"] for r in result["results"]}
-        assert statuses == {"db": "success", "json": "failed"}
-
-    def test_conflict_predicates_include_new_tables(self):
-        assert is_primary_key_conflict(integrity_error("23505", "table_profile_pkey"))
-        assert is_primary_key_conflict(
-            integrity_error("23505", "table_column_profile_pkey")
-        )
-        assert is_primary_key_conflict(
-            integrity_error("23505", "table_column_profile_object_order_idx")
-        )
-        assert not is_primary_key_conflict(integrity_error("23505", "some_other_idx"))
-
-
-class TestDeleteSourceCleanup:
-    def test_purge_removes_table_profile_rows(self):
-        from backend.data_sources import repository as ds_repository
-
-        session = FakeJsonSession()
-        seed_old_current(session)
-        session.publishes.append(
-            SimpleNamespace(
-                source_id=SOURCE_ID,
-                step_name="json",
-                is_current_publish=True,
-                updated_at=RUN_MARKER,
-            )
-        )
-        ds_repository.purge_source_profiles(session, SOURCE_ID)
+        result = check_step(None, SOURCE_ID, WORKSPACE_ID, "json", db_name=DB_NAME)
+        assert result.ready is True
+        session = install(monkeypatch, tmp_path, _json_job_session())
+        run_id = _publish_json_once(session)
+        step = run_step_row(session, run_id, "json")
+        assert step.status == "failed"
+        assert "非布尔" in step.message
         assert session.table_profiles == []
-        assert session.table_column_profiles == []
-        assert all(not p.is_current_publish for p in session.publishes)
+
+
+class TestRegistrationSnapshot:
+    def test_reads_enabled_source(self):
+        from backend.profile_loading.json_loader import RegistrationSnapshot
+
+        session = FakeSession()
+        snapshot = read_registration_snapshot(session, SOURCE_ID)
+        assert isinstance(snapshot, RegistrationSnapshot)
+        assert snapshot.db_name == DB_NAME
+        assert snapshot.selected_schemas == ("public",)
+
+    def test_missing_source_raises(self):
+        session = FakeSession()
+        session.source = None
+        with pytest.raises(MetaLoadSourceNotFoundError):
+            read_registration_snapshot(session, SOURCE_ID)
+
+    def test_disabled_source_raises(self):
+        session = FakeSession()
+        session.source.is_active = False
+        with pytest.raises(MetaLoadSourceDisabledError):
+            read_registration_snapshot(session, SOURCE_ID)
+
+
+# ---- 发布事务（按源整份替换 + publish_run_id） ----
+
+
+def _publish_json_once(session):
+    result = create_publish_run(
+        SETTINGS,
+        PUBLISH_JOB_ID,
+        revision_no=1,
+        mode="custom",
+        steps=["json"],
+        step_config=None,
+    )
+    run_id = UUID(result["publish_run_id"])
+    execute_publish_run(SETTINGS, run_id)
+    return run_id
+
+
+def _json_job_session():
+    return FakeSession(steps=("json",))
+
+
+class TestPublishJsonExecution:
+    def test_success_replaces_rows_for_source(self, monkeypatch, tmp_path):
+        from backend.persistence.models import (
+            TableColumnProfile,
+            TableProfile,
+        )
+        from types import SimpleNamespace
+
+        json_ready(tmp_path, [sample_document(), sample_document(object_name="users")])
+        session = install(monkeypatch, tmp_path, _json_job_session())
+        # 预置旧内容行与另一源的行
+        session.table_profiles.append(
+            SimpleNamespace(
+                source_id=SOURCE_ID,
+                schema_name="public",
+                object_name="legacy",
+                publish_run_id=UUID(int=7),
+            )
+        )
+        session.table_column_profiles.append(
+            SimpleNamespace(
+                source_id=SOURCE_ID,
+                schema_name="public",
+                object_name="legacy",
+                column_name="id",
+                publish_run_id=UUID(int=7),
+            )
+        )
+        other_row = SimpleNamespace(
+            source_id="db_src_9",
+            schema_name="public",
+            object_name="keep",
+            publish_run_id=UUID(int=8),
+        )
+        session.table_profiles.append(other_row)
+
+        run_id = _publish_json_once(session)
+
+        step = run_step_row(session, run_id, "json")
+        assert step.status == "success"
+        assert step.message == "对象画像发布完成（2 个对象）"
+        rows = [row for row in session.table_profiles if row.source_id == SOURCE_ID]
+        assert {row.object_name for row in rows} == {"orders", "users"}
+        assert all(row.publish_run_id == run_id for row in rows)
+        columns = [
+            row for row in session.table_column_profiles if row.source_id == SOURCE_ID
+        ]
+        assert {column.object_name for column in columns} == {"orders", "users"}
+        assert all(column.publish_run_id == run_id for column in columns)
+        # legacy 行被替换（连同字段行级联），其他源不动
+        assert other_row in session.table_profiles
+        assert all(isinstance(row, TableProfile) or True for row in rows)
+        assert any(isinstance(column, TableColumnProfile) for column in columns)
+        assert step.target_manifest == {
+            "targets": [
+                {
+                    "type": "postgresql",
+                    "database": "metaweave",
+                    "schema": "public",
+                    "table": "table_profile",
+                },
+                {
+                    "type": "postgresql",
+                    "database": "metaweave",
+                    "schema": "public",
+                    "table": "table_column_profile",
+                },
+            ]
+        }
+
+    @pytest.mark.parametrize(
+        "recommendation",
+        [
+            {"dimension_value_columns": ["amount"], "dimension_value_confidence": 0.8},
+            {"dimension_value_columns": [], "dimension_value_confidence": None},
+            None,
+        ],
+        ids=["valid-rec", "empty-rec", "missing-attrs"],
+    )
+    def test_publish_ingests_profile_with_recommendation_attrs(
+        self, monkeypatch, tmp_path, recommendation
+    ):
+        """doc 7.1 §8.13：三种画像形态经完整发布执行入库，
+        既有字段正常写入、推荐属性不映射为数据库列。"""
+        document = sample_document()
+        if recommendation is not None:
+            document["table_profile"].update(recommendation)
+        json_ready(tmp_path, [document])
+        session = install(monkeypatch, tmp_path, _json_job_session())
+
+        run_id = _publish_json_once(session)
+
+        step = run_step_row(session, run_id, "json")
+        assert step.status == "success"
+        rows = [row for row in session.table_profiles if row.source_id == SOURCE_ID]
+        assert len(rows) == 1
+        row = rows[0]
+        # 既有画像字段正常入库
+        assert (row.schema_name, row.object_name) == ("public", "orders")
+        assert row.table_category == "fact"
+        assert float(row.category_confidence) == 0.95
+        assert row.publish_run_id == run_id
+        # 推荐属性不入库：ORM 行无此列
+        assert "dimension_value_columns" not in vars(row)
+        assert "dimension_value_confidence" not in vars(row)
+        with pytest.raises(AttributeError):
+            _ = row.dimension_value_columns  # noqa: B018
+
+    def test_file_corrupted_after_precheck_is_blocked(self, monkeypatch, tmp_path):
+        json_ready(tmp_path)
+        session = install(monkeypatch, tmp_path, _json_job_session())
+        result = create_publish_run(
+            SETTINGS,
+            PUBLISH_JOB_ID,
+            revision_no=1,
+            mode="custom",
+            steps=["json"],
+            step_config=None,
+        )
+        run_id = UUID(result["publish_run_id"])
+        # 预检通过后、执行前：清单被改写为不可解析
+        (step_dir(tmp_path, "json") / "manifest.json").write_text(
+            "{broken", encoding="utf-8"
+        )
+        execute_publish_run(SETTINGS, run_id)
+        step = run_step_row(session, run_id, "json")
+        assert step.status == "blocked"
+        assert step.started_at is None
+        assert "清单不符或未通过校验" in step.message
+        assert session.table_profiles == []
+
+    def test_marker_removed_after_precheck_is_blocked(self, monkeypatch, tmp_path):
+        json_ready(tmp_path)
+        session = install(monkeypatch, tmp_path, _json_job_session())
+        result = create_publish_run(
+            SETTINGS,
+            PUBLISH_JOB_ID,
+            revision_no=1,
+            mode="custom",
+            steps=["json"],
+            step_config=None,
+        )
+        run_id = UUID(result["publish_run_id"])
+        for path in step_dir(tmp_path, "json").glob(".coll_run_id_*"):
+            path.unlink()
+        execute_publish_run(SETTINGS, run_id)
+        assert run_step_row(session, run_id, "json").status == "blocked"

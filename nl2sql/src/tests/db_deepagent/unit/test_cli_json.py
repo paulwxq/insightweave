@@ -83,3 +83,58 @@ class TestHelpBoundary:
         proc = _run(["--help"])
         assert proc.returncode == 0
         assert "usage" in proc.stdout
+
+
+class TestRenderFallbackAnswer:
+    """doc 6.2 §7.8：CLI 文本与 JSON 的 answer 同源；failed 退出码规则不变。"""
+
+    def _result(self, answer: str):
+        from src.modules.db_deepagent.schemas import DbAgentResult, RunStats
+
+        return DbAgentResult(
+            session_id="s1",
+            thread_id="dbda:s1:1",
+            request_id="req-r",
+            run_id="run-r",
+            status="failed",
+            answer=answer,
+            findings=[],
+            evidence=[],
+            metric_definitions=[],
+            limitations=[],
+            open_questions=[],
+            errors=[],
+            warnings=["最终说明由服务端兜底生成，非模型最终提交。"],
+            archived=True,
+            stats=RunStats(
+                elapsed_ms=1,
+                model_calls=1,
+                summary_model_calls=0,
+                total_model_calls=1,
+                tool_calls=0,
+                input_tokens=None,
+                output_tokens=None,
+                token_usage_complete=True,
+            ),
+        )
+
+    def test_render_prints_fallback_text(self, capsys):
+        from src.modules.db_deepagent.cli import _render_result
+
+        result = self._result("系统兜底说明：本轮未正常完成，未能生成有效的最终答案。")
+        _render_result(result)
+        out = capsys.readouterr().out
+        assert "系统兜底说明" in out
+        assert "（无答案）" not in out  # 非空兜底不再显示占位
+        assert "状态: failed" in out
+
+    def test_json_and_render_share_answer_field(self, capsys):
+        from src.modules.db_deepagent.cli import _render_result
+
+        result = self._result("系统兜底说明：示例")
+        _render_result(result)
+        out = capsys.readouterr().out
+        assert "系统兜底说明：示例" in out
+        assert (
+            result.model_dump_json().count("系统兜底说明：示例") == 1
+        )  # 同一 answer 字段

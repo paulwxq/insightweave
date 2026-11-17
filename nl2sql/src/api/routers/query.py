@@ -24,7 +24,9 @@ def submit_query(req: QueryRequest) -> BaseResponse[QueryResponseData]:
     """提交 NL2SQL 查询"""
     from src.modules.nl2sql_father.graph import run_nl2sql_query
 
-    logger.info(f"收到查询请求: user_id={req.user_id}, thread_id={req.thread_id}, query={req.query[:50]}...")
+    logger.info(
+        f"收到查询请求: user_id={req.user_id}, thread_id={req.thread_id}, query={req.query[:50]}..."
+    )
 
     try:
         result = run_nl2sql_query(

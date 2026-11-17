@@ -1180,8 +1180,8 @@ def _real_script_paths_probe(base_dir: str) -> None:
     # 解析为 dim_config 标签（用 set_operation_step 走完整映射链）
     set_operation_step("generate-dim-config")
     logging.getLogger("metaweave.probe").info("real-config-cli-dim-config-step")
-    set_operation_step("dim_config")
-    logging.getLogger("metaweave.probe").info("real-config-dim-config-step")
+    set_operation_step("dim")
+    logging.getLogger("metaweave.probe").info("real-config-dim-step")
     # doc 23.1 §5.1/A11b：Web 步骤 rel 经 OPERATION_STEP_MAP 完整映射链
     # （受管服务调用路径）复用既有 rel_filter/rel_file，logging.yaml 零改动
     set_operation_step("rel")
@@ -1192,9 +1192,7 @@ def _real_script_paths_probe(base_dir: str) -> None:
     rel_text = (script_dir / "rel.log").read_text(encoding="utf-8")
     ddl_text = (script_dir / "ddl.log").read_text(encoding="utf-8")
     domain_text = (script_dir / "domain.log").read_text(encoding="utf-8")
-    cli_domains_text = (script_dir / "generate_domains.log").read_text(
-        encoding="utf-8"
-    )
+    cli_domains_text = (script_dir / "generate_domains.log").read_text(encoding="utf-8")
     loader_text = (script_dir / "loader.log").read_text(encoding="utf-8")
     assert "real-config-rel-step" in rel_text
     assert "real-config-ddl-step" not in rel_text
@@ -1205,13 +1203,13 @@ def _real_script_paths_probe(base_dir: str) -> None:
     assert "real-config-domain-step" not in cli_domains_text
     assert "real-config-cli-domains-step" in cli_domains_text
     assert "real-config-cli-domains-step" not in domain_text
-    # doc 22.1 §5.1/A11b：Web 步骤 dim_config 与 CLI generate-dim-config 经
-    # OPERATION_STEP_MAP 映射到同一步骤名，复用既有 dim_config_filter/file
+    # doc 6 §2 更名后：Web 步骤 dim 与 CLI generate-dim-config 经
+    # OPERATION_STEP_MAP 映射到同一步骤名 "dim"，复用既有 dim_config_filter/file
     dim_config_text = (script_dir / "dim_config.log").read_text(encoding="utf-8")
-    assert "real-config-dim-config-step" in dim_config_text
+    assert "real-config-dim-step" in dim_config_text
     assert "real-config-cli-dim-config-step" in dim_config_text
-    assert "real-config-dim-config-step" not in ddl_text
-    assert "real-config-dim-config-step" not in rel_text
+    assert "real-config-dim-step" not in ddl_text
+    assert "real-config-dim-step" not in rel_text
     assert "real-config-operation-rel-step" in rel_text
     assert "real-config-operation-rel-step" not in ddl_text
     assert "real-config-operation-rel-step" not in domain_text

@@ -196,6 +196,8 @@ langgraph_persistence:
 # ------------------------------------------------------------------------------
 api:
   max_recent_sessions: 5             # 前端界面侧边栏最多显示的历史会话数量
+  max_display_rows: 200              # 对话结果表格最多显示的行数（仅前端展示上限；
+                                     #   不是结果保存上限）
 
 # ------------------------------------------------------------------------------
 # LLM Provider 连接参数（每个 provider 只写一次）
@@ -301,6 +303,17 @@ llm_profiles:
     # 400 url error），故走 dashscope_openai（ChatOpenAI 兼容模式，doc 5 K5：
     # 匹配键 openai:qwen3.8-max）
     enable_thinking: false           # 显式关闭；兼容模式下 thinking 默认行为随模型变化，勿依赖默认值
+
+  qwen3_8_flash:
+    provider: dashscope_openai
+    model: qwen3.8-flash
+    # 2026-11-10 新增（doc 5.1）：摘要器专用 profile。
+    # 上下文 1,000,000 tokens；非思考输入上限 991,808，仅说明模型能力，
+    # 不作为调整摘要阈值（96000/24000）的依据。
+    # 注意：不得加入 context_window / max_input_tokens 等非参数白名单字段。
+    temperature: 0
+    max_tokens: 8192                 # 项目为摘要设置的初始输出上限，不是模型上下文/输入上限
+    enable_thinking: false           # 控制摘要耗时与输出开销；费用变化以运行记录为准
 
   qwen3_5_plus:
     provider: dashscope_openai

@@ -14,11 +14,11 @@ from services.config_loader import ConfigLoader
 from services.vector_db.milvus_client import MilvusClient
 
 
-def _row(source_id: str, publish_id: str, object_id: str, description: str) -> dict:
+def _row(source_id: str, publish_run_id: str, object_id: str, description: str) -> dict:
     return {
         "entity_id": f"{source_id}:{object_id}",
         "source_id": source_id,
-        "publish_id": publish_id,
+        "publish_run_id": publish_run_id,
         "object_id": object_id,
         "object_desc": description,
         "embedding": [1.0, 0.0],
@@ -28,7 +28,7 @@ def _row(source_id: str, publish_id: str, object_id: str, description: str) -> d
 def _read_source(collection: Collection, source_id: str) -> dict[str, dict]:
     rows = collection.query(
         expr=f'source_id == "{source_id}"',
-        output_fields=["entity_id", "object_id", "publish_id", "object_desc"],
+        output_fields=["entity_id", "object_id", "publish_run_id", "object_desc"],
         consistency_level="Strong",
     )
     result = {row["object_id"]: row for row in rows}
@@ -38,7 +38,7 @@ def _read_source(collection: Collection, source_id: str) -> dict[str, dict]:
 
 
 def _check_rows(rows: dict[str, dict], expected: dict[str, str]) -> None:
-    actual = {object_id: row["publish_id"] for object_id, row in rows.items()}
+    actual = {object_id: row["publish_run_id"] for object_id, row in rows.items()}
     if actual != expected:
         raise AssertionError(f"批次不匹配：actual={actual} expected={expected}")
 
@@ -62,7 +62,7 @@ def main() -> None:
             fields=[
                 FieldSchema("entity_id", DataType.VARCHAR, is_primary=True, auto_id=False, max_length=512),
                 FieldSchema("source_id", DataType.VARCHAR, max_length=36),
-                FieldSchema("publish_id", DataType.VARCHAR, max_length=36),
+                FieldSchema("publish_run_id", DataType.VARCHAR, max_length=36),
                 FieldSchema("object_id", DataType.VARCHAR, max_length=256),
                 FieldSchema("object_desc", DataType.VARCHAR, max_length=8192),
                 FieldSchema("embedding", DataType.FLOAT_VECTOR, dim=2),
@@ -117,7 +117,7 @@ def main() -> None:
         print("PASS: 全部 upsert 后，已移除对象仍属于旧批次")
 
         collection.delete(
-            expr=f'source_id == "{source_a}" and publish_id != "{current}"'
+            expr=f'source_id == "{source_a}" and publish_run_id != "{current}"'
         )
         collection.flush()
         _check_rows(

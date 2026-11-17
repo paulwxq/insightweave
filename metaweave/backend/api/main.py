@@ -11,7 +11,7 @@ from backend.api.errors import register_exception_handlers
 from backend.api.routers.assets import router as assets_router
 from backend.api.routers.asset_objects import router as asset_objects_router
 from backend.api.routers.data_sources import router as data_sources_router
-from backend.api.routers.publishing import router as publishing_router
+from backend.api.routers.workspaces import router as workspaces_router
 from backend.persistence.platform_db import (
     PlatformSettings,
     load_platform_settings_from_env,
@@ -43,7 +43,40 @@ def create_app(
     )
     register_exception_handlers(app)
     app.include_router(data_sources_router)
-    app.include_router(publishing_router)
+    app.include_router(workspaces_router)
     app.include_router(assets_router)
     app.include_router(asset_objects_router)
+
+    @app.on_event("startup")
+    def _deletion_startup_scan() -> None:
+        """doc 8.1 §7.2：启动恢复扫描，只修复状态不自动执行清理。
+
+        METAWEAVE_DELETION_STARTUP_SCAN=0 可关闭（测试环境隔离用）；
+        扫描失败仅记日志，不阻断启动，页面仍可显式重试。
+        """
+        import logging
+        import os
+
+        if os.getenv("METAWEAVE_DELETION_STARTUP_SCAN", "1") != "1":
+            return
+        from backend.deletion.service import startup_scan
+
+        try:
+            startup_scan(settings)
+        except Exception:  # noqa: BLE001 —— 扫描失败不阻断启动
+            logging.getLogger("backend.api").exception("删除任务启动扫描失败")
+
+    # ---- 部署门闩接线（doc 13 §7.5、§8）----
+    # 仅部署开关启用时惰性导入 deploy.runtime.lifecycle（容器内 PYTHONPATH 含
+    # /app）；默认开发启动零额外路径依赖。最后添加、位于最外层：活动计数覆盖
+    # 整个 ASGI 调用（含响应发送后的 BackgroundTasks 采集/发布/删除任务）。
+    if os.getenv("DEPLOY_CONTROL_ENABLED") == "1":
+        from deploy.runtime.lifecycle import install_deployment_gate
+
+        install_deployment_gate(
+            app,
+            control_prefix="/api/_deploy",
+            health_paths=("/openapi.json",),
+        )
+
     return app

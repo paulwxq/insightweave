@@ -1,7 +1,8 @@
-"""result_tools 单元测试（docs/v4/5 §7.9/§7.10）
+"""result_tools 单元测试（docs/v4/5 §7.9/§7.10；doc 9 §4 步骤 1）
 
-read_result 分页字段；analyze_result 本地路径的 AnalysisRecord 登记
-（evidence_id、input/output refs、executed_sql=None、Command 合并）。
+read_result 分页字段与大页 JSON 完整性；analyze_result 本地路径的
+AnalysisRecord 登记（evidence_id、input/output refs、executed_sql=None、
+Command 合并）与大预览不删行/不裁列。
 """
 
 from __future__ import annotations
@@ -19,9 +20,21 @@ from src.modules.db_deepagent.tools.result_tools import (
     make_read_result_tool,
 )
 
-from src.tests.db_deepagent.conftest import invoke_tool_node
+from src.tests.db_deepagent.conftest import (
+    invoke_tool_node,
+    make_task_record,
+    make_task_state,
+)
 
 pytestmark = pytest.mark.unit
+
+
+def _reject_constant(value: str):
+    raise ValueError(f"非标准 JSON 常量: {value}")
+
+
+def _strict_loads(text: str):
+    return json.loads(text, parse_constant=_reject_constant)
 
 
 @pytest.fixture()
@@ -65,6 +78,7 @@ class TestReadResult:
                 )
             ],
             db_agent_context,
+            extra_state={"db_executions": [_input_evidence(meta)], **_task_state()},
         )
         payload = json.loads(msg.content)
         assert payload["status"] == "ok"
@@ -85,6 +99,178 @@ class TestReadResult:
         payload = json.loads(msg.content)
         assert payload["error"]["error_type"] == "result_access_denied"
 
+    def test_wide_page_columns_rows_aligned(
+        self, node, guard_services, db_agent_context
+    ):
+        """doc 9 §4 步骤 1：140 列 × 2 行的真实大页。
+
+        旧 finalize_output 把 columns 裁到 5 而 rows 保留 140 个单元格——
+        JSON 仍合法但行列错位；本用例必须失败于列数/对应值断言（不是
+        JSONDecodeError）。修复后逐项比较原列顺序、行宽与位置值。
+        """
+        n_cols = 140
+        names = [f"c{i:03d}_" + "x" * 50 for i in range(n_cols)]
+        rows = [[f"v{r}{c:03d}" for c in range(n_cols)] for r in range(2)]
+        meta = guard_services.results.save(
+            ctx=db_agent_context,
+            purpose="query",
+            sql_template="SELECT * FROM wide",
+            executed_sql="SELECT * FROM wide",
+            columns=[{"name": n, "pg_type": "varchar"} for n in names],
+            rows=rows,
+            source_truncated=False,
+            derived_from=[],
+            guard_evidence={"time": [], "dim": []},
+        )
+        _u, msg = invoke_tool_node(
+            node,
+            [("read_result", {"result_ref": meta.result_ref}, "tc-w1")],
+            db_agent_context,
+        )
+        # 数据前置条件（独立于生产代码）：完整载荷的首次序列化即超过旧预算，
+        # 旧函数因此进入裁列分支
+        expected_data = {
+            "rows": rows,
+            "columns": [{"name": n, "pg_type": "varchar"} for n in names],
+            "offset": 0,
+            "next_offset": None,
+            "saved_row_count": 2,
+            "preview_truncated": False,
+            "source_truncated": False,
+        }
+        assert (
+            len(
+                json.dumps(
+                    {"status": "ok", "data": expected_data, "warnings": []},
+                    ensure_ascii=False,
+                )
+            )
+            > 12000
+        )
+        payload = _strict_loads(msg.content)
+        data = payload["data"]
+        expected_columns = [{"name": n, "pg_type": "varchar"} for n in names]
+        # 旧实现此处 columns 为 5 项而 rows 保留 140 个单元格（合法 JSON 但错位）
+        assert data["columns"] == expected_columns
+        assert data["rows"] == rows
+        assert all(len(r) == n_cols for r in data["rows"])  # 行宽与列数一致
+        assert data["next_offset"] is None and data["saved_row_count"] == 2
+        assert len(msg.content) > 12000  # 修复后实测长度越过旧预算
+
+    def test_single_huge_cell_intact(self, node, guard_services, db_agent_context):
+        """单行单格 20000 字符：旧实现整体截断产出非法 JSON；修复后整格保留。"""
+        blob = "B" * 20000
+        meta = guard_services.results.save(
+            ctx=db_agent_context,
+            purpose="query",
+            sql_template="SELECT k, blob FROM t",
+            executed_sql="SELECT k, blob FROM t",
+            columns=[
+                {"name": "k", "pg_type": "int4"},
+                {"name": "blob", "pg_type": "text"},
+            ],
+            rows=[[1, blob], [2, Decimal("2.5")]],
+            source_truncated=False,
+            derived_from=[],
+            guard_evidence={"time": [], "dim": []},
+        )
+        _u, msg = invoke_tool_node(
+            node,
+            [("read_result", {"result_ref": meta.result_ref}, "tc-w2")],
+            db_agent_context,
+        )
+        payload = _strict_loads(msg.content)  # 旧实现此处 JSONDecodeError
+        data = payload["data"]
+        assert data["columns"] == [
+            {"name": "k", "pg_type": "int4"},
+            {"name": "blob", "pg_type": "text"},
+        ]
+        assert data["rows"][0][1] == blob  # 超长文本不改写为截短标记
+        assert data["rows"][1] == [2, {"$dec": "2.5"}]  # §6.8 类型信封完整
+
+    def test_continuous_pagination_no_skip_or_repeat(
+        self, node, guard_services, db_agent_context
+    ):
+        """按原 next_offset 连续分页：拼回全部已保存行，无跳行/重复；末页 None。
+
+        source_truncated 标志每页原样保留（不做消息层删行或游标修正）。
+        """
+        all_rows = [[i, Decimal("1.5")] for i in range(7)]
+        collected_flags = []
+        for truncated in (False, True):
+            meta = guard_services.results.save(
+                ctx=db_agent_context,
+                purpose="query",
+                sql_template="SELECT k, x FROM t",
+                executed_sql="SELECT k, x FROM t",
+                columns=[
+                    {"name": "k", "pg_type": "int4"},
+                    {"name": "x", "pg_type": "numeric"},
+                ],
+                rows=all_rows,
+                source_truncated=truncated,
+                derived_from=[],
+                guard_evidence={"time": [], "dim": []},
+            )
+            collected = []
+            offset = 0
+            for _ in range(5):  # 上限保护，末页必须在此内到达
+                _u, msg = invoke_tool_node(
+                    node,
+                    [
+                        (
+                            "read_result",
+                            {
+                                "result_ref": meta.result_ref,
+                                "offset": offset,
+                                "limit": 3,
+                            },
+                            f"tc-p-{truncated}-{offset}",
+                        )
+                    ],
+                    db_agent_context,
+                )
+                data = _strict_loads(msg.content)["data"]
+                assert data["offset"] == offset
+                collected.extend(data["rows"])
+                collected_flags.append(data["source_truncated"] is truncated)
+                if data["next_offset"] is None:
+                    break
+                offset = data["next_offset"]
+            assert collected == [[i, {"$dec": "1.5"}] for i in range(7)]
+        assert all(collected_flags)
+
+
+def _input_evidence(meta, evidence_id="E-in1"):
+    """T1 的输入执行记录（同任务当前版本）。"""
+    return {
+        "evidence_id": evidence_id,
+        "tool_call_id": "tc-in",
+        "run_id": "run-test",
+        "request_id": "req-test",
+        "purpose": "query",
+        "datasource_id": meta.datasource_id,
+        "sql_template": "SELECT k, x FROM t",
+        "executed_sql": "SELECT k, x FROM t",
+        "executed_sql_sha256": meta.executed_sql_sha256,
+        "result_ref": meta.result_ref,
+        "columns": meta.columns,
+        "saved_row_count": meta.saved_row_count,
+        "source_truncated": False,
+        "elapsed_ms": 4,
+        "warnings": [],
+        "sub_task_id": "T1",
+        "sub_task_revision": 1,
+        "input_result_refs": [],
+    }
+
+
+def _task_state():
+    from src.tests.db_deepagent.conftest import make_task_record, make_task_state
+
+    task = make_task_record("run-test", "T1", 1, status="in_progress", content="分析")
+    return make_task_state([task])
+
 
 class TestAnalyzeResult:
     def test_local_aggregate_registers_analysis(
@@ -98,7 +284,11 @@ class TestAnalyzeResult:
                     "analyze_result",
                     {
                         "operation": "aggregate",
-                        "inputs": [meta.result_ref],
+                        "inputs": [
+                            {"result_ref": meta.result_ref, "evidence_id": "E-in1"}
+                        ],
+                        "sub_task_id": "T1",
+                        "sub_task_revision": 1,
                         "params": {
                             "group_by": ["k"],
                             "metrics": [{"column": "x", "func": "sum"}],
@@ -109,13 +299,19 @@ class TestAnalyzeResult:
                 )
             ],
             db_agent_context,
+            extra_state={"db_executions": [_input_evidence(meta)], **_task_state()},
         )
         payload = json.loads(msg.content)
         assert payload["status"] == "ok", payload
         record = updates["db_analyses"][0]
         assert record["evidence_id"].startswith("A-")
         assert record["executed_sql"] is None  # 本地计算不伪造 SQL
-        assert record["input_result_refs"] == [meta.result_ref]
+        assert [r["result_ref"] for r in record["input_result_refs"]] == [
+            meta.result_ref
+        ]
+        assert record["input_result_refs"][0]["evidence_ref"]["evidence_id"] == "E-in1"
+        assert record["input_result_refs"][0]["source_task_ref"]["sub_task_id"] == "T1"
+        assert record["sub_task_id"] == "T1"
         assert record["output_result_ref"]
         assert record["pushdown_execution_id"] is None
         assert payload["data"]["evidence_id"] == record["evidence_id"]
@@ -129,7 +325,11 @@ class TestAnalyzeResult:
                     "analyze_result",
                     {
                         "operation": "aggregate",
-                        "inputs": [meta.result_ref],
+                        "inputs": [
+                            {"result_ref": meta.result_ref, "evidence_id": "E-in1"}
+                        ],
+                        "sub_task_id": "T1",
+                        "sub_task_revision": 1,
                         "params": {"group_by": ["k"]},  # 缺 metrics
                         "allow_pushdown": True,
                     },
@@ -137,6 +337,7 @@ class TestAnalyzeResult:
                 )
             ],
             db_agent_context,
+            extra_state={"db_executions": [_input_evidence(meta)], **_task_state()},
         )
         payload = json.loads(msg.content)
         assert payload["error"]["error_type"] == "invalid_argument"
@@ -152,7 +353,11 @@ class TestAnalyzeResult:
                     "analyze_result",
                     {
                         "operation": "aggregate",
-                        "inputs": ["res_" + "0" * 32],  # 不存在
+                        "inputs": [
+                            {"result_ref": "res_" + "0" * 32, "evidence_id": "E-in1"}
+                        ],
+                        "sub_task_id": "T1",
+                        "sub_task_revision": 1,
                         "params": {
                             "group_by": [],
                             "metrics": [{"column": "x", "func": "sum"}],
@@ -163,11 +368,14 @@ class TestAnalyzeResult:
                 )
             ],
             db_agent_context,
+            extra_state={**_task_state()},
         )
         payload = json.loads(msg.content)
         assert payload["status"] == "error", payload
-        assert payload["error"]["error_type"] == "result_not_found"
-        assert payload["error"]["retryable"] is False
+        # doc 6.3 §6.3：结构化输入先核对 evidence_id 在本轮记录中（先于
+        # 结果文件读取），未知证据 → stale_task_inputs
+        assert payload["error"]["error_type"] == "stale_task_inputs"
+        assert payload["error"]["retryable"] is True
 
     def test_distinct_truncated_flags_persisted(
         self, node, guard_services, db_agent_context
@@ -184,7 +392,11 @@ class TestAnalyzeResult:
                     "analyze_result",
                     {
                         "operation": "distinct_values",
-                        "inputs": [meta.result_ref],
+                        "inputs": [
+                            {"result_ref": meta.result_ref, "evidence_id": "E-in1"}
+                        ],
+                        "sub_task_id": "T1",
+                        "sub_task_revision": 1,
                         "params": {"column": "k", "max_values": 1},
                         "allow_pushdown": True,
                     },
@@ -192,6 +404,7 @@ class TestAnalyzeResult:
                 )
             ],
             db_agent_context,
+            extra_state={"db_executions": [_input_evidence(meta)], **_task_state()},
         )
         payload = json.loads(msg.content)
         assert payload["status"] == "ok", payload
@@ -216,7 +429,11 @@ class TestAnalyzeResult:
                     "analyze_result",
                     {
                         "operation": "aggregate",
-                        "inputs": [meta.result_ref],
+                        "inputs": [
+                            {"result_ref": meta.result_ref, "evidence_id": "E-in1"}
+                        ],
+                        "sub_task_id": "T1",
+                        "sub_task_revision": 1,
                         "params": {
                             "group_by": [],
                             "metrics": [{"column": "x", "func": "sum"}],
@@ -227,6 +444,7 @@ class TestAnalyzeResult:
                 )
             ],
             db_agent_context,
+            extra_state={"db_executions": [_input_evidence(meta)], **_task_state()},
         )
         payload = json.loads(msg.content)
         assert payload["status"] == "ok", payload
@@ -247,7 +465,11 @@ class TestAnalyzeResult:
                     "analyze_result",
                     {
                         "operation": "aggregate",
-                        "inputs": [meta.result_ref],
+                        "inputs": [
+                            {"result_ref": meta.result_ref, "evidence_id": "E-in1"}
+                        ],
+                        "sub_task_id": "T1",
+                        "sub_task_revision": 1,
                         "params": {
                             "group_by": ["k"],
                             "metrics": [{"column": "x", "func": "sum"}],
@@ -258,6 +480,7 @@ class TestAnalyzeResult:
                 )
             ],
             db_agent_context,
+            extra_state={"db_executions": [_input_evidence(meta)], **_task_state()},
         )
         payload = json.loads(msg.content)
         assert payload["status"] == "ok", payload
@@ -266,3 +489,260 @@ class TestAnalyzeResult:
         )
         types = {c["name"]: c["pg_type"] for c in saved.columns}
         assert types["k"] == "int4"
+
+    def test_large_preview_not_reduced(self, node, guard_services, db_agent_context):
+        """doc 9 §5：真实 analyze_result 大预览不删行/不裁列。
+
+        本地 top_n（int4 排序，40 行 × 700 字符文本列）→ 预览 20 行
+        越过旧 12000 预算（旧实现整体截断产出非法 JSON）。账本、结果
+        存储与返回引用一致。
+        """
+        n_rows = 40
+        rows = [[i, f"g{i:03d}_" + "k" * 695] for i in range(n_rows)]
+        meta = guard_services.results.save(
+            ctx=db_agent_context,
+            purpose="query",
+            sql_template="SELECT rank, payload FROM t",
+            executed_sql="SELECT rank, payload FROM t",
+            columns=[
+                {"name": "rank", "pg_type": "int4"},
+                {"name": "payload", "pg_type": "varchar"},
+            ],
+            rows=rows,
+            source_truncated=False,
+            derived_from=[],
+            guard_evidence={"time": [], "dim": []},
+        )
+        updates, msg = invoke_tool_node(
+            node,
+            [
+                (
+                    "analyze_result",
+                    {
+                        "operation": "top_n",
+                        "inputs": [
+                            {"result_ref": meta.result_ref, "evidence_id": "E-in1"}
+                        ],
+                        "sub_task_id": "T1",
+                        "sub_task_revision": 1,
+                        "params": {
+                            "order_by": "rank",
+                            "descending": False,
+                            "n": 40,
+                            "ties": "strict",
+                        },
+                        "allow_pushdown": True,
+                    },
+                    "tc-d4",
+                )
+            ],
+            db_agent_context,
+            extra_state={"db_executions": [_input_evidence(meta)], **_task_state()},
+        )
+        payload = _strict_loads(msg.content)  # 旧实现此处 JSONDecodeError
+        data = payload["data"]
+        assert payload["status"] == "ok", payload
+        # 本地计算无下推警告；文本列不可比较 → 仅保留既定的并列位次提示
+        assert payload["warnings"] == ["排序键在边界并列，选中记录不确定"]
+        preview_rows = data["preview_rows"]
+        assert len(preview_rows) == 20  # results.preview_rows 业务限制原样生效
+        assert data["preview_truncated"] is True  # 40 > 20：预览不完整标记保留
+        assert data["row_count"] == 40
+        assert preview_rows[0] == [0, rows[0][1]]  # 长文本列不被改写/裁剪
+        assert preview_rows[19] == [19, rows[19][1]]
+        assert len(msg.content) > 12000  # 修复后实测长度越过旧预算
+        # 账本与结果存储一致；完整 40 行可从 ResultStore 读回
+        record = updates["db_analyses"][0]
+        assert data["evidence_id"] == record["evidence_id"]
+        assert data["result_ref"] == record["output_result_ref"]
+        assert record["executed_sql"] is None  # 本地计算不伪造 SQL
+        assert record["saved_row_count"] == 40
+        page = guard_services.results.read_rows(
+            record["output_result_ref"],
+            session_id=db_agent_context.session_id,
+            offset=20,
+            limit=20,
+        )
+        assert page.rows[0] == rows[20]  # 预览之外的第 21 行仍可读取
+
+
+class TestAnalyzeWriteAdmission:
+    """doc 6.3 §6.1/§6.3 写入准入：终态目标拒绝、probe 输入拒绝、
+    跨任务输入须声明依赖、同任务旧 revision 拒绝。"""
+
+    def _analyze(self, node, ctx, args, state):
+        return invoke_tool_node(
+            node,
+            [("analyze_result", args, "tc-adm")],
+            ctx,
+            extra_state=state,
+        )
+
+    def test_terminal_target_rejected(self, node, guard_services, db_agent_context):
+        meta = _save_input(guard_services, db_agent_context)
+        task = make_task_record(
+            "run-test",
+            "T1",
+            1,
+            status="completed",
+            evidence_ids=["E-in1"],
+            content="完成",
+        )
+        state = {"db_executions": [_input_evidence(meta)], **make_task_state([task])}
+        _u, msg = self._analyze(
+            node,
+            db_agent_context,
+            {
+                "operation": "aggregate",
+                "inputs": [{"result_ref": meta.result_ref, "evidence_id": "E-in1"}],
+                "sub_task_id": "T1",
+                "sub_task_revision": 1,
+                "params": {
+                    "group_by": ["k"],
+                    "metrics": [{"column": "x", "func": "sum"}],
+                },
+                "allow_pushdown": True,
+            },
+            state,
+        )
+        payload = json.loads(msg.content)
+        assert payload["error"]["error_type"] == "task_not_writable"
+        assert "revise" in payload["error"]["message"]
+
+    def test_probe_input_rejected(self, node, guard_services, db_agent_context):
+        meta = _save_input(guard_services, db_agent_context)
+        probe = {**_input_evidence(meta), "purpose": "probe", "evidence_id": "E-probe1"}
+        task = make_task_record(
+            "run-test", "T1", 1, status="in_progress", content="分析"
+        )
+        state = {"db_executions": [probe], **make_task_state([task])}
+        _u, msg = self._analyze(
+            node,
+            db_agent_context,
+            {
+                "operation": "aggregate",
+                "inputs": [{"result_ref": meta.result_ref, "evidence_id": "E-probe1"}],
+                "sub_task_id": "T1",
+                "sub_task_revision": 1,
+                "params": {
+                    "group_by": ["k"],
+                    "metrics": [{"column": "x", "func": "sum"}],
+                },
+                "allow_pushdown": True,
+            },
+            state,
+        )
+        payload = json.loads(msg.content)
+        # probe 执行不进入可引用索引（evidence_by_id 仅收 query/分析）
+        assert payload["error"]["error_type"] == "stale_task_inputs"
+        assert "不在本轮可引用证据" in payload["error"]["message"]
+
+    def test_cross_task_input_without_dependency_rejected(
+        self, node, guard_services, db_agent_context
+    ):
+        meta = _save_input(guard_services, db_agent_context)
+        owner = _input_evidence(meta)  # 归属 T1（已完成）
+        t1 = make_task_record(
+            "run-test",
+            "T1",
+            1,
+            status="completed",
+            evidence_ids=["E-in1"],
+            content="上游",
+        )
+        t2 = make_task_record(
+            "run-test", "T2", 1, status="in_progress", content="下游（未声明依赖）"
+        )
+        state = {"db_executions": [owner], **make_task_state([t1, t2])}
+        _u, msg = self._analyze(
+            node,
+            db_agent_context,
+            {
+                "operation": "aggregate",
+                "inputs": [{"result_ref": meta.result_ref, "evidence_id": "E-in1"}],
+                "sub_task_id": "T2",
+                "sub_task_revision": 1,
+                "params": {
+                    "group_by": ["k"],
+                    "metrics": [{"column": "x", "func": "sum"}],
+                },
+                "allow_pushdown": True,
+            },
+            state,
+        )
+        payload = json.loads(msg.content)
+        assert payload["error"]["error_type"] == "stale_task_inputs"
+        assert "依赖" in payload["error"]["message"]
+
+    def test_same_task_old_revision_input_rejected(
+        self, node, guard_services, db_agent_context
+    ):
+        meta = _save_input(guard_services, db_agent_context)
+        old_input = {**_input_evidence(meta), "sub_task_revision": 1}
+        t1 = make_task_record(
+            "run-test", "T1", 2, status="in_progress", content="修订后目标"
+        )
+        state = {"db_executions": [old_input], **make_task_state([t1])}
+        _u, msg = self._analyze(
+            node,
+            db_agent_context,
+            {
+                "operation": "aggregate",
+                "inputs": [{"result_ref": meta.result_ref, "evidence_id": "E-in1"}],
+                "sub_task_id": "T1",
+                "sub_task_revision": 2,
+                "params": {
+                    "group_by": ["k"],
+                    "metrics": [{"column": "x", "func": "sum"}],
+                },
+                "allow_pushdown": True,
+            },
+            state,
+        )
+        payload = json.loads(msg.content)
+        assert payload["error"]["error_type"] == "stale_task_inputs"
+        assert "旧 revision" in payload["error"]["message"]
+
+    def test_cross_task_declared_completed_input_allowed(
+        self, node, guard_services, db_agent_context
+    ):
+        meta = _save_input(guard_services, db_agent_context)
+        owner = _input_evidence(meta)
+        t1 = make_task_record(
+            "run-test",
+            "T1",
+            1,
+            status="completed",
+            evidence_ids=["E-in1"],
+            content="上游",
+        )
+        t2 = make_task_record(
+            "run-test",
+            "T2",
+            1,
+            status="in_progress",
+            content="下游",
+            dependencies=[{"sub_task_id": "T1", "revision": 1}],
+        )
+        state = {"db_executions": [owner], **make_task_state([t1, t2])}
+        updates, msg = self._analyze(
+            node,
+            db_agent_context,
+            {
+                "operation": "aggregate",
+                "inputs": [{"result_ref": meta.result_ref, "evidence_id": "E-in1"}],
+                "sub_task_id": "T2",
+                "sub_task_revision": 1,
+                "params": {
+                    "group_by": ["k"],
+                    "metrics": [{"column": "x", "func": "sum"}],
+                },
+                "allow_pushdown": True,
+            },
+            state,
+        )
+        payload = json.loads(msg.content)
+        assert payload["status"] == "ok", payload
+        record = updates["db_analyses"][0]
+        assert record["sub_task_id"] == "T2"
+        assert record["input_result_refs"][0]["source_task_ref"]["sub_task_id"] == "T1"

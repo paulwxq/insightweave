@@ -14,17 +14,9 @@ import logging
 import os
 import stat
 from pathlib import Path
-from uuid import UUID
 
 import yaml
-from sqlalchemy.orm import Session
 
-from backend.data_sources.repository import get_db_source
-from backend.jobs.repository import assert_workspace_owner, get_step_row
-from backend.profile_loading.db_loader import (
-    MetaLoadSourceDisabledError,
-    MetaLoadSourceNotFoundError,
-)
 from backend.profile_loading.json_loader import RegistrationSnapshot
 from metaweave.core.clean_targets import (
     resolve_domain_output_dir,
@@ -44,47 +36,28 @@ class DomainPublishInputError(ValueError):
     """Domain 产物不满足发布输入契约（doc 21.2 §4）。"""
 
 
-def inspect_domain_context(
-    session: Session, source_id: UUID, job_id: UUID
-) -> tuple[str | None, "object | None"]:
-    """检查数据源、工作区归属和 domain 步骤状态；不读文件、不写库。
-
-    语义与 inspect_json_profile_context 一致：返回 (最近状态, 运行标识)。
-    """
-    source = get_db_source(session, source_id)
-    if source is None:
-        raise MetaLoadSourceNotFoundError("未找到指定 source_id 的数据源")
-    if not source.is_active:
-        raise MetaLoadSourceDisabledError("指定数据源已禁用，不能加载画像")
-    assert_workspace_owner(session, job_id, source_id)
-    step = get_step_row(session, job_id, DOMAIN_STEP)
-    if step is None:
-        return None, None
-    return step.last_status, step.updated_at
-
-
-def check_domain_output_ready(source_id: UUID, job_id: UUID) -> bool:
+def check_domain_output_ready(source_id: str, workspace_id: str) -> bool:
     """预检：Domain 目录可解析且 `db_domains.yaml` 存在并为普通文件。
 
     只判断文件就绪，不读内容、不数表映射行数（doc 21.2 §4）：零行产物
     仍可勾选，留到发布时记失败历史。
     """
     try:
-        domain_dir = resolve_domain_output_dir(source_id, job_id)
+        domain_dir = resolve_domain_output_dir(source_id, workspace_id)
         artifact = domain_dir / DOMAIN_ARTIFACT_NAME
         if artifact.is_symlink() or not artifact.is_file():
             logger.warning(
-                "Domain 预检产物缺失或非常规文件 source_id=%s job_id=%s",
+                "Domain 预检产物缺失或非常规文件 source_id=%s workspace_id=%s",
                 source_id,
-                job_id,
+                workspace_id,
             )
             return False
         return True
     except (ValueError, OSError) as exc:
         logger.warning(
-            "Domain 预检产物目录不可用 source_id=%s job_id=%s type=%s",
+            "Domain 预检产物目录不可用 source_id=%s workspace_id=%s type=%s",
             source_id,
-            job_id,
+            workspace_id,
             type(exc).__name__,
         )
         return False
@@ -118,10 +91,10 @@ def _read_regular_text(path: Path, label: str) -> str:
             os.close(fd)
 
 
-def _load_domain_document(source_id: UUID, job_id: UUID) -> dict:
+def _load_domain_document(source_id: str, workspace_id: str) -> dict:
     """解析 Domain YAML 顶层与 domains 列表；失败抛 DomainPublishInputError。"""
     try:
-        domain_dir = resolve_domain_output_dir(source_id, job_id)
+        domain_dir = resolve_domain_output_dir(source_id, workspace_id)
     except (ValueError, OSError) as exc:
         # 目录解析失败（含权限、I/O 等 OSError）按解析失败处理（doc 21.2 §4 规则 2）
         raise DomainPublishInputError(
@@ -143,14 +116,14 @@ def _load_domain_document(source_id: UUID, job_id: UUID) -> dict:
     return loaded
 
 
-def _read_md_manifest(source_id: UUID, job_id: UUID) -> "tuple[Path, set[str]]":
+def _read_md_manifest(source_id: str, workspace_id: str) -> "tuple[Path, set[str]]":
     """读取同一作业 MD 采集清单（doc 21.2 §4 规则 5）。
 
     清单按 MD 成功时写入的文件名为准；目录现状只用于复核被引用的
     文件现在仍是普通文件。无论 YAML 有没有表映射都要先过这里。
     """
     try:
-        md_dir = resolve_md_output_dir(source_id, job_id)
+        md_dir = resolve_md_output_dir(source_id, workspace_id)
     except (ValueError, OSError) as exc:
         raise DomainPublishInputError(
             f"MD 作业目录不可用（{type(exc).__name__}）"
@@ -172,15 +145,48 @@ def _read_md_manifest(source_id: UUID, job_id: UUID) -> "tuple[Path, set[str]]":
 
 
 def read_domain_rows(
-    source_id: UUID, job_id: UUID, registration: RegistrationSnapshot
+    source_id: str, workspace_id: str, registration: RegistrationSnapshot
 ) -> "list[dict]":
     """读取并解析受管 Domain 产物，返回 `table_domain` 待插入行（doc 21.2 §4）。
 
     行只含内容列（schema_name/table_name/domain_name/domain_desc/db_name），
-    source_id、job_id、publish_id 由发布事务补齐。任一结构非法整次失败。
+    source_id 与 publish_run_id 由发布事务补齐。任一结构非法整次失败。
     """
-    document = _load_domain_document(source_id, job_id)
+    document = _load_domain_document(source_id, workspace_id)
+    return domain_rows_from_document(document, source_id, workspace_id, registration)
 
+
+def domain_rows_from_config(
+    domains: "list[dict]",
+    source_id: str,
+    workspace_id: str,
+    registration: RegistrationSnapshot,
+) -> "list[dict]":
+    """运行路径（doc 7.2 §7.4）：由版本/运行配置构造 Domain 文档并映射发布行。
+
+    不读取共享 YAML；database.name 直接用数据源登记库名（必然通过一致性
+    校验），domains 清单仍走与文件路径完全相同的校验与映射规则。
+    """
+    document = {
+        "database": {"name": registration.db_name},
+        "domains": domains,
+    }
+    return domain_rows_from_document(document, source_id, workspace_id, registration)
+
+
+def domain_rows_from_document(
+    document: dict,
+    source_id: str,
+    workspace_id: str,
+    registration: RegistrationSnapshot,
+) -> "list[dict]":
+    """校验并映射 Domain 文档为 `table_domain` 待插入行（doc 21.2 §4 + 7.2 §7.4）。
+
+    校验、MD 清单交叉核对与映射规则对文件路径与配置注入路径完全一致；
+    任一结构非法整次抛 DomainPublishInputError。
+    """
+    if not isinstance(document, dict) or not isinstance(document.get("domains"), list):
+        raise DomainPublishInputError("Domain 配置 domains 必须是列表")
     database = document.get("database")
     if not isinstance(database, dict):
         raise DomainPublishInputError("Domain 产物 database 必须是对象")
@@ -230,7 +236,7 @@ def read_domain_rows(
 
     # 无论有没有表映射，都先校验清单（doc 21.2 §4 规则 5）：清单不可用
     # 时不再判零行，统一按解析失败处理。
-    md_dir, manifest_files = _read_md_manifest(source_id, job_id)
+    md_dir, manifest_files = _read_md_manifest(source_id, workspace_id)
 
     rows: "list[dict]" = []
     seen: "set[tuple[str, str, str]]" = set()

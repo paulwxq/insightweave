@@ -119,10 +119,14 @@ class DomainGenerator:
             raise ValueError(f"错误：{self.yaml_path} 不是合法的 YAML 对象")
         return loaded
 
-    def generate_from_context(self, user_description: Optional[str] = None) -> Dict[str, Any]:
+    def generate_from_context(
+        self, user_description: Optional[str] = None
+    ) -> Dict[str, Any]:
         """基于 MD 摘要（和可选用户补充说明）生成 database + domains。"""
         md_summary = self._build_md_context()
-        prompt = self._build_prompt(md_summary=md_summary, user_description=user_description)
+        prompt = self._build_prompt(
+            md_summary=md_summary, user_description=user_description
+        )
         logger.debug("Domain generation prompt:\n%s", prompt)
 
         logger.info("正在调用 LLM 生成 database/domains 配置...")
@@ -130,7 +134,9 @@ class DomainGenerator:
         response = self.llm_service._call_llm(prompt)
         payload = self._parse_response(response)
 
-        logger.info("成功解析 domains 配置，domain 数量: %s", len(payload.get("domains", [])))
+        logger.info(
+            "成功解析 domains 配置，domain 数量: %s", len(payload.get("domains", []))
+        )
         return payload
 
     # 兼容旧调用：仍返回 domains 列表
@@ -144,9 +150,9 @@ class DomainGenerator:
             "max_domains_per_table", self.DEFAULT_MAX_DOMAINS_PER_TABLE
         )
 
-        tables_instructions = f"""5. 将【表结构摘要】中每一个表名（保持原始三段式格式不变）分配到最合适的 Domain 中。
-6. 无法归入任何业务主题的表，请分配到名为 "_未分类_" 的特殊主题中。
-7. 一张表最多可以归入 {max_domains_per_table} 个主题。"""
+        tables_instructions = f"""4. 将【表结构摘要】中每一个表名（保持原始三段式格式不变）分配到最合适的 Domain 中。
+5. 无法归入任何业务主题的表，请分配到名为 "_未分类_" 的特殊主题中。
+6. 一张表最多可以归入 {max_domains_per_table} 个主题。"""
 
         db_name_display = self._real_db_name or "unknown"
 
@@ -216,7 +222,9 @@ class DomainGenerator:
     def _build_md_context(self) -> str:
         """读取 md 目录生成摘要，按模式/数量限制。"""
         if not self.md_context_dir:
-            raise ValueError("缺少 Markdown 摘要目录，请先运行 `metaweave metadata --step md`")
+            raise ValueError(
+                "缺少 Markdown 摘要目录，请先运行 `metaweave metadata --step md`"
+            )
         if not self.md_context_dir.exists():
             raise FileNotFoundError(
                 f"缺少 Markdown 摘要文件，目录不存在: {self.md_context_dir}。"
@@ -273,7 +281,9 @@ class DomainGenerator:
                 "请检查 md 文件内容或重新执行 `metaweave metadata --step md`"
             )
 
-        logger.info("md_context: 已读取 %s 个 md 文件作为摘要（限制 %s）", len(summaries), limit)
+        logger.info(
+            "md_context: 已读取 %s 个 md 文件作为摘要（限制 %s）", len(summaries), limit
+        )
         return "\n".join(summaries)
 
     def _parse_response(self, response: str) -> Dict[str, Any]:
@@ -336,10 +346,14 @@ class DomainGenerator:
             if not isinstance(tables, list):
                 tables = []
             tables = [str(t).strip() for t in tables if str(t).strip()]
-            normalized.append({"name": name, "description": description, "tables": tables})
+            normalized.append(
+                {"name": name, "description": description, "tables": tables}
+            )
         return normalized
 
-    def write_to_yaml(self, generated: Dict[str, Any] | List[Dict[str, str]]) -> List[Dict[str, str]]:
+    def write_to_yaml(
+        self, generated: Dict[str, Any] | List[Dict[str, str]]
+    ) -> List[Dict[str, str]]:
         """将结果写入 YAML 文件，并强制注入固定参数。"""
         if isinstance(generated, list):
             generated = {"domains": generated}

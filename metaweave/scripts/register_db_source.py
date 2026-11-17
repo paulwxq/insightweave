@@ -3,7 +3,6 @@
 import sys
 from getpass import getpass
 from pathlib import Path
-from uuid import uuid4
 
 import psycopg
 
@@ -111,12 +110,11 @@ def main() -> None:
             f"源库连接或 schema 校验失败（{type(exc).__name__}）"
         ) from None
 
-    source_id = uuid4()
+    # source_id 由数据库序列生成（doc 6.1 §13.1），插入时不指定
     with platform_session(settings) as session:
-        insert_db_source(
+        row = insert_db_source(
             session,
             {
-                "source_id": source_id,
                 "display_name": display_name,
                 "db_type": "postgresql",
                 "host": host,
@@ -131,7 +129,7 @@ def main() -> None:
                 "created_by_user_id": None,
             },
         )
-    print(f"数据源已登记: {source_id}")
+    print(f"数据源已登记: {row.source_id}")
 
 
 if __name__ == "__main__":

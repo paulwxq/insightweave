@@ -655,3 +655,168 @@ class TestMisc:
         assert r.ok
         assert r.used_evidence["dim"][0]["dim_evidence_id"] == "d-sales.orders.status"
         assert r.used_evidence["time"] == []
+
+
+# ============================================================================
+# 表身份解析（与前置校验一致：PG 折叠 + 裸名按有效搜索路径，doc 4 §4.7）
+# ============================================================================
+
+
+class ScopedGuardDb(FakeGuardDb):
+    """登记范围装配的守卫假库：allowed_schemas + 裸名目录核对。
+
+    located: {(表名, schema)} 目录命中集合（information_schema.tables 语义），
+    locate_table_schemas 据此返回 名字 -> [schema, ...]。
+    """
+
+    def __init__(self, allowed: list[str], located=None):
+        self.allowed_schemas = list(allowed)
+        self.located = set(located or set())
+        self.locate_calls: list[tuple[list[str], list[str]]] = []
+
+    def locate_table_schemas(self, table_names, schemas):
+        self.locate_calls.append((list(table_names), list(schemas)))
+        out: dict[str, list[str]] = {}
+        for name, schema in self.located:
+            if name in table_names and schema in schemas:
+                out.setdefault(name, []).append(schema)
+        return out
+
+
+def _scoped_guard(db) -> SqlEvidenceGuard:
+    cfg = GuardCheckConfig(
+        enabled=True,
+        forbid_realtime_clock_in_filters=True,
+        require_time_evidence=True,
+        require_dimension_evidence=True,
+    )
+    return SqlEvidenceGuard(cfg, db, DimensionProbeBuilder())
+
+
+class TestTableIdentityResolution:
+    def test_unquoted_uppercase_schema_and_table_fold(self):
+        """用户复现：PUBLIC.ORDERS 未加引号按 PG 规则折叠——前置校验放行
+        的列过滤查询，守卫同规则解析归属，不得 column_owner_unresolved。"""
+        guard = _scoped_guard(ScopedGuardDb(["sales"]))
+        expect_pass(
+            guard,
+            "SELECT 1 FROM SALES.ORDERS o "
+            "WHERE o.status = '已支付' AND o.d >= '2026-09-01' AND o.d < '2026-10-01'",
+            [SEP],
+            [DIM],
+        )
+
+    def test_bare_name_schema_from_registered_search_path(self):
+        """用户复现：登记 sales 时裸名 orders 按有效搜索路径解析到
+        sales.orders，不得默认当作 public 而拒绝。"""
+        db = ScopedGuardDb(["sales"], located={("orders", "sales")})
+        guard = _scoped_guard(db)
+        expect_pass(
+            guard,
+            "SELECT 1 FROM orders o WHERE o.status = '已支付'",
+            d_ev=[DIM],
+        )
+        assert db.locate_calls  # 目录核对确实发生
+
+    def test_bare_name_pg_catalog_priority_rejected(self):
+        """两边同名：pg_catalog 在登记清单之前，裸名实际解析到系统目录，
+        无列归属（与前置校验第 9 轮优先级判定一致）。"""
+        db = ScopedGuardDb(
+            ["sales"], located={("pg_class", "sales"), ("pg_class", "pg_catalog")}
+        )
+        guard = _scoped_guard(db)
+        expect_code(
+            guard,
+            "column_owner_unresolved",
+            "SELECT 1 FROM pg_class WHERE relkind = 'r'",
+        )
+
+    def test_bare_name_catalog_lookup_failure_fails_closed(self):
+        """目录查询失败：无法确认归属，fail closed。"""
+        db = ScopedGuardDb(["sales"])
+
+        def boom(table_names, schemas):
+            raise RuntimeError("目录不可用")
+
+        db.locate_table_schemas = boom
+        guard = _scoped_guard(db)
+        expect_code(
+            guard,
+            "column_owner_unresolved",
+            "SELECT 1 FROM orders WHERE status = '已支付'",
+            d_ev=[DIM],
+        )
+
+    def test_bare_name_unknown_table_unresolved(self):
+        """目录无命中（表不存在）：归属无法确认（管线中 EXPLAIN 先行报错）。"""
+        guard = _scoped_guard(ScopedGuardDb(["sales"], located=set()))
+        expect_code(
+            guard,
+            "column_owner_unresolved",
+            "SELECT 1 FROM orders WHERE status = '已支付'",
+            d_ev=[DIM],
+        )
+
+    def test_quoted_schema_kept_verbatim(self):
+        """加引号的 schema 保留原样："sales" 精确命中，"Sales" 不折叠不误配。"""
+        guard_ok = _scoped_guard(ScopedGuardDb(["sales"]))
+        expect_pass(
+            guard_ok,
+            "SELECT 1 FROM \"sales\".orders o WHERE o.status = '已支付'",
+            d_ev=[DIM],
+        )
+        guard_bad = _scoped_guard(ScopedGuardDb(["sales"]))
+        expect_code(
+            guard_bad,
+            "column_owner_unresolved",
+            "SELECT 1 FROM \"Sales\".orders o WHERE o.status = '已支付'",
+            d_ev=[DIM],
+        )
+
+
+class TestCaseNormalizedIdentity:
+    """分析 AST 统一 normalize_identifiers(postgres)：未引号列名/别名/
+    CTE 名与 PG 一致折叠——声明与引用大小写不一致不再误报归属未解析。"""
+
+    def test_uppercase_column_reference_folds(self):
+        """用户复现：o.ORDER_ID 形态的未引号大写列名按 PG 折叠后归属。"""
+        guard = _scoped_guard(ScopedGuardDb(["sales"]))
+        expect_pass(
+            guard,
+            "SELECT 1 FROM sales.orders o WHERE o.STATUS = '已支付'",
+            d_ev=[DIM],
+        )
+
+    def test_alias_declared_uppercase_referenced_lowercase(self):
+        """用户复现：别名声明 O、引用 o——两侧都折叠，作用域命中。"""
+        guard = _scoped_guard(ScopedGuardDb(["sales"]))
+        expect_pass(
+            guard,
+            "SELECT 1 FROM sales.orders O WHERE o.status = '已支付'",
+            d_ev=[DIM],
+        )
+
+    def test_cte_declared_uppercase_referenced_lowercase(self):
+        """用户复现：CTE 声明 BASE、引用 base（含以 CTE 名作限定符）——
+        投影透传照常归属。"""
+        guard = _scoped_guard(ScopedGuardDb(["sales"]))
+        expect_pass(
+            guard,
+            "WITH BASE AS (SELECT status, d FROM sales.orders) "
+            "SELECT 1 FROM base WHERE base.status = '已支付' "
+            "AND base.d >= '2026-09-01' AND base.d < '2026-10-01'",
+            [SEP],
+            [DIM],
+        )
+
+    def test_quoted_cte_not_matched_by_unquoted_reference(self):
+        """加引号的 CTE 名保留原样：未引号引用折叠后不等 → 物理表，
+        裸名 pg_class 解析到系统目录，无归属（PG 真实语义）。"""
+        db = ScopedGuardDb(["sales"], located={("pg_class", "pg_catalog")})
+        guard = _scoped_guard(db)
+        expect_code(
+            guard,
+            "column_owner_unresolved",
+            'WITH "PG_CLASS" AS (SELECT 1 AS n) SELECT n FROM pg_class '
+            "WHERE relkind = 'r'",
+        )

@@ -37,10 +37,10 @@ class RelationshipScorer:
     """
 
     def __init__(
-            self,
-            config: dict,
-            connector: DatabaseConnector,
-            name_similarity_service: Optional[NameSimilarityService] = None,
+        self,
+        config: dict,
+        connector: DatabaseConnector,
+        name_similarity_service: Optional[NameSimilarityService] = None,
     ):
         """初始化评分器
 
@@ -71,8 +71,8 @@ class RelationshipScorer:
 
     @staticmethod
     def recompute_composite_score(
-            score_details: Dict[str, float],
-            weights: Dict[str, float],
+        score_details: Dict[str, float],
+        weights: Dict[str, float],
     ) -> float:
         """按权重重算总分（共享纯函数，权重单一来源，见 doc 19 §3.2.2）
 
@@ -83,9 +83,7 @@ class RelationshipScorer:
         return sum(score_details[dim] * weights[dim] for dim in score_details)
 
     def score_candidates(
-            self,
-            candidates: List[Dict[str, Any]],
-            tables: Dict[str, dict]
+        self, candidates: List[Dict[str, Any]], tables: Dict[str, dict]
     ) -> List[Dict[str, Any]]:
         """为候选关系计算评分
 
@@ -106,9 +104,10 @@ class RelationshipScorer:
                 target_columns = candidate["target_columns"]
 
                 # 计算5个维度评分和基数（附带反向 inclusion 供合并阶段翻转重算）
-                score_details, cardinality, reverse_inclusion_rate = self._calculate_scores(
-                    source_table, source_columns,
-                    target_table, target_columns
+                score_details, cardinality, reverse_inclusion_rate = (
+                    self._calculate_scores(
+                        source_table, source_columns, target_table, target_columns
+                    )
                 )
 
                 # 防御性检查：验证 score_details 的键与 weights 的键是否一致
@@ -187,11 +186,11 @@ class RelationshipScorer:
         return scored_candidates
 
     def _calculate_scores(
-            self,
-            source_table: dict,
-            source_columns: List[str],
-            target_table: dict,
-            target_columns: List[str]
+        self,
+        source_table: dict,
+        source_columns: List[str],
+        target_table: dict,
+        target_columns: List[str],
     ) -> Tuple[Dict[str, float], str, float]:
         """计算5个维度评分和关系基数
 
@@ -223,11 +222,21 @@ class RelationshipScorer:
         )
 
         # 1 & 2: inclusion_rate, jaccard_index + 唯一性和JOIN倍率（用于基数计算）
-        inclusion_rate, reverse_inclusion_rate, jaccard_index, source_uniqueness, target_uniqueness, join_multiplicity = \
-            self._sample_and_calculate_inclusion(
-                source_schema, source_table_name, source_columns,
-                target_schema, target_table_name, target_columns
-            )
+        (
+            inclusion_rate,
+            reverse_inclusion_rate,
+            jaccard_index,
+            source_uniqueness,
+            target_uniqueness,
+            join_multiplicity,
+        ) = self._sample_and_calculate_inclusion(
+            source_schema,
+            source_table_name,
+            source_columns,
+            target_schema,
+            target_table_name,
+            target_columns,
+        )
 
         # 3: name_similarity（列名相似度，独立维度）
         name_similarity = self._calculate_name_similarity(
@@ -236,14 +245,12 @@ class RelationshipScorer:
 
         # 4: comment_similarity（注释相似度，不回退到名称）
         comment_similarity = self._calculate_comment_similarity(
-            source_columns, source_profiles,
-            target_columns, target_profiles
+            source_columns, source_profiles, target_columns, target_profiles
         )
 
         # 5: type_compatibility（类型兼容性）
         type_compatibility = self._calculate_type_compatibility(
-            source_columns, source_profiles,
-            target_columns, target_profiles
+            source_columns, source_profiles, target_columns, target_profiles
         )
 
         # 计算基数
@@ -261,22 +268,26 @@ class RelationshipScorer:
             f"{target_schema}.{target_table_name}{target_columns} = {cardinality}"
         )
 
-        return {
-            "inclusion_rate": inclusion_rate,
-            "name_similarity": name_similarity,
-            "comment_similarity": comment_similarity,
-            "type_compatibility": type_compatibility,
-            "jaccard_index": jaccard_index,
-        }, cardinality, reverse_inclusion_rate
+        return (
+            {
+                "inclusion_rate": inclusion_rate,
+                "name_similarity": name_similarity,
+                "comment_similarity": comment_similarity,
+                "type_compatibility": type_compatibility,
+                "jaccard_index": jaccard_index,
+            },
+            cardinality,
+            reverse_inclusion_rate,
+        )
 
     def _sample_and_calculate_inclusion(
-            self,
-            source_schema: str,
-            source_table: str,
-            source_columns: List[str],
-            target_schema: str,
-            target_table: str,
-            target_columns: List[str]
+        self,
+        source_schema: str,
+        source_table: str,
+        source_columns: List[str],
+        target_schema: str,
+        target_table: str,
+        target_columns: List[str],
     ) -> Tuple[float, float, float, float, float, float]:
         """从数据库采样并计算评分指标和基数计算所需的统计值
 
@@ -296,31 +307,37 @@ class RelationshipScorer:
         try:
             # 采样源表（只取需要的列）
             source_col_expr = ", ".join([f'"{col}"' for col in source_columns])
-            source_sql = f'''
+            source_sql = f"""
                 SELECT {source_col_expr}
                 FROM "{source_schema}"."{source_table}"
                 LIMIT %s
-            '''
+            """
             source_rows = self.connector.execute_query(source_sql, (self.sample_size,))
             self.query_count += 1
 
             # 采样目标表
             target_col_expr = ", ".join([f'"{col}"' for col in target_columns])
-            target_sql = f'''
+            target_sql = f"""
                 SELECT {target_col_expr}
                 FROM "{target_schema}"."{target_table}"
                 LIMIT %s
-            '''
+            """
             target_rows = self.connector.execute_query(target_sql, (self.sample_size,))
             self.query_count += 1
 
             if not source_rows or not target_rows:
-                logger.warning(f"采样数据为空: {source_schema}.{source_table} 或 {target_schema}.{target_table}")
+                logger.warning(
+                    f"采样数据为空: {source_schema}.{source_table} 或 {target_schema}.{target_table}"
+                )
                 return 0.0, 0.0, 0.0, 0.0, 0.0, 1.0
 
             # 提取值集合（组合多列为元组）- 返回值集合和有效行数
-            source_values, source_valid_count = self._extract_value_set(source_rows, source_columns)
-            target_values, target_valid_count = self._extract_value_set(target_rows, target_columns)
+            source_values, source_valid_count = self._extract_value_set(
+                source_rows, source_columns
+            )
+            target_values, target_valid_count = self._extract_value_set(
+                target_rows, target_columns
+            )
 
             if not source_values or not target_values:
                 return 0.0, 0.0, 0.0, 0.0, 0.0, 1.0
@@ -330,20 +347,34 @@ class RelationshipScorer:
             union = source_values | target_values
 
             # inclusion_rate = |source ∩ target| / |source|
-            inclusion_rate = len(intersection) / len(source_values) if source_values else 0.0
+            inclusion_rate = (
+                len(intersection) / len(source_values) if source_values else 0.0
+            )
             # reverse_inclusion_rate = |source ∩ target| / |target|（翻转方向的
             # inclusion_rate，采样时同步计算，翻转重算时直接取用，不新增查询）
-            reverse_inclusion_rate = len(intersection) / len(target_values) if target_values else 0.0
+            reverse_inclusion_rate = (
+                len(intersection) / len(target_values) if target_values else 0.0
+            )
 
             # jaccard_index = |source ∩ target| / |source ∪ target|
             jaccard_index = len(intersection) / len(union) if union else 0.0
 
-            logger.debug(f"采样统计: source={len(source_values)}, target={len(target_values)}, "
-                         f"intersection={len(intersection)}, inclusion={inclusion_rate:.3f}, jaccard={jaccard_index:.3f}")
+            logger.debug(
+                f"采样统计: source={len(source_values)}, target={len(target_values)}, "
+                f"intersection={len(intersection)}, inclusion={inclusion_rate:.3f}, jaccard={jaccard_index:.3f}"
+            )
 
             # 计算组合唯一性（使用有效行数作为分母，修复 NULL 值问题）
-            source_uniqueness = len(source_values) / source_valid_count if source_valid_count > 0 else 0.0
-            target_uniqueness = len(target_values) / target_valid_count if target_valid_count > 0 else 0.0
+            source_uniqueness = (
+                len(source_values) / source_valid_count
+                if source_valid_count > 0
+                else 0.0
+            )
+            target_uniqueness = (
+                len(target_values) / target_valid_count
+                if target_valid_count > 0
+                else 0.0
+            )
 
             # NULL 率过高时记录警告
             if source_valid_count < len(source_rows) * 0.5:
@@ -359,9 +390,13 @@ class RelationshipScorer:
 
             # 执行 JOIN COUNT 获取精确倍率（传入 source_valid_count 作为分母）
             join_multiplicity = self._execute_join_count(
-                source_schema, source_table, source_columns,
-                target_schema, target_table, target_columns,
-                source_valid_count
+                source_schema,
+                source_table,
+                source_columns,
+                target_schema,
+                target_table,
+                target_columns,
+                source_valid_count,
             )
 
             logger.debug(
@@ -370,21 +405,28 @@ class RelationshipScorer:
                 f"join_mult={join_multiplicity:.3f}, source_sample={len(source_rows)}, source_valid={source_valid_count}"
             )
 
-            return inclusion_rate, reverse_inclusion_rate, jaccard_index, source_uniqueness, target_uniqueness, join_multiplicity
+            return (
+                inclusion_rate,
+                reverse_inclusion_rate,
+                jaccard_index,
+                source_uniqueness,
+                target_uniqueness,
+                join_multiplicity,
+            )
 
         except Exception as e:
             logger.error(f"数据库采样失败: {e}")
             return 0.0, 0.0, 0.0, 0.0, 0.0, 1.0
 
     def _execute_join_count(
-            self,
-            source_schema: str,
-            source_table: str,
-            source_columns: List[str],
-            target_schema: str,
-            target_table: str,
-            target_columns: List[str],
-            source_valid_count: int
+        self,
+        source_schema: str,
+        source_table: str,
+        source_columns: List[str],
+        target_schema: str,
+        target_table: str,
+        target_columns: List[str],
+        source_valid_count: int,
     ) -> float:
         """执行 JOIN COUNT 获取 JOIN 倍率
 
@@ -407,13 +449,15 @@ class RelationshipScorer:
             source_col_expr = ", ".join([f'"{col}"' for col in source_columns])
 
             # 构造 JOIN ON 条件
-            join_conditions = " AND ".join([
-                f's."{src_col}" = t."{tgt_col}"'
-                for src_col, tgt_col in zip(source_columns, target_columns)
-            ])
+            join_conditions = " AND ".join(
+                [
+                    f's."{src_col}" = t."{tgt_col}"'
+                    for src_col, tgt_col in zip(source_columns, target_columns)
+                ]
+            )
 
             # JOIN COUNT SQL（在采样数据上执行）
-            join_sql = f'''
+            join_sql = f"""
                 WITH source_sample AS (
                     SELECT {source_col_expr}
                     FROM "{source_schema}"."{source_table}"
@@ -423,14 +467,16 @@ class RelationshipScorer:
                 FROM source_sample s
                 INNER JOIN "{target_schema}"."{target_table}" t
                 ON {join_conditions}
-            '''
+            """
 
             result = self.connector.execute_query(join_sql, (self.sample_size,))
             self.query_count += 1
-            join_count = result[0].get('join_count', 0) if result else 0
+            join_count = result[0].get("join_count", 0) if result else 0
 
             # 计算倍率：使用传入的 source_valid_count 作为分母
-            multiplicity = join_count / source_valid_count if source_valid_count > 0 else 0.0
+            multiplicity = (
+                join_count / source_valid_count if source_valid_count > 0 else 0.0
+            )
 
             logger.debug(
                 f"JOIN COUNT: {source_schema}.{source_table} → {target_schema}.{target_table}, "
@@ -444,10 +490,10 @@ class RelationshipScorer:
             return 1.0  # 失败时返回 1.0（保守估计，避免误判为 M:N）
 
     def _calculate_cardinality(
-            self,
-            source_uniqueness: float,
-            target_uniqueness: float,
-            join_multiplicity: float
+        self,
+        source_uniqueness: float,
+        target_uniqueness: float,
+        join_multiplicity: float,
     ) -> str:
         """计算关系基数（静态+动态混合判断）
 
@@ -465,7 +511,7 @@ class RelationshipScorer:
             基数类型: "1:1" | "1:N" | "N:1" | "M:N"
         """
         HIGH = 0.95  # 高唯一度阈值
-        LOW = 0.80   # 低唯一度阈值
+        LOW = 0.80  # 低唯一度阈值
 
         logger.debug(
             f"基数判断输入: source_uniq={source_uniqueness:.3f}, "
@@ -545,7 +591,9 @@ class RelationshipScorer:
         except TypeError:
             return str(value)
 
-    def _extract_value_set(self, rows: List[Dict], columns: List[str]) -> Tuple[Set[Tuple], int]:
+    def _extract_value_set(
+        self, rows: List[Dict], columns: List[str]
+    ) -> Tuple[Set[Tuple], int]:
         """从查询结果中提取值集合
 
         Args:
@@ -553,7 +601,7 @@ class RelationshipScorer:
             columns: 列名列表
 
         Returns:
-            (value_set, valid_count): 
+            (value_set, valid_count):
             - value_set: 值元组集合（多列组合为元组，已排除含 NULL 的行）
             - valid_count: 有效行数（排除含 NULL 的行后实际参与比较的行数）
         """
@@ -591,9 +639,7 @@ class RelationshipScorer:
         return value_set, valid_count
 
     def _calculate_name_similarity(
-            self,
-            source_columns: List[str],
-            target_columns: List[str]
+        self, source_columns: List[str], target_columns: List[str]
     ) -> float:
         """计算列名相似度（平均值），写入 score_details['name_similarity']。
 
@@ -608,7 +654,9 @@ class RelationshipScorer:
             return 0.0
 
         if self.name_similarity_service:
-            return self.name_similarity_service.compare_columns(source_columns, target_columns)
+            return self.name_similarity_service.compare_columns(
+                source_columns, target_columns
+            )
 
         # 无 embedding 环境的降级语义（doc 15 §2.4/§5）：同名短路通过（1.0），
         # 不同名直接放弃（0.0）。SequenceMatcher 模糊匹配路径已废弃，不再兜底。
@@ -620,11 +668,11 @@ class RelationshipScorer:
         return total_sim / len(source_columns)
 
     def _calculate_comment_similarity(
-            self,
-            source_columns: List[str],
-            source_profiles: Dict[str, dict],
-            target_columns: List[str],
-            target_profiles: Dict[str, dict],
+        self,
+        source_columns: List[str],
+        source_profiles: Dict[str, dict],
+        target_columns: List[str],
+        target_profiles: Dict[str, dict],
     ) -> float:
         """计算注释相似度（平均值）。
 
@@ -638,16 +686,18 @@ class RelationshipScorer:
         for src_col, tgt_col in zip(source_columns, target_columns):
             src_comment = (source_profiles.get(src_col, {}) or {}).get("comment")
             tgt_comment = (target_profiles.get(tgt_col, {}) or {}).get("comment")
-            total += self._score_comment_pair(src_col, src_comment, tgt_col, tgt_comment)
+            total += self._score_comment_pair(
+                src_col, src_comment, tgt_col, tgt_comment
+            )
 
         return total / len(source_columns)
 
     def _score_comment_pair(
-            self,
-            src_col: str,
-            src_comment: Optional[str],
-            tgt_col: str,
-            tgt_comment: Optional[str],
+        self,
+        src_col: str,
+        src_comment: Optional[str],
+        tgt_col: str,
+        tgt_comment: Optional[str],
     ) -> float:
         """单列对的 comment_similarity 打分。
 
@@ -658,7 +708,10 @@ class RelationshipScorer:
             return self.comment_fallback_score
 
         comment_channel = getattr(self.name_similarity_service, "comment_channel", None)
-        if comment_channel is None or getattr(comment_channel, "enabled", True) is False:
+        if (
+            comment_channel is None
+            or getattr(comment_channel, "enabled", True) is False
+        ):
             return self.comment_fallback_score
 
         src_usable = comment_channel.is_usable(src_comment)
@@ -672,11 +725,11 @@ class RelationshipScorer:
         return self.comment_fallback_score
 
     def _calculate_type_compatibility(
-            self,
-            source_columns: List[str],
-            source_profiles: Dict[str, dict],
-            target_columns: List[str],
-            target_profiles: Dict[str, dict]
+        self,
+        source_columns: List[str],
+        source_profiles: Dict[str, dict],
+        target_columns: List[str],
+        target_profiles: Dict[str, dict],
     ) -> float:
         """计算类型兼容性（平均值）
 
@@ -704,4 +757,3 @@ class RelationshipScorer:
             total_compat += compat
 
         return total_compat / len(source_columns)
-

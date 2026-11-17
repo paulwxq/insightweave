@@ -52,7 +52,9 @@ def test_extract_table_name_invalid_title_raises():
 
 
 def _parse(*lines, header="## 字段列表："):
-    return MDParser.from_string("\n".join(["# db.public.t", header, *lines])).get_column_descriptions()
+    return MDParser.from_string(
+        "\n".join(["# db.public.t", header, *lines])
+    ).get_column_descriptions()
 
 
 def test_nested_parentheses_types_and_example_markers():

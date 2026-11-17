@@ -3,6 +3,11 @@
 wrap_model_call 记录请求轨迹（工具名、消息数、估算 Token、用量、耗时）到
 审计日志与会话 audit.jsonl；工具名集合与期望集合（§10.6 同一常量）不一致时
 记 ERROR、停止运行（tool_set_mismatch）。不记录 API key、连接串与提示词正文。
+
+doc 20：wrap_model_call 在估算与模型调用之前，向每次主 Agent 请求的系统
+消息注入本轮北京时间背景（ctx.now → Asia/Shanghai）。主 Agent 由此知道
+"今天"；自然语言时间范围解析仍由 resolve_time_range 负责。注入块以保留
+标题识别、替换式幂等，不写 state.messages，不改动原请求对象。
 """
 
 from __future__ import annotations
@@ -10,11 +15,13 @@ from __future__ import annotations
 import json
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
+from zoneinfo import ZoneInfo
 
-from langchain.agents.middleware import AgentMiddleware
-from langchain_core.messages import AIMessage
+from langchain.agents.middleware import AgentMiddleware, ModelRequest
+from langchain_core.messages import AIMessage, SystemMessage
 from langchain_core.messages.utils import count_tokens_approximately
 
 from src.modules.db_deepagent.context import DbAgentContext
@@ -24,6 +31,58 @@ from src.utils.logger import get_module_logger
 
 logger = get_module_logger("nl2sql.db_deepagent.middleware.request_audit")
 audit_logger = get_module_logger("nl2sql.db_deepagent.audit")
+
+# doc 20 §4.1：本方案注入块的保留标题（识别时对块文本去前导空白后前缀匹配）
+_REFERENCE_TIME_HEADER = "## 本轮北京时间背景\n"
+
+_BEIJING = ZoneInfo("Asia/Shanghai")
+
+
+def _with_reference_time(
+    request: ModelRequest[DbAgentContext],
+) -> ModelRequest[DbAgentContext]:
+    """向请求系统消息追加/刷新本轮北京时间背景（doc 20 §4.1）。
+
+    - 时钟：ctx.now（与 resolve_time_range 同源）转 Asia/Shanghai，跨午夜
+      不中途变基准；
+    - 幂等：以保留标题识别既有时间块并整体移除后追加当前块——重复处理
+      同一原请求或已注入请求都只保留一块，且使用当前 ctx.now 刷新；
+    - 纯函数：经 request.override() 创建新请求，不改动原请求与原系统消息。
+    """
+    reference_now = request.runtime.context.now.astimezone(_BEIJING)
+    clock_text = (
+        f"\n\n{_REFERENCE_TIME_HEADER}"
+        f"本轮参考日期：{reference_now.date().isoformat()}\n"
+        f"本轮参考时间：{reference_now.isoformat()}\n"
+        "时区：Asia/Shanghai（北京时间，UTC+08:00）。\n"
+        "以上是本轮请求开始时的参考时间；本轮“今天”以此为准。\n"
+        "历史对话中的参考时间不代表本轮日期。\n"
+        "自然语言时间范围解析、SQL 时间边界生成及时间计算结论复核"
+        "仍使用 resolve_time_range。"
+    )
+    clock_block = {"type": "text", "text": clock_text}
+    original = request.system_message
+    if original is None:
+        system_message = SystemMessage(content=[clock_block])
+    else:
+        blocks = (
+            [{"type": "text", "text": original.content}]
+            if isinstance(original.content, str)
+            else list(original.content)
+        )
+        # 仅移除以保留标题开头的独立文本块；句中出现标题的其他块不动。
+        blocks = [
+            block
+            for block in blocks
+            if not (
+                isinstance(block, dict)
+                and block.get("type") == "text"
+                and isinstance(block.get("text"), str)
+                and block["text"].lstrip().startswith(_REFERENCE_TIME_HEADER)
+            )
+        ]
+        system_message = original.model_copy(update={"content": [*blocks, clock_block]})
+    return request.override(system_message=system_message)
 
 
 def _tool_names(tools: list[Any]) -> list[str]:
@@ -70,6 +129,9 @@ class RequestAuditMiddleware(AgentMiddleware[DbDeepAgentState, DbAgentContext]):
 
     def wrap_model_call(self, request, handler) -> Any:
         ctx: DbAgentContext = request.runtime.context
+        # doc 20 §4：注入发生在序号生成、Token 估算与工具核对之前，
+        # 估算与 handler 使用同一份注入后的请求。
+        request = _with_reference_time(request)
         seq = self._next_seq(ctx.run_id)
         names = _tool_names(request.tools)
         approx_tokens = count_tokens_approximately(

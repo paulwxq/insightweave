@@ -32,11 +32,25 @@ class _StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class ModelRetryConfig(_StrictModel):
+    """主模型有限重试（doc 6.2 §7.5）。
+
+    enabled=true 时启用项目层 BudgetAwareModelRetryMiddleware，并在主模型
+    构造时强制客户端 max_retries=0（单层重试，不与 SDK 内部重试叠加）。
+    代码默认关闭：旧配置未声明 model.retry 时不改变原 provider 启动行为；
+    标准部署由 YAML 显式开启。max_retries 为首次调用之外的重试次数。
+    """
+
+    enabled: bool = False
+    max_retries: int = Field(default=2, ge=0, le=2)
+
+
 class ModelConfig(_StrictModel):
     llm_profile: str
     overrides: dict[str, Any] = Field(default_factory=dict)
     expected_harness_key: str | None = None
     request_timeout_seconds: float = Field(gt=0)
+    retry: ModelRetryConfig = Field(default_factory=ModelRetryConfig)
 
 
 class EmbeddingConfig(_StrictModel):
@@ -51,6 +65,11 @@ class BusinessDbConfig(_StrictModel):
     database: str
     user: str
     password: str
+    # libpq sslmode；登记源注入时取登记值（doc 4 §4.7），yaml 缺省 prefer
+    sslmode: str = "prefer"
+    # 登记 selected_schemas（doc 4 §4.7）：非空时限制目录访问与表键归一
+    # 的 schema 范围，并注入连接 search_path；None（yaml 缺省）不限制
+    allowed_schemas: list[str] | None = None
     expected_database: str
     table_key_prefix: str
     timezone: str
@@ -58,7 +77,7 @@ class BusinessDbConfig(_StrictModel):
     pool_max_size: int = Field(gt=0)
     explain_timeout_seconds: float = Field(gt=0)
     statement_timeout_seconds: float = Field(gt=0)
-    max_saved_rows: int = Field(gt=0)
+    max_saved_result_rows: int = Field(gt=0)
 
 
 class PlatformDbConfig(_StrictModel):
@@ -171,9 +190,11 @@ class ValidationConfig(_StrictModel):
 
 
 class ResultsConfig(_StrictModel):
+    # doc 9 §2：本段只约束业务数据量（预览行数/分页/保存上限等）；
+    # 工具返回文本不再有字符预算，超长正文由 SDK FilesystemMiddleware
+    # 按 filesystem.tool_token_limit_before_evict 转存
     preview_rows: int = Field(gt=0)
     read_max_rows: int = Field(gt=0)
-    max_tool_output_chars: int = Field(gt=0)
     placeholder_max_values: int = Field(gt=0)
     probe_max_values: int = Field(gt=0)
 
@@ -187,6 +208,11 @@ class BudgetConfig(_StrictModel):
 
 
 class SummarizationConfig(_StrictModel):
+    # 摘要专用 LLM profile（doc 5.1 §4.1）：必填，引用全局 llm_profiles；
+    # 存在性由 _check_summarization 校验，参数合法性仍由 get_llm() 负责
+    llm_profile: str = Field(min_length=1)
+    overrides: dict[str, Any] = Field(default_factory=dict)
+    request_timeout_seconds: float = Field(gt=0)
     summary_trigger_tokens: int = Field(gt=0)
     recent_context_tokens: int = Field(gt=0)
     trim_tokens_to_summarize: int | None = Field(default=None, gt=0)
@@ -196,12 +222,22 @@ class FilesystemConfig(_StrictModel):
     tool_token_limit_before_evict: int = Field(gt=0)
 
 
+class TimeResolutionConfig(_StrictModel):
+    # 日期解析专用 LLM profile（doc 16 §6）：必填，引用全局 llm_profiles；
+    # 存在性由 _check_time_resolution 校验，参数合法性由 get_llm() 负责
+    llm_profile: str = Field(min_length=1)
+    overrides: dict[str, Any] = Field(default_factory=dict)
+    request_timeout_seconds: float = Field(gt=0)
+
+
 class ThreadConfig(_StrictModel):
     rotate_after_messages: int = Field(gt=0)
     carry_max_evidence: int = Field(gt=0)
     checkpoint_retention_days: int = Field(gt=0)
     archive_retention_days: int = Field(gt=0)
     result_retention_days: int = Field(gt=0)
+    # 历史快照保留的最大行数；缺失时按默认 200（旧配置兼容）
+    snapshot_max_rows: int = Field(default=200, gt=0)
 
 
 class WorkspaceConfig(_StrictModel):
@@ -237,6 +273,7 @@ class DbAgentConfig(_StrictModel):
     results: ResultsConfig
     budget: BudgetConfig
     summarization: SummarizationConfig
+    time_resolution: TimeResolutionConfig
     filesystem: FilesystemConfig
     thread: ThreadConfig
     workspace: WorkspaceConfig
@@ -251,11 +288,51 @@ def _field_paths(exc: ValidationError) -> str:
 
 
 def _check_business_target(cfg: DbAgentConfig) -> None:
-    if not (cfg.business_db.database == cfg.business_db.expected_database == "orders"):
+    """business_db 三键一致性 + db 前缀键空间（doc 4 §4.7）。
+
+    database/expected_database/table_key_prefix 必须一致（按源注入时同取
+    登记库名，不得沿用固定前缀）；键空间按统一判定式校验（连字符、数字
+    开头、内部空格合法；点号/控制字符/首尾空白拒绝）。
+    """
+    b = cfg.business_db
+    if not (b.database == b.expected_database == b.table_key_prefix):
         raise DbAgentConfigError(
-            "business_db: database/expected_database 必须一致且为 orders，实际 "
-            f"database={cfg.business_db.database!r}, expected={cfg.business_db.expected_database!r}"
+            "business_db: database/expected_database/table_key_prefix 必须一致"
+            "（按选定源登记 db_name 注入），实际 "
+            f"database={b.database!r}, expected={b.expected_database!r}, "
+            f"table_key_prefix={b.table_key_prefix!r}"
         )
+    from src.modules.db_deepagent.keyspace import db_prefix_problem
+
+    problem = db_prefix_problem(b.table_key_prefix)
+    if problem:
+        raise DbAgentConfigError(f"business_db.table_key_prefix 非法: {problem}")
+
+
+def apply_source_runtime_config(
+    cfg: DbAgentConfig, db_name: str, *, check_embedding_profile: bool = True
+) -> DbAgentConfig:
+    """按选定源登记 db_name 构造运行配置（doc 4 §4.7）。
+
+    ``business_db.database/expected_database/table_key_prefix`` 三键统一改为
+    该源的登记库名（键空间按统一判定式校验，不通过即拒绝），并重跑 §4.2
+    检查表。必须在 ``build_services`` 之前调用；与真实连接的一致性由
+    BusinessDbService 启动时的 ``current_database()`` 核对兜底。
+    """
+    from src.modules.db_deepagent.keyspace import db_prefix_problem
+
+    problem = db_prefix_problem(db_name)
+    if problem:
+        raise DbAgentConfigError(
+            f"选定源登记 db_name 不能作为表键前缀: {problem}（该源对象不在本期"
+            "NL2SQL 知识接入范围内）"
+        )
+    updated = cfg.model_copy(deep=True)
+    updated.business_db.database = db_name
+    updated.business_db.expected_database = db_name
+    updated.business_db.table_key_prefix = db_name
+    run_config_checks(updated, check_embedding_profile=check_embedding_profile)
+    return updated
 
 
 def _check_platform_target(cfg: DbAgentConfig) -> None:
@@ -280,7 +357,26 @@ def _check_summarization(cfg: DbAgentConfig) -> None:
             "summarization: 需满足 0 < recent_context_tokens < summary_trigger_tokens，实际 "
             f"recent={s.recent_context_tokens}, trigger={s.summary_trigger_tokens}"
         )
+    # 摘要 profile 引用检查（doc 5.1 §4.1）：不在此创建 LLM；
+    # provider/模型 ID/密钥合法性由 get_llm() 在构造时校验
+    profiles = get_config().get("llm_profiles", {})
+    if s.llm_profile not in profiles:
+        raise DbAgentConfigError(
+            "summarization.llm_profile: 引用的 LLM profile 不存在；"
+            "请在 src/configs/config.yaml 的 llm_profiles 中注册"
+        )
     # trim_tokens_to_summarize: None 或正整数已由字段约束保证；显式传 None 时不回落 SDK 默认 4000（§4.3）。
+
+
+def _check_time_resolution(cfg: DbAgentConfig) -> None:
+    # 日期 profile 引用检查（doc 16 §6）：不在此创建 LLM；
+    # provider/模型 ID/密钥合法性由 get_llm() 在构造时校验
+    profiles = get_config().get("llm_profiles", {})
+    if cfg.time_resolution.llm_profile not in profiles:
+        raise DbAgentConfigError(
+            "time_resolution.llm_profile: 引用的 LLM profile 不存在；"
+            "请在 src/configs/config.yaml 的 llm_profiles 中注册"
+        )
 
 
 def _check_maintenance(cfg: DbAgentConfig) -> None:
@@ -324,6 +420,7 @@ def run_config_checks(
     _check_business_target(cfg)
     _check_platform_target(cfg)
     _check_summarization(cfg)
+    _check_time_resolution(cfg)
     _check_maintenance(cfg)
     _check_semantic(cfg)
     _check_fixed_now(cfg)
@@ -348,6 +445,26 @@ def compute_validation_fingerprint(cfg: DbAgentConfig) -> str:
     return hashlib.sha256((canonical + GUARD_RULES_VERSION).encode("utf-8")).hexdigest()
 
 
+def load_base_db_agent_config(config_path: str | Path | None = None) -> DbAgentConfig:
+    """读取源无关的基础配置内容（doc 2 §5.3 Web 装配顺序）。
+
+    只做 yaml 解析与结构校验，不执行 §4.2 跨字段检查——business_db 三键
+    一致性在按源登记覆盖（apply_source_runtime_config）之后才成立；环境
+    DB_NAME 与 YAML 默认 orders 不同时也能先完成解析。Web 公共装配在应用
+    登记快照后调用 run_config_checks 完成最终校验。
+    """
+    path = Path(config_path) if config_path is not None else _CONFIG_PATH
+    if not path.exists():
+        raise DbAgentConfigError(f"配置文件不存在: {path}")
+    raw = ConfigLoader(str(path)).load()
+    try:
+        return DbAgentConfig.model_validate(raw)
+    except ValidationError as exc:
+        raise DbAgentConfigError(
+            f"配置结构错误（字段路径）: {_field_paths(exc)}"
+        ) from exc
+
+
 def load_db_agent_config(config_path: str | Path | None = None) -> DbAgentConfig:
     """加载 §4.1 yaml → DbAgentConfig，并执行 §4.2 全部检查。
 
@@ -357,15 +474,6 @@ def load_db_agent_config(config_path: str | Path | None = None) -> DbAgentConfig
     Raises:
         DbAgentConfigError: 文件缺失、结构错误、检查表任一失败（消息不含密码）
     """
-    path = Path(config_path) if config_path is not None else _CONFIG_PATH
-    if not path.exists():
-        raise DbAgentConfigError(f"配置文件不存在: {path}")
-    raw = ConfigLoader(str(path)).load()
-    try:
-        cfg = DbAgentConfig.model_validate(raw)
-    except ValidationError as exc:
-        raise DbAgentConfigError(
-            f"配置结构错误（字段路径）: {_field_paths(exc)}"
-        ) from exc
+    cfg = load_base_db_agent_config(config_path)
     run_config_checks(cfg)
     return cfg

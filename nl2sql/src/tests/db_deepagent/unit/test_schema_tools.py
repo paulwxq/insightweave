@@ -240,6 +240,56 @@ class TestSearchSchemaBehavior:
         assert payload["data"]["tables"] == []
         assert payload["data"]["columns"] == []
 
+    def test_large_hits_not_trimmed(self, node, db_agent_context, fake_milvus):
+        """doc 9 §4 步骤 1：检索列表大结果不被裁到 5 项。
+
+        9 表 + 9 列命中（各 ~700 字符）越过旧 12000 预算；旧实现把
+        tables/columns 各裁到 5 项（JSON 合法但丢检索结果）。修复后
+        全部命中与顺序保留。
+        """
+        fake_milvus.table_hits = [
+            {
+                "object_id": f"orders.public.t{i:02d}",
+                "object_type": "table",
+                "similarity": 0.9,
+                "grain_hint": "g" * 650,
+                "time_col_hint": None,
+                "table_category": "",
+            }
+            for i in range(1, 10)
+        ]
+        fake_milvus.column_hits = [
+            {
+                "object_id": f"orders.public.orders.c{i:02d}",
+                "parent_id": "orders.public.orders",
+                "similarity": 0.9,
+                "comment": "c" * 650,
+            }
+            for i in range(1, 10)
+        ]
+        _, msg = invoke_tool_node(
+            node, [("search_schema", {"query": "大结果"}, "c1")], db_agent_context
+        )
+        # 数据前置条件（独立于生产代码）：完整命中列表的首次序列化即超旧预算
+        assert (
+            len(
+                json.dumps(
+                    fake_milvus.table_hits + fake_milvus.column_hits, ensure_ascii=False
+                )
+            )
+            > 12000
+        )
+        payload = json.loads(msg.content)
+        data = payload["data"]
+        assert len(data["tables"]) == 9  # 旧实现此处为 5（合法 JSON 但丢命中）
+        assert len(data["columns"]) == 9  # 旧实现此处为 5
+        assert [t["display"] for t in data["tables"]] == [
+            f"public.t{i:02d}" for i in range(1, 10)
+        ]
+        assert data["tables"][0]["grain_hint"] == "g" * 650  # 长字段原样保留
+        assert payload["warnings"] == []
+        assert len(msg.content) > 12000  # 修复后实测长度越过旧预算
+
 
 # ============================================================================
 # inspect_tables（§7.3）
@@ -315,6 +365,112 @@ class TestInspectTables:
         entry = payload["data"]["tables"][0]
         assert entry["status"] == "ok"
         assert any("无该表卡片" in w for w in entry["warnings"])
+
+
+def _local_services(db_agent_config, business_db, milvus):
+    """带自定义业务库/检索假件的服务容器（doc 7 步骤 1：假件局部放测试内）。"""
+    from src.modules.db_deepagent.services import DbAgentServices
+    from src.modules.db_deepagent.services.table_catalog import TableCatalog
+    from src.tests.db_deepagent.conftest import (
+        TEST_SOURCE_ID,
+        FakeEmbedding,
+        FakeJoinGraph,
+    )
+
+    return DbAgentServices(
+        config=db_agent_config,
+        business_db=business_db,
+        embedding=FakeEmbedding(),
+        milvus=milvus,
+        catalog=TableCatalog(db_agent_config, milvus, business_db),
+        join_graph=FakeJoinGraph(),
+        embedding_release={},
+        source_id=TEST_SOURCE_ID,
+    )
+
+
+def _fake_columns(count: int, name_len: int = 50, marker: str | None = None):
+    """生产实际字段形态的实时列：长列名撑出真实序列化体积（doc 7 步骤 4 规模口径）。"""
+    from src.tests.db_deepagent.conftest import FakeColumn
+
+    columns = []
+    for i in range(count):
+        prefix = f"col_{i:03d}_"
+        name = prefix + "x" * (name_len - len(prefix))
+        columns.append(FakeColumn(name, "varchar", i % 2 == 0))
+    if marker is not None:
+        columns[-1] = FakeColumn(marker, "varchar", False)
+    return columns
+
+
+def _card(table: str) -> dict:
+    return {
+        "object_id": f"orders.{table}",
+        "text_raw": f"# {table} [table]\n- 说明列",
+        "grain_hint": None,
+        "time_col_hint": None,
+        "table_category": "",
+    }
+
+
+class TestInspectTablesLargeOutput:
+    """doc 7 步骤 1：试点工具不再压缩/截断（RED 于旧 finalize_output 行为）。"""
+
+    def test_large_description_keeps_all_columns(
+        self, db_agent_config, db_agent_context
+    ):
+        """单表大量实时列（>12000 字符）：JSON 可解析、全部列与末列标记保留。"""
+        from langgraph.prebuilt import ToolNode
+
+        from src.tests.db_deepagent.conftest import FakeBusinessDb, FakeMilvus
+
+        marker = "ZQ_LAST_COLUMN_MARKER_ZQ"
+        db = FakeBusinessDb(_fake_columns(120, marker=marker))
+        milvus = FakeMilvus()
+        milvus.cards["orders.public.orders"] = _card("public.orders")
+        node = ToolNode(
+            build_business_tools(_local_services(db_agent_config, db, milvus))
+        )
+
+        _, msg = invoke_tool_node(
+            node,
+            [("inspect_tables", {"table_ids": ["public.orders"]}, "c1")],
+            db_agent_context,
+        )
+        payload = json.loads(msg.content)
+        entry = payload["data"]["tables"][0]
+        assert entry["status"] == "ok"
+        names = [c["name"] for c in entry["live_columns"]]
+        assert len(names) == 120
+        assert marker in names
+
+    def test_six_table_descriptions_not_reduced_to_five(
+        self, db_agent_config, db_agent_context
+    ):
+        """6 个合法表且总输出 >12000 字符：返回全部 6 表、顺序与逐表状态不变。"""
+        from langgraph.prebuilt import ToolNode
+
+        from src.tests.db_deepagent.conftest import FakeBusinessDb, FakeMilvus
+
+        tables = [f"public.t{i:02d}" for i in range(1, 7)]
+        db = FakeBusinessDb(_fake_columns(30))
+        milvus = FakeMilvus()
+        for t in tables:
+            milvus.cards[f"orders.{t}"] = _card(t)
+        node = ToolNode(
+            build_business_tools(_local_services(db_agent_config, db, milvus))
+        )
+
+        _, msg = invoke_tool_node(
+            node,
+            [("inspect_tables", {"table_ids": tables}, "c1")],
+            db_agent_context,
+        )
+        payload = json.loads(msg.content)
+        entries = payload["data"]["tables"]
+        assert len(entries) == 6
+        assert [e["display"] for e in entries] == tables
+        assert all(e["status"] == "ok" for e in entries)
 
 
 # ============================================================================
@@ -477,3 +633,123 @@ class TestPlanJoins:
         assert (
             call["query_timeout_s"] == fake_services.config.neo4j.query_timeout_seconds
         )
+
+    def test_all_targets_complete(self, node, db_agent_context, fake_services):
+        """doc 9 §5：多目标（found/no_path/error/非法表混合）逐目标完整。
+
+        8 个目标的 plans 顺序与输入一致、逐目标状态正确；整体 status
+        不因部分失败变 error；无路径与桥接表 warning 均保留。
+        """
+
+        def found(target, *, with_bridge=False):
+            edges = [
+                {
+                    "src_table": "orders.public.orders",
+                    "dst_table": (
+                        "orders.public.order_items"
+                        if with_bridge
+                        else f"orders.{target}"
+                    ),
+                    "join_type": "INNER JOIN",
+                    "cardinality": "1:N",
+                    "on": "SRC.id = DST.order_id",
+                    "cost": 1.0,
+                }
+            ]
+            if with_bridge:
+                edges.append(
+                    {
+                        "src_table": "orders.public.order_items",
+                        "dst_table": f"orders.{target}",
+                        "join_type": "INNER JOIN",
+                        "cardinality": "N:1",
+                        "on": "SRC.order_id = DST.id",
+                        "cost": 1.0,
+                    }
+                )
+            return JoinPathOutcome(
+                base="orders.public.orders",
+                target=f"orders.{target}",
+                status="found",
+                strategy="apoc_dijkstra",
+                edges=edges,
+                total_cost=float(len(edges)),
+            )
+
+        fake_services.join_graph.outcomes = {
+            ("orders.public.orders", "orders.public.t01"): found("public.t01"),
+            ("orders.public.orders", "orders.public.t02"): found(
+                "public.t02", with_bridge=True
+            ),
+            ("orders.public.orders", "orders.public.t03"): found("public.t03"),
+            ("orders.public.orders", "orders.public.u01"): JoinPathOutcome(
+                base="orders.public.orders",
+                target="orders.public.u01",
+                status="no_path",
+            ),
+            ("orders.public.orders", "orders.public.u02"): JoinPathOutcome(
+                base="orders.public.orders",
+                target="orders.public.u02",
+                status="no_path",
+            ),
+            ("orders.public.orders", "orders.public.e01"): JoinPathOutcome(
+                base="orders.public.orders",
+                target="orders.public.e01",
+                status="error",
+                strategy="apoc_dijkstra",
+                error="Neo4j 超时",
+            ),
+            ("orders.public.orders", "orders.public.e02"): JoinPathOutcome(
+                base="orders.public.orders",
+                target="orders.public.e02",
+                status="error",
+                strategy="apoc_dijkstra",
+                error="Neo4j 超时",
+            ),
+        }
+        targets = [
+            "public.t01",
+            "public.u01",
+            "bad-table!",
+            "public.t02",
+            "public.e01",
+            "public.t03",
+            "public.u02",
+            "public.e02",
+        ]
+        _, msg = invoke_tool_node(
+            node,
+            [
+                (
+                    "plan_joins",
+                    {"base_table": "public.orders", "target_tables": targets},
+                    "c1",
+                )
+            ],
+            db_agent_context,
+        )
+        payload = json.loads(msg.content)
+        assert payload["status"] == "ok"  # 部分失败不是整体错误
+        plans = payload["data"]["plans"]
+        assert [p["target"] for p in plans] == targets  # 顺序与输入一致、逐目标齐全
+        assert [p["status"] for p in plans] == [
+            "found",
+            "no_path",
+            "error",
+            "found",
+            "error",
+            "found",
+            "no_path",
+            "error",
+        ]
+        assert len(plans[3]["edges"]) == 2  # 桥接路径两条边完整
+        assert plans[3]["edges"][0]["dst_table"] == "public.order_items"
+        assert payload["data"]["targets"] == [
+            "public.t01",
+            "public.t02",
+            "public.t03",
+        ]
+        assert payload["data"]["bridge_tables"] == ["public.order_items"]
+        warnings_text = "\n".join(payload["warnings"])
+        assert "无路径: public.u01, public.u02" in warnings_text
+        assert "桥接表" in warnings_text

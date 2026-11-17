@@ -150,7 +150,9 @@ class _SummaryMetadataGenerator:
 def test_cli_summary_is_specific_to_ddl_and_json(tmp_path, monkeypatch) -> None:
     config_path = tmp_path / "metadata_config.yaml"
     config_path.write_text("{}\n", encoding="utf-8")
-    monkeypatch.setattr("metaweave.core.metadata.generator.MetadataGenerator", _SummaryMetadataGenerator)
+    monkeypatch.setattr(
+        "metaweave.core.metadata.generator.MetadataGenerator", _SummaryMetadataGenerator
+    )
     runner = CliRunner()
 
     ddl_result = runner.invoke(
@@ -226,7 +228,9 @@ def test_clean_only_removes_top_level_files_for_ddl_and_json(
         encoding="utf-8",
     )
     monkeypatch.setattr("metaweave.utils.file_utils.get_project_root", lambda: tmp_path)
-    monkeypatch.setattr("metaweave.core.metadata.generator.MetadataGenerator", _SummaryMetadataGenerator)
+    monkeypatch.setattr(
+        "metaweave.core.metadata.generator.MetadataGenerator", _SummaryMetadataGenerator
+    )
 
     result = CliRunner().invoke(
         metadata_cli.metadata_command,
@@ -285,7 +289,9 @@ def test_md_clean_only_removes_top_level_files(tmp_path, monkeypatch) -> None:
         encoding="utf-8",
     )
     monkeypatch.setattr("metaweave.utils.file_utils.get_project_root", lambda: tmp_path)
-    monkeypatch.setattr("metaweave.core.metadata.generator.MetadataGenerator", _SummaryMetadataGenerator)
+    monkeypatch.setattr(
+        "metaweave.core.metadata.generator.MetadataGenerator", _SummaryMetadataGenerator
+    )
 
     result = CliRunner().invoke(
         metadata_cli.metadata_command,
@@ -310,7 +316,9 @@ def test_cli_md_summary_uses_database_object_counts(tmp_path, monkeypatch) -> No
         f"  json_directory: {json_dir}\n",
         encoding="utf-8",
     )
-    monkeypatch.setattr("metaweave.core.metadata.generator.MetadataGenerator", _SummaryMetadataGenerator)
+    monkeypatch.setattr(
+        "metaweave.core.metadata.generator.MetadataGenerator", _SummaryMetadataGenerator
+    )
 
     result = CliRunner().invoke(
         metadata_cli.metadata_command,

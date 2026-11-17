@@ -35,9 +35,7 @@ def test_format_data_type_uses_only_valid_postgresql_modifiers(
     scale,
     expected,
 ):
-    assert (
-        format_data_type(data_type, char_length, precision, scale) == expected
-    )
+    assert format_data_type(data_type, char_length, precision, scale) == expected
 
 
 # =====================================================================
@@ -78,11 +76,15 @@ class TestNormalizeForHash:
 
     def test_list_preserves_order(self):
         """list/tuple 保留原始顺序（PostgreSQL ARRAY 是有序的）"""
-        assert _normalize_for_hash([3, 1, 2]) == json.dumps([3, 1, 2], ensure_ascii=False)
+        assert _normalize_for_hash([3, 1, 2]) == json.dumps(
+            [3, 1, 2], ensure_ascii=False
+        )
         assert _normalize_for_hash([1, 2]) != _normalize_for_hash([2, 1])
 
     def test_tuple_preserves_order(self):
-        assert _normalize_for_hash((3, 1, 2)) == json.dumps([3, 1, 2], ensure_ascii=False)
+        assert _normalize_for_hash((3, 1, 2)) == json.dumps(
+            [3, 1, 2], ensure_ascii=False
+        )
 
     def test_set_sorted(self):
         """set 是无序的，排序后归一化"""
@@ -104,6 +106,7 @@ class TestNormalizeForHash:
     def test_list_with_non_serializable(self):
         """list 含非 JSON 原生类型时通过 default=str 兜底"""
         from datetime import date
+
         result = _normalize_for_hash([date(2025, 1, 1)])
         assert isinstance(result, str)
 

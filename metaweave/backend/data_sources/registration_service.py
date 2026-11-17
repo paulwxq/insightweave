@@ -1,9 +1,11 @@
-"""数据源登记用例；不依赖 FastAPI 或 Pydantic。"""
+"""数据源登记用例；不依赖 FastAPI 或 Pydantic。
 
-import shutil
+`source_id` 为 `db_src_1` 等 text 短 ID（doc 6.1 §13）：登记入口不接受
+客户端指定 ID，由数据库序列默认值生成并取回；不迁移旧 UUID。
+"""
+
 from dataclasses import dataclass, field
 from datetime import datetime
-from uuid import UUID, uuid4
 
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -18,23 +20,19 @@ from backend.data_sources.repository import (
     insert_db_source,
     latest_source_activity,
     list_db_sources,
-    purge_source_profiles,
-    remove_db_source,
     set_db_source_active,
     update_db_source,
 )
-from backend.jobs.repository import STATUS_RUNNING, list_source_step_rows
-from backend.publishing.repository import lock_db_source_row
 from backend.persistence.platform_db import PlatformSettings, platform_session
 from backend.security.source_password import decrypt_password, encrypt_password
 from metaweave.utils.time_utils import utc_isoformat
-from metaweave.core.clean_targets import resolve_source_workspace_dir
 from metaweave.core.metadata.db_step import (
     DbProfileValidationError,
     format_server_version,
     validate_schema_names,
     validate_selected_schemas,
 )
+from metaweave.utils.source_id import normalize_source_id
 
 
 class PlatformUnavailableError(RuntimeError):
@@ -68,6 +66,14 @@ class SourceBusyError(RuntimeError):
     """该数据源仍有步骤在运行，不能删除（doc 16 §6）。"""
 
 
+class SourceHasWorkspacesError(RuntimeError):
+    """该数据源已关联工作区，不能删除（doc 6.2 §6.1、A29）。
+
+    工作区及作业、版本、运行记录本期不提供删除入口；已关联工作区的
+    数据源删除一律拒绝，不级联删除，也不借 delete_output 删除工作区目录。
+    """
+
+
 @dataclass(frozen=True)
 class CreateSourceInput:
     connection: SourceConnectionInput
@@ -92,7 +98,7 @@ def _normalize_description(value: str | None) -> str | None:
 def _source_item(row) -> dict:
     """只投影管理员列表允许展示的字段，且在 Session 关闭前完成。"""
     return {
-        "source_id": str(row.source_id),
+        "source_id": row.source_id,
         "display_name": row.display_name,
         "db_type": row.db_type,
         "host": row.host,
@@ -110,8 +116,7 @@ def _source_item(row) -> dict:
 
 def _duplicate_details(rows) -> list[dict[str, str]]:
     return [
-        {"source_id": str(row.source_id), "display_name": row.display_name}
-        for row in rows
+        {"source_id": row.source_id, "display_name": row.display_name} for row in rows
     ]
 
 
@@ -145,10 +150,11 @@ def create_data_source(settings: PlatformSettings, fields: CreateSourceInput) ->
 
     try:
         with platform_session(settings) as session:
+            # source_id 由数据库序列默认值生成（doc 6.1 §13.1），
+            # ORM 通过 INSERT .. RETURNING 取回新短 ID。
             row = insert_db_source(
                 session,
                 {
-                    "source_id": uuid4(),
                     "display_name": fields.display_name.strip(),
                     "db_type": connection.db_type,
                     "host": connection.host,
@@ -191,7 +197,7 @@ def _decrypt_stored_password(ciphertext: str) -> str:
 
 
 def _load_source_for_change(
-    settings: PlatformSettings, source_id: UUID, fields: UpdateSourceInput
+    settings: PlatformSettings, source_id: str, fields: UpdateSourceInput
 ):
     """读取当前行并查重，关闭平台库会话后返回内存副本。"""
     try:
@@ -217,7 +223,7 @@ def _load_source_for_change(
             details = [
                 item
                 for item in _duplicate_details(duplicates)
-                if item["source_id"] != str(source_id)
+                if item["source_id"] != source_id
             ]
             return current, details
     except SQLAlchemyError:
@@ -234,23 +240,54 @@ def _connection_target_changed(current: dict, fields: UpdateSourceInput) -> bool
     )
 
 
-def get_registered_source(settings: PlatformSettings, source_id: UUID) -> dict:
+def get_registered_source(settings: PlatformSettings, source_id: str) -> dict:
+    source_id = normalize_source_id(source_id)
     try:
         with platform_session(settings) as session:
             row = get_db_source(session, source_id)
             if row is None:
                 raise SourceNotFoundError("数据源不存在")
-            return _source_item(row)
+            # doc 8.1 §3.3：已删除源详情 410（不因已知 ID 绕过列表过滤）
+            if getattr(row, "deleted_at", None) is not None:
+                from backend.deletion.errors import ResourceDeletedError
+
+                raise ResourceDeletedError("数据源已删除")
+            item = _source_item(row)
+            from backend.deletion.repository import task_summary
+
+            task = task_summary(session, source_id=source_id)
+            item["deletion_task"] = (
+                {**task, "task_id": str(task["task_id"])} if task else None
+            )
+            return item
     except SQLAlchemyError:
         raise PlatformUnavailableError("平台库暂不可用") from None
 
 
 def set_source_activation(
-    settings: PlatformSettings, source_id: UUID, is_active: bool
+    settings: PlatformSettings, source_id: str, is_active: bool
 ) -> dict:
     """启停数据源；只写 is_active 与 updated_at（doc 11 §5）。"""
+    source_id = normalize_source_id(source_id)
     try:
         with platform_session(settings) as session:
+            # doc 8.1 §8.1：写入口先锁源并经守卫复查（已删 410 / 冻结 409）
+            from backend.access_guards import require_source
+            from backend.deletion.locks import lock_source_row
+
+            lock_source_row(session, source_id)
+            require_source(session, source_id, for_write=True)
+            # doc 10.2 §5.2：禁用等影响加载的修改在源锁下检查活动发布后
+            # 拒绝（409 source_publish_active）；启用方向一并拦截保持一致，
+            # 避免"禁用-启用"绕开窗口
+            from backend.publishing.repository import (
+                SourcePublishActiveError,
+                active_publish_runs_for_source,
+            )
+
+            blocking_runs = active_publish_runs_for_source(session, source_id)
+            if blocking_runs:
+                raise SourcePublishActiveError(blocking_runs[0])
             row = set_db_source_active(session, source_id, is_active)
             if row is None:
                 raise SourceNotFoundError("数据源不存在")
@@ -259,7 +296,8 @@ def set_source_activation(
         raise PlatformUnavailableError("平台库暂不可用") from None
 
 
-def check_saved_connection(settings: PlatformSettings, source_id: UUID) -> dict:
+def check_saved_connection(settings: PlatformSettings, source_id: str) -> dict:
+    source_id = normalize_source_id(source_id)
     try:
         with platform_session(settings) as session:
             row = get_db_source(session, source_id)
@@ -291,10 +329,11 @@ def check_saved_connection(settings: PlatformSettings, source_id: UUID) -> dict:
 
 
 def update_registered_source(
-    settings: PlatformSettings, source_id: UUID, fields: UpdateSourceInput
+    settings: PlatformSettings, source_id: str, fields: UpdateSourceInput
 ) -> dict:
     if not fields.display_name.strip():
         raise DbProfileValidationError("数据源显示名称不能为空")
+    source_id = normalize_source_id(source_id)
     names = validate_schema_names(fields.selected_schemas)
     description = _normalize_description(fields.description)
     current, details = _load_source_for_change(settings, source_id, fields)
@@ -327,6 +366,22 @@ def update_registered_source(
 
     try:
         with platform_session(settings) as session:
+            # doc 8.1 §8.1：修改源连接前锁源并经写守卫复查
+            from backend.access_guards import require_source
+            from backend.deletion.locks import lock_source_row
+
+            lock_source_row(session, source_id)
+            require_source(session, source_id, for_write=True)
+            # doc 10.2 §5.2：连接/schema 等影响加载的修改在源锁下检查
+            # 活动发布后拒绝（409 source_publish_active）
+            from backend.publishing.repository import (
+                SourcePublishActiveError,
+                active_publish_runs_for_source,
+            )
+
+            blocking_runs = active_publish_runs_for_source(session, source_id)
+            if blocking_runs:
+                raise SourcePublishActiveError(blocking_runs[0])
             row = update_db_source(
                 session,
                 source_id,
@@ -351,60 +406,33 @@ def update_registered_source(
         raise PlatformUnavailableError("平台库暂不可用") from None
 
 
-def delete_source_workspace(source_id: UUID) -> None:
-    try:
-        workspace = resolve_source_workspace_dir(source_id)
-        if workspace.exists():
-            shutil.rmtree(workspace)
-    except (OSError, ValueError):
-        raise OutputDeleteFailedError(
-            "该数据源的输出目录删除失败，登记记录仍保留"
-        ) from None
+def delete_registered_source(settings: PlatformSettings, source_id: str) -> dict:
+    """提交数据源删除任务（doc 8.1 §2.4，替换旧同步删除）。
 
-
-def delete_registered_source(
-    settings: PlatformSettings, source_id: UUID, *, delete_output: bool = False
-) -> None:
-    """删除登记与当前画像，保留作业/发布历史（doc 16 §6）。
-
-    顺序固定：确认登记存在 → 源行锁下核对全部作业、全部步骤无 running
-    →（可选）删除工作区 → 同一事务删当前画像、清全部 current、删登记。
-    任一步失败都回滚，登记、画像与工作区保持不变（工作区先删而数据库
-    提交失败的既有非原子边界仍按 doc 7 报告）。
+    有无工作区均走同一逻辑删除任务；不再因“无工作区”物理删除登记行，
+    也不再提供 delete_output 目录开关。返回任务摘要，202 由路由层表达。
     """
-    try:
-        with platform_session(settings) as session:
-            if get_db_source(session, source_id) is None:
-                raise SourceNotFoundError("数据源不存在")
-    except SQLAlchemyError:
-        raise PlatformUnavailableError("平台库暂不可用") from None
+    from backend.deletion.service import submit_source_deletion
 
-    try:
-        with platform_session(settings) as session:
-            if lock_db_source_row(session, source_id) is None:
-                raise SourceNotFoundError("数据源不存在")
-            if any(
-                step.last_status == STATUS_RUNNING
-                for step in list_source_step_rows(session, source_id)
-            ):
-                raise SourceBusyError("该数据源有采集或发布步骤正在执行，不能删除")
-            if delete_output:
-                delete_source_workspace(source_id)
-            purge_source_profiles(session, source_id)
-            if not remove_db_source(session, source_id):
-                raise SourceNotFoundError("数据源不存在")
-            session.commit()
-    except SQLAlchemyError:
-        raise PlatformUnavailableError("平台库暂不可用") from None
+    return submit_source_deletion(settings, normalize_source_id(source_id))
 
 
 def list_registered_sources(settings: PlatformSettings) -> list[dict]:
     try:
         with platform_session(settings) as session:
             collected, published = latest_source_activity(session)
+            from backend.deletion.repository import task_summary
+
             items = []
             for row in list_db_sources(session):
+                # doc 8.1 §3.3：普通列表排除已逻辑删除的源
+                if getattr(row, "deleted_at", None) is not None:
+                    continue
                 item = _source_item(row)
+                task = task_summary(session, source_id=row.source_id)
+                item["deletion_task"] = (
+                    {**task, "task_id": str(task["task_id"])} if task else None
+                )
                 item["last_collected_at"] = _format_optional_time(
                     collected.get(row.source_id)
                 )

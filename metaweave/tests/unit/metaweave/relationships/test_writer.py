@@ -20,24 +20,22 @@ class TestRelationshipWriter:
     def config(self, temp_output_dir):
         """创建测试配置"""
         return {
-            "database": {
-                "database": "store_db"
-            },
+            "database": {"database": "store_db"},
             "output": {
                 "rel_directory": str(temp_output_dir),
-                "rel_granularity": "global"
+                "rel_granularity": "global",
             },
             "decision": {
                 "accept_threshold": 0.80,
                 "high_confidence_threshold": 0.90,
-                "medium_confidence_threshold": 0.80
+                "medium_confidence_threshold": 0.80,
             },
             "weights": {
                 "inclusion_rate": 0.40,
                 "name_similarity": 0.10,
                 "comment_similarity": 0.10,
                 "type_compatibility": 0.20,
-                "jaccard_index": 0.20
+                "jaccard_index": 0.20,
             },
         }
 
@@ -59,7 +57,7 @@ class TestRelationshipWriter:
                 target_table="dim_store",
                 target_columns=["store_id"],
                 relationship_type="foreign_key",
-                cardinality="N:1"
+                cardinality="N:1",
             ),
             Relation(
                 relationship_id="rel_def123456789",
@@ -77,11 +75,11 @@ class TestRelationshipWriter:
                     "name_similarity": 1.0,
                     "jaccard_index": 0.6,
                     "comment_similarity": 1.0,
-                    "type_compatibility": 1.0
+                    "type_compatibility": 1.0,
                 },
                 inference_method="rule_physical_key",
-                candidate_origin="rule"
-            )
+                candidate_origin="rule",
+            ),
         ]
 
     def test_write_json_output(self, writer, sample_relations, temp_output_dir, config):
@@ -89,7 +87,10 @@ class TestRelationshipWriter:
         output_files = writer.write_results(sample_relations, [], config)
 
         # 检查文件是否生成
-        json_file = temp_output_dir / f"{config['database']['database']}.relationships_global.json"
+        json_file = (
+            temp_output_dir
+            / f"{config['database']['database']}.relationships_global.json"
+        )
         assert json_file.exists()
 
         # 验证JSON内容（v3.2格式）
@@ -146,19 +147,28 @@ class TestRelationshipWriter:
         assert "metrics" not in rel1
         assert data["relationships"][1]["metrics"]
 
-    def test_write_markdown_output(self, writer, sample_relations, temp_output_dir, config):
+    def test_write_markdown_output(
+        self, writer, sample_relations, temp_output_dir, config
+    ):
         """测试Markdown输出"""
         output_files = writer.write_results(sample_relations, [], config)
 
         # 检查文件是否生成
-        md_file = temp_output_dir / f"{config['database']['database']}.relationships_global.md"
+        md_file = (
+            temp_output_dir
+            / f"{config['database']['database']}.relationships_global.md"
+        )
         assert md_file.exists()
 
         # 验证Markdown内容
         with open(md_file, "r", encoding="utf-8") as f:
             content = f.read()
 
-        assert "# 表间关系发现报告" in content or "表间关系" in content or "关系" in content
+        assert (
+            "# 表间关系发现报告" in content
+            or "表间关系" in content
+            or "关系" in content
+        )
         assert f"database: {config['database']['database']}" in content
         assert "生成方式: rel" in content
         assert re.search(
@@ -171,7 +181,11 @@ class TestRelationshipWriter:
         # 标题下方不应有空行（仅检查 #/##/###）
         lines = content.splitlines()
         for idx, line in enumerate(lines[:-1]):
-            if line.startswith("# ") or line.startswith("## ") or line.startswith("### "):
+            if (
+                line.startswith("# ")
+                or line.startswith("## ")
+                or line.startswith("### ")
+            ):
                 assert lines[idx + 1].strip() != ""
 
         assert "- **关系类型**: foreign_key" in content
@@ -190,8 +204,16 @@ class TestRelationshipWriter:
 
         with open(json_file, "r", encoding="utf-8") as f:
             data = json.load(f)
-        fk = next(r for r in data["relationships"] if r["discovery_method"] == "foreign_key_constraint")
-        inferred = next(r for r in data["relationships"] if r.get("discovery_method") != "foreign_key_constraint")
+        fk = next(
+            r
+            for r in data["relationships"]
+            if r["discovery_method"] == "foreign_key_constraint"
+        )
+        inferred = next(
+            r
+            for r in data["relationships"]
+            if r.get("discovery_method") != "foreign_key_constraint"
+        )
 
         assert fk["composite_score"] == 1.0
         assert fk["confidence_level"] == "high"
@@ -209,11 +231,19 @@ class TestRelationshipWriter:
     ):
         """generated_by / json_metadata_version 由同一套 writer 逻辑写入 JSON 与 Markdown。"""
         tables = {
-            "public.users": {"metadata_version": "3.0", "object_info": {"object_name": "users"}},
-            "public.orders": {"metadata_version": "3.0", "object_info": {"object_name": "orders"}},
+            "public.users": {
+                "metadata_version": "3.0",
+                "object_info": {"object_name": "users"},
+            },
+            "public.orders": {
+                "metadata_version": "3.0",
+                "object_info": {"object_name": "orders"},
+            },
         }
         output_files = writer.write_results(
-            sample_relations, [], config,
+            sample_relations,
+            [],
+            config,
             tables=tables,
             generated_by=RelationshipWriter.generated_by_label(True),
         )
@@ -229,7 +259,9 @@ class TestRelationshipWriter:
         assert "生成方式: rel_llm" in md_content
 
         output_files_off = writer.write_results(
-            sample_relations, [], config,
+            sample_relations,
+            [],
+            config,
             generated_by=RelationshipWriter.generated_by_label(False),
         )
         json_off = next(p for p in output_files_off if p.endswith(".json"))
@@ -260,14 +292,17 @@ class TestRelationshipWriter:
             composite_score=0.90,
             score_details={},
             inference_method="rule_physical_key",
-            candidate_origin="rule"
+            candidate_origin="rule",
         )
 
         # 被抑制的单列关系
         suppressed = [
             {
                 "source": {
-                    "object_info": {"schema_name": "public", "object_name": "fact_sales"}
+                    "object_info": {
+                        "schema_name": "public",
+                        "object_name": "fact_sales",
+                    }
                 },
                 "target": {
                     "object_info": {"schema_name": "public", "object_name": "dim_store"}
@@ -277,14 +312,17 @@ class TestRelationshipWriter:
                 "candidate_origin": "rule",
                 "key_origin": "physical",
                 "composite_score": 0.82,
-                "score_details": {}
+                "score_details": {},
             }
         ]
 
         output_files = writer.write_results([composite_relation], suppressed, config)
 
         # 验证被抑制关系嵌入到复合键对象中
-        json_file = temp_output_dir / f"{config['database']['database']}.relationships_global.json"
+        json_file = (
+            temp_output_dir
+            / f"{config['database']['database']}.relationships_global.json"
+        )
         with open(json_file, "r", encoding="utf-8") as f:
             data = json.load(f)
 
@@ -341,6 +379,7 @@ class TestRelationshipWriter:
         物理FK / 仅规则 / 仅LLM / 重叠 四种情况，替代恒为 0 的旧口径
         （active_search_discoveries / dynamic_composite_discoveries）。
         """
+
         def _relation(rel_id, origin, table_suffix):
             return Relation(
                 relationship_id=rel_id,
@@ -354,7 +393,9 @@ class TestRelationshipWriter:
                 cardinality="N:1",
                 composite_score=0.85,
                 score_details={},
-                inference_method="rule_physical_key" if origin == "rule" else "llm_inferred",
+                inference_method=(
+                    "rule_physical_key" if origin == "rule" else "llm_inferred"
+                ),
                 candidate_origin=origin,
             )
 
@@ -394,7 +435,11 @@ class TestRelationshipWriter:
         assert "dynamic_composite_discoveries" not in stats
 
         # FK 关系不应携带 candidate_origin（见 Relation.to_dict 的 pop 逻辑）
-        fk_output = next(r for r in data["relationships"] if r["discovery_method"] == "foreign_key_constraint")
+        fk_output = next(
+            r
+            for r in data["relationships"]
+            if r["discovery_method"] == "foreign_key_constraint"
+        )
         assert "candidate_origin" not in fk_output
         assert fk_output["composite_score"] == 1.0
         assert fk_output["confidence_level"] == "high"
@@ -410,7 +455,9 @@ class TestRelationshipWriter:
         extra_statistics = {"database_queries_executed": 15}
 
         output_files = writer.write_results(
-            sample_relations, [], config,
+            sample_relations,
+            [],
+            config,
             tables=tables,
             extra_statistics=extra_statistics,
         )
@@ -423,7 +470,9 @@ class TestRelationshipWriter:
         assert data["database_queries_executed"] == 15
         assert "database_queries_executed" not in data["statistics"]
 
-    def test_write_results_does_not_mutate_extra_statistics(self, writer, sample_relations, config):
+    def test_write_results_does_not_mutate_extra_statistics(
+        self, writer, sample_relations, config
+    ):
         """write_results() 不应修改调用方传入的 extra_statistics 字典"""
         extra_statistics = {
             "database_queries_executed": 9,
@@ -433,7 +482,9 @@ class TestRelationshipWriter:
         original = extra_statistics.copy()
 
         writer.write_results(
-            sample_relations, [], config,
+            sample_relations,
+            [],
+            config,
             extra_statistics=extra_statistics,
         )
 
@@ -451,7 +502,7 @@ class TestRelationshipWriter:
         new_config = config.copy()
         new_config["output"] = {
             "rel_directory": str(new_output_dir),
-            "rel_granularity": "global"
+            "rel_granularity": "global",
         }
 
         # 初始化writer时会创建目录
@@ -464,7 +515,10 @@ class TestRelationshipWriter:
         new_writer.write_results(sample_relations, [], new_config)
 
         # 文件应该被创建
-        assert (new_output_dir / f"{config['database']['database']}.relationships_global.json").exists()
+        assert (
+            new_output_dir
+            / f"{config['database']['database']}.relationships_global.json"
+        ).exists()
 
     def test_discovery_method_mapping(self, writer, temp_output_dir, config):
         """测试 discovery_method, source_type, source_constraint 字段映射
@@ -474,7 +528,10 @@ class TestRelationshipWriter:
         tables = {
             "public.fact_sales": {
                 "table_profile": {
-                    "physical_constraints": {"primary_key": None, "unique_constraints": []},
+                    "physical_constraints": {
+                        "primary_key": None,
+                        "unique_constraints": [],
+                    },
                     "indexes": [
                         {"columns": ["store_id"], "is_unique": False, "condition": None}
                     ],
@@ -491,7 +548,10 @@ class TestRelationshipWriter:
             },
             "public.fact_summary": {
                 "table_profile": {
-                    "physical_constraints": {"primary_key": None, "unique_constraints": []},
+                    "physical_constraints": {
+                        "primary_key": None,
+                        "unique_constraints": [],
+                    },
                     "indexes": [],
                     "unique_column_sets": [
                         {"columns": ["order_id", "product_id"], "confidence_score": 0.9}
@@ -515,7 +575,7 @@ class TestRelationshipWriter:
                 cardinality="N:1",
                 composite_score=0.88,
                 score_details={},
-                inference_method="rule_physical_key"
+                inference_method="rule_physical_key",
             ),
             # 规则候选：源键集为逻辑键（复合）
             Relation(
@@ -530,7 +590,7 @@ class TestRelationshipWriter:
                 cardinality="N:1",
                 composite_score=0.85,
                 score_details={},
-                inference_method="rule_logical_key"
+                inference_method="rule_logical_key",
             ),
             # LLM 候选
             Relation(
@@ -545,32 +605,41 @@ class TestRelationshipWriter:
                 cardinality="N:1",
                 composite_score=0.90,
                 score_details={},
-                inference_method="llm_inferred"
-            )
+                inference_method="llm_inferred",
+            ),
         ]
 
         # 通过 tables 参数传入表元数据
         output_files = writer.write_results(relations, [], config, tables=tables)
 
         # 验证JSON输出
-        json_file = temp_output_dir / f"{config['database']['database']}.relationships_global.json"
+        json_file = (
+            temp_output_dir
+            / f"{config['database']['database']}.relationships_global.json"
+        )
         with open(json_file, "r", encoding="utf-8") as f:
             data = json.load(f)
 
         # 验证规则候选（物理键，源列为单列索引，目标列为物理主键）
-        rel1 = [r for r in data["relationships"] if r["relationship_id"] == "rel_001"][0]
+        rel1 = [r for r in data["relationships"] if r["relationship_id"] == "rel_001"][
+            0
+        ]
         assert rel1["discovery_method"] == "physical_key_matching"
         assert rel1["target_source_type"] == "primary_key"
         assert rel1["source_constraint"] == "single_field_index"
 
         # 验证规则候选（逻辑键）
-        rel3 = [r for r in data["relationships"] if r["relationship_id"] == "rel_003"][0]
+        rel3 = [r for r in data["relationships"] if r["relationship_id"] == "rel_003"][
+            0
+        ]
         assert rel3["discovery_method"] == "logical_key_matching"
         assert rel3.get("target_source_type") is None  # 复合键不判定 target_source_type
         assert rel3.get("source_constraint") is None  # 复合键不判定 source_constraint
 
         # 验证 LLM 候选
-        rel4 = [r for r in data["relationships"] if r["relationship_id"] == "rel_004"][0]
+        rel4 = [r for r in data["relationships"] if r["relationship_id"] == "rel_004"][
+            0
+        ]
         assert rel4["discovery_method"] == "llm_inferred"
         assert rel4["target_source_type"] == "llm_inferred"
         assert rel4.get("source_constraint") is None
@@ -589,13 +658,15 @@ class TestRelationshipWriter:
             cardinality="N:1",
             composite_score=0.88,
             score_details={},
-            inference_method="single_active_search"  # 旧值，v3 不再支持
+            inference_method="single_active_search",  # 旧值，v3 不再支持
         )
 
         with pytest.raises(ValueError):
             writer.write_results([relation], [], config)
 
-    def test_schema_granularity_warning(self, sample_relations, tmp_path, config, caplog):
+    def test_schema_granularity_warning(
+        self, sample_relations, tmp_path, config, caplog
+    ):
         """测试配置 schema 粒度时给出警告并强制使用 global"""
         import logging
 
@@ -603,7 +674,7 @@ class TestRelationshipWriter:
         schema_config = config.copy()
         schema_config["output"] = {
             "rel_directory": str(tmp_path / "rel"),
-            "rel_granularity": "schema"  # ← 配置 schema
+            "rel_granularity": "schema",  # ← 配置 schema
         }
 
         # 创建 writer（应该触发警告）
@@ -611,7 +682,10 @@ class TestRelationshipWriter:
             writer = RelationshipWriter(schema_config)
 
         # 验证警告信息
-        assert any("仅支持 rel_granularity='global'" in record.message for record in caplog.records)
+        assert any(
+            "仅支持 rel_granularity='global'" in record.message
+            for record in caplog.records
+        )
         assert any("schema" in record.message for record in caplog.records)
 
         # 验证强制使用 global
@@ -619,10 +693,20 @@ class TestRelationshipWriter:
 
         # 验证输出文件名仍然是 global
         writer.write_results(sample_relations, [], schema_config)
-        assert (tmp_path / "rel" / f"{config['database']['database']}.relationships_global.json").exists()
-        assert (tmp_path / "rel" / f"{config['database']['database']}.relationships_global.md").exists()
+        assert (
+            tmp_path
+            / "rel"
+            / f"{config['database']['database']}.relationships_global.json"
+        ).exists()
+        assert (
+            tmp_path
+            / "rel"
+            / f"{config['database']['database']}.relationships_global.md"
+        ).exists()
 
-    def test_global_granularity_no_warning(self, sample_relations, tmp_path, config, caplog):
+    def test_global_granularity_no_warning(
+        self, sample_relations, tmp_path, config, caplog
+    ):
         """测试配置 global 粒度时不给出警告"""
         import logging
 
@@ -630,7 +714,7 @@ class TestRelationshipWriter:
         global_config = config.copy()
         global_config["output"] = {
             "rel_directory": str(tmp_path / "rel"),
-            "rel_granularity": "global"
+            "rel_granularity": "global",
         }
 
         # 创建 writer（不应该触发警告）
@@ -638,7 +722,10 @@ class TestRelationshipWriter:
             writer = RelationshipWriter(global_config)
 
         # 验证没有警告
-        assert not any("仅支持 rel_granularity='global'" in record.message for record in caplog.records)
+        assert not any(
+            "仅支持 rel_granularity='global'" in record.message
+            for record in caplog.records
+        )
 
         # 验证使用 global
         assert writer.rel_granularity == "global"
@@ -658,7 +745,7 @@ class TestRelationshipWriter:
             cardinality="N:1",
             composite_score=0.90,
             score_details={},
-            inference_method="rule_physical_key"
+            inference_method="rule_physical_key",
         )
 
         # 创建复合键关系
@@ -674,22 +761,31 @@ class TestRelationshipWriter:
             cardinality="N:1",
             composite_score=0.92,
             score_details={},
-            inference_method="rule_physical_key"
+            inference_method="rule_physical_key",
         )
 
         # 写入 Markdown
         writer.write_results([single_rel, composite_rel], [], config)
 
         # 读取 Markdown 文件
-        md_file = temp_output_dir / f"{config['database']['database']}.relationships_global.md"
+        md_file = (
+            temp_output_dir
+            / f"{config['database']['database']}.relationships_global.md"
+        )
         with open(md_file, "r", encoding="utf-8") as f:
             content = f.read()
 
         # 验证单列关系标题包含列名
-        assert "### 1. public.dim_company.company_id → public.dim_store.company_id" in content
+        assert (
+            "### 1. public.dim_company.company_id → public.dim_store.company_id"
+            in content
+        )
 
         # 验证复合键关系标题包含列名（方括号格式）
-        assert "### 2. public.fact_sales.[store_id, date_day] → public.dim_store_calendar.[store_id, date_day]" in content
+        assert (
+            "### 2. public.fact_sales.[store_id, date_day] → public.dim_store_calendar.[store_id, date_day]"
+            in content
+        )
 
     def test_cardinality_output_all_types(self, writer, temp_output_dir, config):
         """测试所有基数类型在 JSON 输出中的正确性"""
@@ -707,7 +803,7 @@ class TestRelationshipWriter:
                 cardinality="1:1",  # 一对一
                 composite_score=0.95,
                 score_details={},
-                inference_method="rule_physical_key"
+                inference_method="rule_physical_key",
             ),
             Relation(
                 relationship_id="rel_1toN",
@@ -721,7 +817,7 @@ class TestRelationshipWriter:
                 cardinality="1:N",  # 一对多
                 composite_score=0.90,
                 score_details={},
-                inference_method="rule_physical_key"
+                inference_method="rule_physical_key",
             ),
             Relation(
                 relationship_id="rel_Nto1",
@@ -735,7 +831,7 @@ class TestRelationshipWriter:
                 cardinality="N:1",  # 多对一
                 composite_score=0.88,
                 score_details={},
-                inference_method="rule_physical_key"
+                inference_method="rule_physical_key",
             ),
             Relation(
                 relationship_id="rel_MtoN",
@@ -749,14 +845,17 @@ class TestRelationshipWriter:
                 cardinality="M:N",  # 多对多
                 composite_score=0.75,
                 score_details={},
-                inference_method="rule_physical_key"
+                inference_method="rule_physical_key",
             ),
         ]
 
         output_files = writer.write_results(relations, [], config)
 
         # 验证 JSON 输出
-        json_file = temp_output_dir / f"{config['database']['database']}.relationships_global.json"
+        json_file = (
+            temp_output_dir
+            / f"{config['database']['database']}.relationships_global.json"
+        )
         with open(json_file, "r", encoding="utf-8") as f:
             data = json.load(f)
 

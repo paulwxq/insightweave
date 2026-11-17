@@ -4,6 +4,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { listObjectOptions, listSourceObjects } from '../api/assets'
 import { getDataSource } from '../api/dataSources'
 import { ApiError } from '../api/http'
+import PageBreadcrumbs from '../components/PageBreadcrumbs.vue'
 import type { DataSourceListItem, ObjectsResponse } from '../api/types'
 
 const route = useRoute()
@@ -209,17 +210,23 @@ watch(
 
 
 function goBack() {
-  const previous = window.history.state?.back
-  if (typeof previous === 'string' && previous.length > 0) {
-    router.back()
-    return
-  }
-  router.push('/data-assets')
+  // doc 9 §7.4：对象列表固定返回该数据源的画像页，不再走浏览器历史
+  void router.push(`/data-assets/${sourceId.value}/profile`)
 }
 </script>
 
 <template>
   <div class="ds-jobs">
+    <PageBreadcrumbs
+      :segments="[
+        { label: '数据资产', to: '/data-assets' },
+        {
+          label: source?.display_name ?? '数据源',
+          to: `/data-assets/${sourceId}/profile`,
+        },
+        { label: '对象列表' },
+      ]"
+    />
     <header class="ds-jobs-header">
       <div>
         <span class="ds-kicker">DATABASE OBJECTS</span>

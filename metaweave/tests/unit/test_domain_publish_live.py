@@ -1,34 +1,31 @@
-"""domain 发布整份替换的实库验证（doc 21.2 §4/§7 的真实事务证据）。
+"""domain 发布事务的实库验证（doc 21.2 §4、6.2 §8.3 的真实事务证据）。
 
-沿用 test_domain_transaction_live.py 的 skipif 模式：缺少平台库环境变量
-时跳过。用例自建临时源行、作业行、受管产物目录与旧发布状态，结束后清理：
-
-- 成功：clear_current + 按源替换 table_domain + 成功 current 发布行一次提交；
-- 零行：失败记录独立提交，旧映射与旧 current 保持不变；
-- 锁下标标识已变：上抛 NOT_READY，不写任何行。
+沿用 skipif 模式：缺少平台库环境变量时跳过。用例经 create_workspace +
+create_job + create_publish_run + execute_publish_run 走完整新模型链路，
+自建临时数据，结束后按外键逆序清理。
 """
 
 import shutil
 from pathlib import Path
-from types import SimpleNamespace
-from uuid import uuid4
 
 import pytest
+import json
+
 import yaml
 from sqlalchemy import text
 
+from backend.jobs.job_service import JobConfigPayload, create_job
 from backend.persistence.platform_db import (
     load_platform_settings_from_env,
     load_project_env,
     platform_session,
 )
-from backend.profile_loading.json_loader import RegistrationSnapshot
-from backend.publishing.errors import PublicationStepNotReadyError
 from backend.publishing.publish_service import (
-    DOMAIN_EMPTY_MESSAGE,
-    _publish_domain,
-    publish_steps,
+    create_publish_run,
+    execute_publish_run,
 )
+from metaweave.core.clean_targets import resolve_workspace_root
+from backend.workspaces.service import create_workspace
 
 
 def _settings():
@@ -39,230 +36,287 @@ def _settings():
         return None
 
 
+def _new_model_schema_ready(settings) -> bool:
+    """平台库已按 6.1 重建（短 ID 序列 + workspace_info）才运行实库断言。
+
+    断代改造的一次性重建（doc 6.2 §12）尚未在当前环境执行时，旧库
+    （source_id 仍为 uuid、无 workspace_info）不具备新模型表结构，跳过
+    而不是误报用例失败。
+    """
+    try:
+        with platform_session(settings) as session:
+            sequence = session.execute(
+                text(
+                    "SELECT count(*) FROM pg_sequences"
+                    " WHERE schemaname = 'public'"
+                    "   AND sequencename = 'db_source_info_id_seq'"
+                )
+            ).scalar_one()
+            workspace_table = session.execute(
+                text(
+                    "SELECT count(*) FROM information_schema.tables"
+                    " WHERE table_schema = 'public' AND table_name = 'workspace_info'"
+                )
+            ).scalar_one()
+            return sequence == 1 and workspace_table == 1
+    except Exception:
+        return False
+
+
 SETTINGS = _settings()
 pytestmark = pytest.mark.skipif(
-    SETTINGS is None, reason="缺少 PLATFORM_DB_* 环境变量，跳过平台库事务实库断言"
+    SETTINGS is None or not _new_model_schema_ready(SETTINGS),
+    reason="缺少 PLATFORM_DB_* 环境变量或平台库尚未按 6.1 重建，跳过实库断言",
 )
-
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
 @pytest.fixture
-def live_workspace():
-    """临时源行、domain 成功作业行、旧 current 与旧映射行；结束时全部清理。"""
-    source_id = uuid4()
-    job_id = uuid4()
-    old_publish_id = uuid4()
-    db_name = f"tx_domain_{source_id.hex[:8]}"
-    workspace_root = PROJECT_ROOT / "output" / str(source_id)
+def live_domain_workspace(tmp_path, monkeypatch):
+    """临时数据源 + 工作区 + 发布作业（steps=["domain"]）；结束时逆序清理。
+
+    版本按 doc 7.2 §7.3 携带完整 step_config.domain.domains（选择 domain
+    步骤的必配项）。产物目录按真实 resolver 写在项目 output/ 下
+    （resolve_workspace_root），测试结束删除整个 output/<source>/ 目录。
+    """
+    db_name = "tx_domain_live"
+    with platform_session(SETTINGS) as session:
+        source_id = session.execute(
+            text(
+                "INSERT INTO public.db_source_info"
+                " (display_name, db_type, host, port, db_name, username,"
+                "  password_ciphertext, selected_schemas)"
+                " VALUES ('domain 发布实库验证', 'postgresql', 'h', 5432, :dbname,"
+                "  'u', 'cipher', ARRAY['public'])"
+                " RETURNING source_id"
+            ),
+            {"dbname": db_name},
+        ).scalar_one()
+        session.commit()
+    workspace = create_workspace(SETTINGS, str(source_id), "domain-live")
+    job = create_job(
+        SETTINGS,
+        "publish",
+        workspace["workspace_id"],
+        "domain 实库发布",
+        None,
+        JobConfigPayload(
+            steps=["domain"],
+            step_config={
+                "domain": {
+                    "domains": [
+                        {
+                            "name": "用户管理",
+                            "description": "用户域",
+                            "tables": [
+                                f"{db_name}.public.users",
+                                f"{db_name}.public.products",
+                            ],
+                        }
+                    ]
+                }
+            },
+        ),
+    )
     try:
-        with platform_session(SETTINGS) as session:
-            session.execute(
-                text(
-                    """
-                    INSERT INTO public.db_source_info
-                        (source_id, display_name, description, db_type, host, port,
-                         db_name, username, password_ciphertext, selected_schemas, is_active)
-                    VALUES
-                        (:sid, :name, '旧源描述', 'postgresql', 'tx-domain-live.local', 6543,
-                         :dbname, 'reader', 'cipher', ARRAY['public'], true)
-                    """
-                ),
-                {
-                    "sid": source_id,
-                    "name": f"tx-domain-{source_id.hex[:8]}",
-                    "dbname": db_name,
-                },
-            )
-            session.execute(
-                text(
-                    """
-                    INSERT INTO public.job_info (job_id, step_name, source_id, last_status)
-                    VALUES (:jid, 'domain', :sid, 'success')
-                    """
-                ),
-                {"jid": job_id, "sid": source_id},
-            )
-            session.execute(
-                text(
-                    """
-                    INSERT INTO public.publish_info
-                        (publish_id, step_name, source_id, job_id, status, is_current_publish)
-                    VALUES (:pid, 'domain', :sid, :jid, 'success', true)
-                    """
-                ),
-                {"pid": old_publish_id, "sid": source_id, "jid": job_id},
-            )
-            session.execute(
-                text(
-                    """
-                    INSERT INTO public.table_domain
-                        (source_id, schema_name, table_name, domain_name, domain_desc,
-                         db_name, job_id, publish_id)
-                    VALUES (:sid, 'public', 'legacy', '旧域', '旧描述', :dbname, :jid, :pid)
-                    """
-                ),
-                {
-                    "sid": source_id,
-                    "dbname": db_name,
-                    "jid": job_id,
-                    "pid": old_publish_id,
-                },
-            )
-            session.commit()
-        yield SimpleNamespace(
-            source_id=source_id,
-            job_id=job_id,
-            old_publish_id=old_publish_id,
-            db_name=db_name,
-            workspace_root=workspace_root,
-        )
+        yield {
+            "source_id": str(source_id),
+            "workspace_id": workspace["workspace_id"],
+            "job_id": job["job_id"],
+            "db_name": db_name,
+        }
     finally:
+        shutil.rmtree(
+            Path(
+                resolve_workspace_root(str(source_id), workspace["workspace_id"])
+            ).parent,
+            ignore_errors=True,
+        )
         with platform_session(SETTINGS) as session:
+            session.execute(
+                text(
+                    "DELETE FROM public.publish_run_step WHERE publish_run_id IN"
+                    " (SELECT publish_run_id FROM public.publish_run_info"
+                    "   WHERE publish_job_id = :jid)"
+                ),
+                {"jid": job["job_id"]},
+            )
             session.execute(
                 text("DELETE FROM public.table_domain WHERE source_id = :sid"),
-                {"sid": source_id},
+                {"sid": str(source_id)},
             )
             session.execute(
-                text("DELETE FROM public.publish_info WHERE source_id = :sid"),
-                {"sid": source_id},
+                text("DELETE FROM public.publish_run_info WHERE publish_job_id = :jid"),
+                {"jid": job["job_id"]},
             )
             session.execute(
-                text("DELETE FROM public.job_info WHERE source_id = :sid"),
-                {"sid": source_id},
+                text(
+                    "DELETE FROM public.publish_job_revision WHERE publish_job_id = :jid"
+                ),
+                {"jid": job["job_id"]},
+            )
+            session.execute(
+                text("DELETE FROM public.publish_job_info WHERE publish_job_id = :jid"),
+                {"jid": job["job_id"]},
+            )
+            session.execute(
+                text("DELETE FROM public.workspace_info WHERE workspace_id = :ws"),
+                {"ws": workspace["workspace_id"]},
             )
             session.execute(
                 text("DELETE FROM public.db_source_info WHERE source_id = :sid"),
-                {"sid": source_id},
+                {"sid": str(source_id)},
             )
             session.commit()
-        shutil.rmtree(workspace_root, ignore_errors=True)
 
 
-def md_files(db_name):
-    return (f"{db_name}.public.users.md", f"{db_name}.public.products.md")
+def write_artifacts(ws):
+    """写 domain/md 受管产物与成功 marker（走真实 resolver 的目录）。"""
+    from datetime import datetime
 
+    from backend.workspace_files.markers import write_collection_marker
+    from backend.workspace_files.timestamps import SHANGHAI_TZ
 
-def write_artifacts(ws, tables):
-    """写受管 domain 产物与 md 清单；tables 为空时产出一份零行 YAML。
-
-    tables 元素是完整的点分表名（首段必须是登记库名）。
-    """
-    names = md_files(ws.db_name)
-    domain_dir = ws.workspace_root / str(ws.job_id) / "domain"
-    md_dir = ws.workspace_root / str(ws.job_id) / "md"
+    root = resolve_workspace_root(ws["source_id"], ws["workspace_id"])
+    domain_dir = root / "domain"
+    md_dir = root / "md"
     domain_dir.mkdir(parents=True, exist_ok=True)
     md_dir.mkdir(parents=True, exist_ok=True)
+    names = [f"{ws['db_name']}.public.users.md", f"{ws['db_name']}.public.products.md"]
     for name in names:
         (md_dir / name).write_text("# 表\n", encoding="utf-8")
     (md_dir / "manifest.json").write_text(
         '{"files": [' + ", ".join(f'"{n}"' for n in names) + "]}", encoding="utf-8"
     )
     payload = {
-        "database": {"name": ws.db_name, "description": "库说明"},
+        "database": {"name": ws["db_name"], "description": "库说明"},
         "domains": [
             {
-                "name": "_未分类_",
-                "description": "无法归入其他业务主题的表",
-                "tables": [],
+                "name": "用户管理",
+                "description": "用户域",
+                "tables": [
+                    f"{ws['db_name']}.public.users",
+                    f"{ws['db_name']}.public.products",
+                ],
             },
-            {"name": "用户管理", "description": "用户域", "tables": list(tables)},
         ],
     }
     (domain_dir / "db_domains.yaml").write_text(
         yaml.safe_dump(payload, allow_unicode=True, sort_keys=False), encoding="utf-8"
     )
-    return domain_dir
+    run = write_collection_marker(
+        domain_dir,
+        "11111111-1111-4111-8111-111111111111",
+        "success",
+        moment=datetime(2026, 10, 21, 12, 0, 0, tzinfo=SHANGHAI_TZ),
+    )
+    write_collection_marker(
+        md_dir,
+        "11111111-1111-4111-8111-111111111111",
+        "success",
+        moment=datetime(2026, 10, 21, 12, 0, 0, tzinfo=SHANGHAI_TZ),
+    )
+    return run
 
 
-def _read_back(ws):
-    """新连接核验（对照 psycopg3 会话关闭即回滚的实测语义）。"""
+def test_live_domain_publish_replaces_rows_in_one_commit(live_domain_workspace):
+    from uuid import UUID
+
+    ws = live_domain_workspace
+    marker = write_artifacts(ws)
+    result = create_publish_run(
+        SETTINGS,
+        ws["job_id"],
+        revision_no=1,
+        mode="custom",
+        steps=["domain"],
+        step_config=None,
+    )
+    run_id = UUID(result["publish_run_id"])
+    execute_publish_run(SETTINGS, run_id)
+
     with platform_session(SETTINGS) as session:
         rows = session.execute(
             text(
-                """
-                SELECT schema_name, table_name, domain_name, domain_desc,
-                       db_name, job_id, publish_id
-                  FROM public.table_domain
-                 WHERE source_id = :sid
-                 ORDER BY table_name, domain_name
-                """
+                "SELECT table_name, domain_name, publish_run_id::text"
+                "  FROM public.table_domain WHERE source_id = :sid"
+                " ORDER BY table_name"
             ),
-            {"sid": ws.source_id},
+            {"sid": ws["source_id"]},
         ).all()
-        publishes = session.execute(
+        step = session.execute(
             text(
-                """
-                SELECT publish_id, status, is_current_publish, error_summary
-                  FROM public.publish_info
-                 WHERE source_id = :sid AND step_name = 'domain'
-                 ORDER BY created_at, publish_id
-                """
+                "SELECT status, message, input_manifest IS NOT NULL"
+                "  FROM public.publish_run_step"
+                " WHERE publish_run_id = :rid AND step_name = 'domain'"
             ),
-            {"sid": ws.source_id},
-        ).all()
-        return rows, publishes
-
-
-def test_live_publish_replaces_rows_and_current_in_one_commit(live_workspace):
-    ws = live_workspace
-    write_artifacts(ws, (f"{ws.db_name}.public.users", f"{ws.db_name}.public.products"))
-
-    result = publish_steps(SETTINGS, ws.source_id, ws.job_id, ["domain"])
-
-    assert result["results"][0]["status"] == "success"
-    publish_id = result["publish_id"]
-    rows, publishes = _read_back(ws)
-    assert {(row[1], row[2]) for row in rows} == {
-        ("users", "用户管理"),
-        ("products", "用户管理"),
-    }
-    assert all(str(row[6]) == publish_id for row in rows)
-    assert all(str(row[5]) == str(ws.job_id) and row[4] == ws.db_name for row in rows)
-    assert "legacy" not in {row[1] for row in rows}
-    old = next(row for row in publishes if str(row[0]) == str(ws.old_publish_id))
-    assert old[2] is False
-    new = next(row for row in publishes if str(row[0]) == publish_id)
-    assert new[1] == "success" and new[2] is True
-
-
-def test_live_zero_rows_fails_and_keeps_old_state(live_workspace):
-    ws = live_workspace
-    write_artifacts(ws, ())
-
-    result = publish_steps(SETTINGS, ws.source_id, ws.job_id, ["domain"])
-
-    step = result["results"][0]
-    assert step["status"] == "failed"
-    assert step["message"] == DOMAIN_EMPTY_MESSAGE
-    rows, publishes = _read_back(ws)
-    assert [row[1] for row in rows] == ["legacy"]
-    old = next(row for row in publishes if str(row[0]) == str(ws.old_publish_id))
-    assert old[2] is True
-    failed = [row for row in publishes if row[1] == "failed"]
-    assert len(failed) == 1 and failed[0][2] is False
-    assert failed[0][3] == DOMAIN_EMPTY_MESSAGE
-
-
-def test_live_stale_marker_under_lock_writes_nothing(live_workspace):
-    ws = live_workspace
-    write_artifacts(ws, (f"{ws.db_name}.public.users",))
-
-    with platform_session(SETTINGS) as session:
-        source = session.execute(
-            text("SELECT updated_at FROM public.db_source_info WHERE source_id = :sid"),
-            {"sid": ws.source_id},
+            {"rid": str(run_id)},
+        ).one()
+        run_status = session.execute(
+            text(
+                "SELECT status FROM public.publish_run_info WHERE publish_run_id = :rid"
+            ),
+            {"rid": str(run_id)},
         ).scalar_one()
-    registration = RegistrationSnapshot(
-        updated_at=source, db_name=ws.db_name, selected_schemas=("public",)
+
+    assert run_status == "success"
+    assert step[0] == "success"
+    assert step[2] is True  # input_manifest 与成功状态同一事务落库
+    assert {row[0] for row in rows} == {"users", "products"}
+    assert all(row[2] == str(run_id) for row in rows)
+    assert marker.status == "success"  # 发布只读采集 marker，不改写
+
+
+def test_live_zero_rows_rejected_before_run_and_keeps_nothing(live_domain_workspace):
+    """doc 7.2 §7.2/§7.4：custom 覆盖为全部无表归属的域清单 → 创建前整单
+    拒绝（无有效表归属不可发布），不产生运行、不写任何行。"""
+    ws = live_domain_workspace
+    root = resolve_workspace_root(ws["source_id"], ws["workspace_id"])
+    domain_dir = root / "domain"
+    md_dir = root / "md"
+    domain_dir.mkdir(parents=True, exist_ok=True)
+    md_dir.mkdir(parents=True, exist_ok=True)
+    # MD 清单有效（清单校验先于零行判定）
+    md_name = f"{ws['db_name']}.public.users.md"
+    (md_dir / md_name).write_text("# users\n", encoding="utf-8")
+    (md_dir / "manifest.json").write_text(
+        json.dumps({"files": [md_name]}), encoding="utf-8"
+    )
+    from backend.workspace_files.markers import write_collection_marker
+
+    write_collection_marker(
+        domain_dir, "22222222-2222-4222-8222-222222222222", "success"
     )
 
-    from datetime import datetime, timezone
+    from backend.publishing.precheck import PublishPrecheckError
 
-    stale = datetime(2000, 1, 1, tzinfo=timezone.utc)
-    with pytest.raises(PublicationStepNotReadyError):
-        _publish_domain(SETTINGS, ws.source_id, ws.job_id, uuid4(), stale, registration)
+    with pytest.raises(PublishPrecheckError) as excinfo:
+        create_publish_run(
+            SETTINGS,
+            ws["job_id"],
+            revision_no=1,
+            mode="custom",
+            steps=["domain"],
+            step_config={
+                "domain": {
+                    "domains": [
+                        {"name": "_未分类_", "description": "无表", "tables": []}
+                    ]
+                }
+            },
+        )
+    assert excinfo.value.failures[0]["step"] == "domain"
 
-    rows, publishes = _read_back(ws)
-    assert [row[1] for row in rows] == ["legacy"]
-    assert len(publishes) == 1  # 只有旧 current，不写失败记录
+    with platform_session(SETTINGS) as session:
+        run_count = session.execute(
+            text(
+                "SELECT count(*) FROM public.publish_run_info"
+                " WHERE publish_job_id = :jid"
+            ),
+            {"jid": ws["job_id"]},
+        ).scalar_one()
+        count = session.execute(
+            text("SELECT count(*) FROM public.table_domain WHERE source_id = :sid"),
+            {"sid": ws["source_id"]},
+        ).scalar_one()
+    assert run_count == 0
+    assert count == 0

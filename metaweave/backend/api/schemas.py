@@ -1,25 +1,17 @@
-"""数据源登记 API 的请求和安全响应模型。"""
+"""API 请求/响应模型（doc 6.2 §6.1；source_id 为短 ID）。"""
 
-from typing import Literal
-from uuid import UUID
+from typing import Any, Literal
 
-from pydantic import (
-    BaseModel,
-    ConfigDict,
-    Field,
-    StrictBool,
-    field_validator,
-    model_validator,
-)
-
-from metaweave.core.metadata.db_step import validate_schema_names
-from metaweave.db.postgres_options import normalize_sslmode
+from pydantic import BaseModel, ConfigDict, Field, StrictBool
 
 
-class ConnectionFields(BaseModel):
+# ---- 数据源登记（保留既有能力，参数改短 ID） ----
+
+
+class ConnectionCheckRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    db_type: Literal["postgresql"]
+    db_type: Literal["postgresql"] = "postgresql"
     host: str
     port: int = Field(ge=1, le=65535)
     db_name: str
@@ -27,119 +19,111 @@ class ConnectionFields(BaseModel):
     password: str = Field(repr=False, min_length=1)
     sslmode: str | None = None
 
-    @field_validator("host", "db_name", "username")
-    @classmethod
-    def nonblank_connection_field(cls, value: str) -> str:
-        if not value.strip():
-            raise ValueError("连接字段不能为空")
-        return value
 
-    @field_validator("sslmode")
-    @classmethod
-    def normalize_sslmode_field(cls, value: str | None) -> str | None:
-        """doc 18.1 §4.1：非法模式 422 invalid_request；合法值规范化后保存。"""
-        return normalize_sslmode(value)
+class ConnectionCheckResponse(BaseModel):
+    """连接检查成功载荷（doc 11）：200 即成功，无 ok 字段。"""
+
+    server_version: str | None = None
+    schemas: list[str] = []
 
 
-class ConnectionCheckRequest(ConnectionFields):
-    pass
+class DataSourceCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
 
-
-class DataSourceCreateRequest(ConnectionFields):
+    db_type: Literal["postgresql"] = "postgresql"
+    host: str
+    port: int = Field(ge=1, le=65535)
+    db_name: str
+    username: str
+    password: str = Field(repr=False, min_length=1)
+    sslmode: str | None = None
     display_name: str
     selected_schemas: list[str]
     description: str | None = None
     confirm_duplicate: bool = False
 
-    @field_validator("display_name")
-    @classmethod
-    def nonblank_display_name(cls, value: str) -> str:
-        if not value.strip():
-            raise ValueError("数据源显示名称不能为空")
-        return value
 
-    @field_validator("selected_schemas")
-    @classmethod
-    def valid_schema_names(cls, value: list[str]) -> list[str]:
-        validate_schema_names(value)
-        return value
+class DataSourceUpdateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
 
-    @field_validator("description")
-    @classmethod
-    def normalize_description(cls, value: str | None) -> str | None:
-        if value is None:
-            return None
-        value = value.strip()
-        if len(value) > 1000:
-            raise ValueError("数据源说明不能超过 1000 个字符")
-        return value or None
-
-
-class ConnectionCheckResponse(BaseModel):
-    server_version: str
-    schemas: list[str]
+    db_type: Literal["postgresql"] = "postgresql"
+    host: str
+    port: int = Field(ge=1, le=65535)
+    db_name: str
+    username: str
+    sslmode: str | None = None
+    password: str | None = Field(default=None, repr=False)
+    display_name: str
+    selected_schemas: list[str]
+    description: str | None = None
+    confirm_duplicate: bool = False
 
 
 class DataSourceActivationRequest(BaseModel):
-    """启停数据源（doc 11 §5）。
-
-    `is_active` 用 `StrictBool`：只接受 JSON 的 true/false，字符串与数字一律 422，
-    不让"传错类型"被宽松转换悄悄吞掉。
-    """
+    """`is_active` 用 StrictBool：只接受 JSON true/false，字符串与数字一律 422。"""
 
     model_config = ConfigDict(extra="forbid")
 
     is_active: StrictBool
 
 
-class DataSourceUpdateRequest(BaseModel):
-    """整份替换。sslmode 与 description 必填且可为 null，不继承创建模型的默认值。"""
+class DeletionConfirmRequest(BaseModel):
+    """删除/清理确认体：必须回传目标 ID（doc 8.1 §4/§7）。"""
 
+    confirm_id: str
+
+
+class DeletionTargetConfirmation(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    db_type: Literal["postgresql"]
-    host: str
-    port: int = Field(ge=1, le=65535)
-    db_name: str
-    username: str
-    password: str | None = Field(default=None, repr=False)
-    sslmode: str | None
+    previous_fingerprint: str = Field(pattern=r"^[0-9a-f]{16}$")
+    current_fingerprint: str = Field(pattern=r"^[0-9a-f]{16}$")
+
+
+class DeletionRetryRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    target_confirmation: DeletionTargetConfirmation | None = None
+
+
+class DeletionTaskItem(BaseModel):
+    task_id: str
+    action: str
+    status: str
+    source_id: str
+    workspace_id: str | None = None
+    target_id: str
+    error_message: str | None = None
+    created_at: str | None = None
+    queued_at: str | None = None
+    started_at: str | None = None
+    finished_at: str | None = None
+
+
+class DeletionTaskDetail(DeletionTaskItem):
+    can_retry: bool
+    retry_reason: str | None = None
+    steps: dict[str, Any] = {}
+
+
+class DeletionTaskSummary(BaseModel):
+    """对象响应附带的删除任务摘要（doc 8.1 §7.0）。"""
+
+    task_id: str
+    action: str
+    status: str
+    source_id: str
+    workspace_id: str | None = None
+    target_id: str
+    error_message: str | None = None
+
+
+class HistorySourceSummary(BaseModel):
+    """历史来源摘要（doc 8.1 §8.2）：不含连接字段，不解密、不建连。"""
+
+    source_id: str
     display_name: str
-    selected_schemas: list[str]
-    description: str | None
-    confirm_duplicate: bool = False
-
-    @field_validator("host", "db_name", "username")
-    @classmethod
-    def nonblank_connection_field(cls, value: str) -> str:
-        return ConnectionFields.nonblank_connection_field(value)
-
-    @field_validator("sslmode")
-    @classmethod
-    def normalize_sslmode_field(cls, value: str | None) -> str | None:
-        return ConnectionFields.normalize_sslmode_field(value)
-
-    @field_validator("password")
-    @classmethod
-    def empty_password_means_unchanged(cls, value: str | None) -> str | None:
-        if value is None or value == "":
-            return None
-        return value
-
-    @field_validator("display_name")
-    @classmethod
-    def nonblank_display_name(cls, value: str) -> str:
-        return DataSourceCreateRequest.nonblank_display_name(value)
-
-    @field_validator("selected_schemas")
-    @classmethod
-    def valid_schema_names(cls, value: list[str]) -> list[str]:
-        return DataSourceCreateRequest.valid_schema_names(value)
-
-    @field_validator("description")
-    @classmethod
-    def normalize_description(cls, value: str | None) -> str | None:
-        return DataSourceCreateRequest.normalize_description(value)
+    deleted: bool
 
 
 class DataSourceListItem(BaseModel):
@@ -150,124 +134,336 @@ class DataSourceListItem(BaseModel):
     port: int
     db_name: str
     username: str
-    sslmode: str | None
+    sslmode: str | None = None
     selected_schemas: list[str]
-    description: str | None
-    db_version: str | None
+    description: str | None = None
+    db_version: str | None = None
     created_at: str
     is_active: bool
-
-
-class DataSourceCatalogItem(DataSourceListItem):
-    """列表卡片额外带出的最近采集与最近发布；单条读写接口不返回这两项。"""
-
-    last_collected_at: str | None
-    last_published_at: str | None
+    last_collected_at: str | None = None
+    last_published_at: str | None = None
+    deletion_task: DeletionTaskSummary | None = None
 
 
 class DataSourceListResponse(BaseModel):
-    items: list[DataSourceCatalogItem]
+    items: list[DataSourceListItem]
 
 
-class DuplicateSourceDetail(BaseModel):
+# ---- 工作区 ----
+
+
+class WorkspaceCreateRequest(BaseModel):
+    workspace_name: str
+    workspace_desc: str | None = None
+
+
+class WorkspaceItem(BaseModel):
+    workspace_id: str
     source_id: str
-    display_name: str
+    workspace_name: str
+    workspace_desc: str | None = None
+    created_at: str
+    updated_at: str
+    deletion_task: DeletionTaskSummary | None = None
+    effective_state: str | None = None
+    blocked_by: dict[str, str] | None = None
+    blocked_reason: str | None = None
 
 
-class ErrorResponse(BaseModel):
-    code: str
-    message: str
-    details: list[DuplicateSourceDetail] | None = None
+class WorkspacePageItem(WorkspaceItem):
+    """跨源列表行（doc 6.2 §6.1）：附每工作区采集/发布作业数量。"""
+
+    collection_job_count: int
+    publish_job_count: int
 
 
-class CollectionJobSource(BaseModel):
+class WorkspaceListResponse(BaseModel):
     source_id: str
-    display_name: str
-    host: str
-    port: int
-    db_name: str
-    db_type_version: str
-    description: str | None
-    is_active: bool
+    items: list[WorkspaceItem]
 
 
-class CollectionJobItem(BaseModel):
-    job_id: str
-    executed_at: str
+class WorkspacePageResponse(BaseModel):
+    """跨源工作区列表分页信封（doc 6.2 §6.1）"""
+
+    items: list[WorkspacePageItem]
+    total: int
+    limit: int
+    offset: int
+
+
+class WorkspacePatchRequest(BaseModel):
+    workspace_name: str | None = None
+    workspace_desc: str | None = None
+
+
+# ---- 作业与版本 ----
+
+
+class JobConfigPayload(BaseModel):
     steps: list[str]
-    job_status: Literal["success", "failed", "running"]
-    run_by_user_id: str | None
+    step_config: dict[str, dict[str, Any]] | None = None
+    change_note: str | None = None
 
 
-class CollectionJobListResponse(BaseModel):
-    source: CollectionJobSource
-    job_count: int
-    items: list[CollectionJobItem]
+class JobCreateRequest(BaseModel):
+    job_name: str
+    job_desc: str | None = None
+    config: JobConfigPayload
 
 
-class PublishJobItem(BaseModel):
-    publish_id: str
+class JobPatchRequest(BaseModel):
+    job_name: str | None = None
+    job_desc: str | None = None
+
+
+class RevisionItem(BaseModel):
     job_id: str
-    published_at: str
-    profile_steps: list[str]
-    rag_steps: list[str]
-    created_by_user_id: str | None
-
-
-class PublishJobListResponse(BaseModel):
-    source: CollectionJobSource
-    job_count: int
-    items: list[PublishJobItem]
-
-
-class CollectionHomeItem(BaseModel):
-    job_id: str
-    publish_id: None = None
-    executed_at: str
+    revision_no: int
     steps: list[str]
-    status: Literal["running", "success", "failed"]
+    step_config: dict[str, Any] | None = None
+    change_note: str | None = None
+    created_at: str
 
 
-class CollectionHomeCounts(BaseModel):
-    running: int
-    success_recent: int
-    failed: int
-
-
-class CollectionHomeResponse(BaseModel):
-    is_active: bool
-    counts: CollectionHomeCounts
-    items: list[CollectionHomeItem]
-
-
-class PublishHomeItem(BaseModel):
+class JobItem(BaseModel):
     job_id: str
-    publish_id: str
-    executed_at: str
-    steps: list[str]
-    status: Literal["success", "failed"]
+    workspace_id: str
+    job_name: str
+    job_desc: str | None = None
+    created_at: str
+    updated_at: str
+    job_type: str
+    latest_revision_no: int | None = None
+    revision: RevisionItem | None = None
+    default_steps: list[str] = []
+    run_count: int = 0
 
 
-class PublishHomeCounts(BaseModel):
-    current: int
-    success_recent: int
-    failed: int
+class JobListResponse(BaseModel):
+    workspace_id: str
+    job_type: str
+    items: list[JobItem]
 
 
-class PublishHomeResponse(BaseModel):
-    is_active: bool
-    counts: PublishHomeCounts
-    items: list[PublishHomeItem]
+class GlobalJobItem(JobItem):
+    """全局作业列表行（设计稿 35/37）：在工作区作业之上附源/工作区名与最近运行。"""
+
+    workspace_name: str = ""
+    source_id: str = ""
+    source_name: str = ""
+    last_run_at: str | None = None
 
 
-class PublishDefinitionResponse(BaseModel):
-    publish_id: str
+class GlobalJobListResponse(BaseModel):
+    job_type: str
+    workspace_id: str | None = None
+    source_id: str | None = None
+    q: str | None = None
+    total: int
+    limit: int
+    offset: int
+    items: list[GlobalJobItem]
+
+
+class RevisionListResponse(BaseModel):
     job_id: str
-    steps: list[str]
+    items: list[RevisionItem]
+
+
+# ---- 运行 ----
+
+
+class RunCreateRequest(BaseModel):
+    revision_no: int
+    mode: str = "default"  # default | custom
+    steps: list[str] | None = None
+    step_config: dict[str, dict[str, Any]] | None = None
+
+
+class RunStepItem(BaseModel):
+    step_name: str
+    status: str
+    message: str | None = None
+    step_config: dict[str, Any] | None = None
+    input_manifest: dict[str, Any] | None = None
+    output_manifest: dict[str, Any] | None = None
+    target_manifest: dict[str, Any] | None = None
+    started_at: str | None = None
+    finished_at: str | None = None
+
+
+class CollectionRunDetail(BaseModel):
+    # 发布运行详情（PublishRunDetail）只有 publish_run_id，无采集运行 ID，
+    # 故此字段可选：缺失时由采集/发布各自的路由语义保证正确性
+    collection_run_id: str | None = None
+    job_id: str
+    job_name: str | None = None
+    workspace_id: str | None = None
+    revision_no: int
+    trigger_type: str
+    status: str
+    message: str | None = None
+    created_at: str | None = None
+    started_at: str | None = None
+    finished_at: str | None = None
+    run_type: str
+    # doc 11 §4.7：本进程执行者注册表读取；字段缺失（旧载荷）按 false 容忍
+    executor_active: bool = False
+    steps: list[RunStepItem]
+
+
+class PublishRunDetail(CollectionRunDetail):
+    # doc 10.2 §8：只读可选字段（创建时冻结的执行计划；旧记录为 None）
+    execution_plan: dict[str, Any] | None = None
+    publish_run_id: str
+
+
+class RunResolveRequest(BaseModel):
+    """doc 11 §4.3 收尾请求：缺省值统一走 400（reason 空 / 承诺未勾选）。"""
+
+    reason: str = ""
+    confirm_executors_stopped: bool = False
+
+
+class RunResolveStepChange(BaseModel):
+    step: str
+    to: str
+
+
+class RunResolveResponse(BaseModel):
+    changed: bool
+    final_status: str | None = None
+    steps: list[RunResolveStepChange] = []
+    note: str | None = None
+    message: str | None = None
+    run_id: str
+    job_id: str | None = None
+    workspace_id: str | None = None
+
+
+class RunListItem(BaseModel):
+    run_id: str
+    job_id: str
+    job_name: str | None = None
+    revision_no: int
+    status: str
+    trigger_type: str
+    created_at: str | None = None
+    started_at: str | None = None
+    finished_at: str | None = None
+    run_type: str
+
+
+class RunListResponse(BaseModel):
+    workspace_id: str | None = None
+    job_id: str | None = None
+    run_type: str
+    total: int
+    limit: int
+    offset: int
+    items: list[RunListItem]
+
+
+# ---- 发布预检 ----
+
+
+class PublishCheckStep(BaseModel):
+    step_name: str
+    ready: bool
+    reason: str | None = None
+
+
+class PublishCheckDirectory(BaseModel):
+    directory: str
+    marker_status: str
+    collection_run_id: str | None = None
+    collected_at: str | None = None
+    error: str | None = None
+
+
+class PublishCheckResponse(BaseModel):
+    workspace_id: str
+    source_id: str
+    steps: list[PublishCheckStep]
+    input_directories: list[PublishCheckDirectory]
+
+
+class PublishJobPrecheckRequest(BaseModel):
+    """作业级预检请求（doc 7.2 §5.2）：与创建运行同一解析规则，不创建运行。"""
+
+    revision_no: int
+    mode: str = "default"  # default | custom
+    steps: list[str] | None = None
+    step_config: dict[str, dict[str, Any]] | None = None
+
+
+class PublishJobPrecheckStep(BaseModel):
+    step_name: str
+    ready: bool
+    reason: str | None = None
+    code: str | None = None
+
+
+class PublishJobPrecheckResponse(BaseModel):
+    publish_job_id: str
+    revision_no: int
+    mode: str
+    steps: list[PublishJobPrecheckStep]
+
+
+class DimValueRecommendationsResponse(BaseModel):
+    """独立推荐读取（doc 7.2 §4）：与被编辑 YAML 解耦的只读推荐。"""
+
+    tables: list[dict[str, Any]]
+
+
+# ---- 配置编辑（工作区定位） ----
+
+
+class DomainConfigResponse(BaseModel):
+    fingerprint: str
+    database: dict[str, Any]
+    max_domains_per_table: int | None = None
+    domains: list[dict[str, Any]]
+
+
+class DomainConfigTablesResponse(BaseModel):
+    tables: list[dict[str, Any]]
+
+
+class DomainConfigUpdateRequest(BaseModel):
+    fingerprint: str
+    database: dict[str, Any]
+    domains: list[dict[str, Any]]
+
+
+class RelConfigGetResponse(BaseModel):
+    database: str
+    fingerprint: str
+    tables: list[str]
+    relationships: list[dict[str, Any]]
+    score_threshold: float
+
+
+class RelConfigColumnsResponse(BaseModel):
+    columns: list[str]
+
+
+class RelConfigUpdateRequest(BaseModel):
+    fingerprint: str
+    relationships: list[dict[str, Any]]
+
+
+class RelConfigUpdateResponse(BaseModel):
+    fingerprint: str
+    relationships: list[dict[str, Any]]
+
+
+# ---- 数据资产 ----
 
 
 class AssetCatalogItem(BaseModel):
-    publish_id: str
+    publish_run_id: str
     source_id: str
     display_name: str
     db_type: str
@@ -278,13 +474,13 @@ class AssetCatalogItem(BaseModel):
     object_count: int
     size_bytes: int
     collected_at: str
+    published_at: str | None = None
 
 
 class AssetCatalogResponse(BaseModel):
     source_count: int
     object_count: int
     project_count: int
-    inconsistent_count: int
     items: list[AssetCatalogItem]
 
 
@@ -295,9 +491,8 @@ class AssetProfileSource(BaseModel):
 
 
 class AssetProfilePublish(BaseModel):
-    publish_id: str
+    publish_run_id: str
     status: str
-    error_summary: str | None
     published_at: str
 
 
@@ -320,233 +515,32 @@ class AssetProfileDetail(BaseModel):
 
 
 class AssetProfileResponse(BaseModel):
-    state: Literal["ready", "not_published", "failed", "inconsistent"]
+    state: str
     source: AssetProfileSource
     publish: AssetProfilePublish | None
     profile: AssetProfileDetail | None
 
 
-class CollectionJobCreateRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    steps: list[str]
-    job_id: UUID | None = None
-    domain_description: str | None = None
-    sync_domain_description: StrictBool = False
-
-    @field_validator("domain_description", mode="before")
-    @classmethod
-    def normalize_domain_description(cls, value: str | None) -> str:
-        """只在字段被提供时执行（doc 21.1 §7.1）：省略时不运行、默认 None 保留。
-
-        显式 null、非字符串、strip() 后为空、超过 1000 字符一律 ValueError
-        （FastAPI 422）；通过后存 strip() 规范值。
-        """
-        if value is None:
-            raise ValueError("domain_description 不允许显式 null")
-        if not isinstance(value, str):
-            raise ValueError("domain_description 必须是字符串")
-        text = value.strip()
-        if not text:
-            raise ValueError("domain_description 不能为空")
-        if len(text) > 1000:
-            raise ValueError("domain_description 不能超过 1000 个字符")
-        return text
-
-    @model_validator(mode="after")
-    def validate_sync_pairing(self) -> "CollectionJobCreateRequest":
-        """sync=true 必须与显式合法描述、本次 domain 步骤成对（doc 21.1 §7.1）。"""
-        if self.sync_domain_description:
-            if (
-                "domain_description" not in self.model_fields_set
-                or not self.domain_description
-            ):
-                raise ValueError(
-                    "sync_domain_description=true 必须同时携带 domain_description"
-                )
-            if "domain" not in self.steps:
-                raise ValueError(
-                    "sync_domain_description=true 要求本次 steps 包含 domain"
-                )
-        return self
-
-
-class CollectionJobStepResult(BaseModel):
-    step: str
-    status: Literal["success", "failed"]
-    message: str
-    finished_at: str
-
-
-class CollectionJobCreateResponse(BaseModel):
-    job_id: str
-    results: list[CollectionJobStepResult]
-
-
-class SqlReadinessResponse(BaseModel):
-    ready: bool
-    missing: list[str]
-    message: str
-
-
-class PublishCheckStep(BaseModel):
-    step_name: Literal[
-        "db", "ddl", "json", "domain", "table_schema", "dim_value", "rel", "sql"
-    ]
-    job_status: Literal["running", "success", "failed"] | None
-    output_ready: bool
-    publishable: bool
-    reason: str | None
-
-
-class PublishCheckResponse(BaseModel):
-    source_id: str
-    job_id: str
-    steps: list[PublishCheckStep]
-
-
-class DimValueConfigTable(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    schema_name: str
-    object_name: str
-    embedding_col: str | None = None
-
-
 class DimValueConfigGetResponse(BaseModel):
-    tables: list[DimValueConfigTable]
+    tables: list[dict[str, Any]]
     version: str
-
-
-class DimValueConfigUpdateRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    tables: list[DimValueConfigTable]
-    version: str
-
-
-class DimValueConfigUpdateResponse(BaseModel):
-    """PUT 成功响应只含 tables（doc 22.2 §5.2 第 5 步：version 不变，前端沿用 GET 值）。"""
-
-    tables: list[DimValueConfigTable]
-
-
-class DimValueObject(BaseModel):
-    schema_name: str
-    object_name: str
-    object_type: str
+    """embedding_col 为含逗号字符串的表（读取按未指定处理；供显式初始化页
+    提示改用字段列表格式，doc 7.2 §3.1.1/验收 25）"""
+    comma_string_tables: list[str] = []
 
 
 class DimValueObjectsResponse(BaseModel):
-    objects: list[DimValueObject]
-
-
-class DimValueColumn(BaseModel):
-    name: str
-    data_type: str
-    comment: str
-    sample_value: str = ""
+    objects: list[dict[str, Any]]
 
 
 class DimValueColumnsResponse(BaseModel):
-    columns: list[DimValueColumn]
+    columns: list[dict[str, Any]]
 
 
-class RelConfigRelationship(BaseModel):
-    """PUT 客户端条目：实质字段是唯一输入（doc 23.2 §4.2）。
-
-    表引用为宽松 dict（形态校验在服务层）；多余字段（分数/明细/方法等
-    非实质字段）默认被忽略，篡改到不了服务层。
-    """
-
-    relationship_id: str | None = None
-    from_table: dict
-    to_table: dict
-    from_columns: list[str]
-    to_columns: list[str]
-    cardinality: str
+class DimValueConfigUpdateRequest(BaseModel):
+    version: str
+    tables: list[dict[str, Any]]
 
 
-class RelConfigGetResponse(BaseModel):
-    database: str
-    fingerprint: str
-    tables: list[str]
-    relationships: list[dict]
-    # cql_generation.composite_score_threshold；弹窗只展示达到该值的非外键关系
-    score_threshold: float
-
-
-class RelConfigColumnsResponse(BaseModel):
-    columns: list[str]
-
-
-class RelConfigUpdateRequest(BaseModel):
-    fingerprint: str
-    relationships: list[RelConfigRelationship]
-
-
-class RelConfigUpdateResponse(BaseModel):
-    """PUT 成功响应回带新指纹（doc 23.2 §4：前端保存后刷新指纹的数据来源）。"""
-
-    fingerprint: str
-    relationships: list[dict]
-
-
-class DomainConfigDatabase(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    name: str
-    description: str | None = None
-
-
-class DomainConfigDomain(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    name: str
-    description: str
-    tables: list[str]
-
-
-class DomainConfigResponse(BaseModel):
-    fingerprint: str
-    database: DomainConfigDatabase
-    max_domains_per_table: int | None
-    domains: list[DomainConfigDomain]
-
-
-class DomainConfigUpdateRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    fingerprint: str
-    database: DomainConfigDatabase
-    max_domains_per_table: int | None = None
-    domains: list[DomainConfigDomain]
-
-
-class DomainConfigTableOption(BaseModel):
-    id: str
-    label: str
-
-
-class DomainConfigTablesResponse(BaseModel):
-    tables: list[DomainConfigTableOption]
-
-
-class PublicationCreateRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    steps: list[str]
-
-
-class PublicationStepResult(BaseModel):
-    step: Literal[
-        "db", "ddl", "json", "domain", "table_schema", "dim_value", "rel", "sql"
-    ]
-    status: Literal["success", "failed"]
-    message: str
-    finished_at: str
-
-
-class PublicationCreateResponse(BaseModel):
-    publish_id: str
-    results: list[PublicationStepResult]
+class DimValueConfigUpdateResponse(BaseModel):
+    tables: list[dict[str, Any]]

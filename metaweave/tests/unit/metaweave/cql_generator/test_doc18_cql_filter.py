@@ -11,7 +11,6 @@
 """
 
 import json
-from pathlib import Path
 
 import pytest
 
@@ -30,13 +29,20 @@ def _make_reader(tmp_path, rels_by_file, threshold=0.9):
         (rel_dir / fname).write_text(
             json.dumps({"relationships": rels}), encoding="utf-8"
         )
-    return JSONReader(
-        json_dir, rel_dir, composite_score_threshold=threshold
-    )
+    return JSONReader(json_dir, rel_dir, composite_score_threshold=threshold)
 
 
-def _rel(rel_id, src_table, dst_table, src_col, dst_col,
-         method="llm_inferred", score=0.95, cardinality="N:1", **kwargs):
+def _rel(
+    rel_id,
+    src_table,
+    dst_table,
+    src_col,
+    dst_col,
+    method="llm_inferred",
+    score=0.95,
+    cardinality="N:1",
+    **kwargs,
+):
     rel = {
         "relationship_id": rel_id,
         "type": "single_column",
@@ -56,8 +62,20 @@ def _rel(rel_id, src_table, dst_table, src_col, dst_col,
 class TestThresholdValidation:
     """generator 阈值校验（doc 18 §3）"""
 
-    @pytest.mark.parametrize("bad", [True, False, "0.9", None, float("nan"),
-                                     float("inf"), float("-inf"), -0.1, 1.5])
+    @pytest.mark.parametrize(
+        "bad",
+        [
+            True,
+            False,
+            "0.9",
+            None,
+            float("nan"),
+            float("inf"),
+            float("-inf"),
+            -0.1,
+            1.5,
+        ],
+    )
     def test_invalid_threshold_rejected(self, bad):
         with pytest.raises(ValueError):
             CQLGenerator._validate_threshold(bad)
@@ -71,12 +89,16 @@ class TestThresholdFilter:
     """阈值过滤（doc 18 §2.1/§2.2）"""
 
     def test_inferred_below_threshold_filtered(self, tmp_path):
-        reader = _make_reader(tmp_path, {
-            "a.relationships_global.json": [
-                _rel("rel_low", "orders", "products", "pid", "id", score=0.85),
-                _rel("rel_high", "orders", "users", "uid", "id", score=0.95),
-            ],
-        }, threshold=0.9)
+        reader = _make_reader(
+            tmp_path,
+            {
+                "a.relationships_global.json": [
+                    _rel("rel_low", "orders", "products", "pid", "id", score=0.85),
+                    _rel("rel_high", "orders", "users", "uid", "id", score=0.95),
+                ],
+            },
+            threshold=0.9,
+        )
         joins, stats = reader._read_relationships()
         assert len(joins) == 1
         assert joins[0].relationship_id == "rel_high"
@@ -86,20 +108,37 @@ class TestThresholdFilter:
         assert stats.final_count == 1
 
     def test_score_equal_to_threshold_kept(self, tmp_path):
-        reader = _make_reader(tmp_path, {
-            "a.relationships_global.json": [_rel("rel_eq", "a", "b", "x", "y", score=0.9)],
-        }, threshold=0.9)
+        reader = _make_reader(
+            tmp_path,
+            {
+                "a.relationships_global.json": [
+                    _rel("rel_eq", "a", "b", "x", "y", score=0.9)
+                ],
+            },
+            threshold=0.9,
+        )
         joins, stats = reader._read_relationships()
         assert len(joins) == 1
 
     def test_fk_exempt_even_with_low_score(self, tmp_path):
         """FK 按 discovery_method 豁免,与分数无关(doc 18 §2.1)"""
-        reader = _make_reader(tmp_path, {
-            "a.relationships_global.json": [
-                _rel("rel_fk", "orders", "products", "pid", "id",
-                     method="foreign_key_constraint", score=0.1),
-            ],
-        }, threshold=0.9)
+        reader = _make_reader(
+            tmp_path,
+            {
+                "a.relationships_global.json": [
+                    _rel(
+                        "rel_fk",
+                        "orders",
+                        "products",
+                        "pid",
+                        "id",
+                        method="foreign_key_constraint",
+                        score=0.1,
+                    ),
+                ],
+            },
+            threshold=0.9,
+        )
         joins, stats = reader._read_relationships()
         assert len(joins) == 1
         assert stats.threshold_filtered_count == 0
@@ -137,8 +176,14 @@ class TestInputValidation:
         with pytest.raises(ValueError, match="cardinality"):
             reader._read_relationships()
         # 1:N 违反 doc 19 输出契约
-        reader = _make_reader(tmp_path, {"a.relationships_global.json": [
-            _rel("rel_2", "a", "b", "x", "y", cardinality="1:N")]})
+        reader = _make_reader(
+            tmp_path,
+            {
+                "a.relationships_global.json": [
+                    _rel("rel_2", "a", "b", "x", "y", cardinality="1:N")
+                ]
+            },
+        )
         with pytest.raises(ValueError, match="cardinality"):
             reader._read_relationships()
 
@@ -184,8 +229,7 @@ class TestInputValidation:
                 reader._read_relationships()
 
     def test_score_validation(self, tmp_path):
-        bad_scores = [None, "0.9", True, False, float("nan"),
-                      float("inf"), -0.1, 1.5]
+        bad_scores = [None, "0.9", True, False, float("nan"), float("inf"), -0.1, 1.5]
         for score in bad_scores:
             rel = _rel("rel_1", "a", "b", "x", "y")
             rel["composite_score"] = score
@@ -196,8 +240,7 @@ class TestInputValidation:
     def test_fk_score_not_validated(self, tmp_path):
         """FK 直通分数缺失/非法也不校验(doc 18 §2.2)"""
         # helper 对 FK 直通不生成 composite_score 键 → 即"分数缺失"场景
-        rel = _rel("rel_fk", "a", "b", "x", "y",
-                   method="foreign_key_constraint")
+        rel = _rel("rel_fk", "a", "b", "x", "y", method="foreign_key_constraint")
         reader = _make_reader(tmp_path, {"a.relationships_global.json": [rel]})
         joins, stats = reader._read_relationships()
         assert len(joins) == 1
@@ -208,19 +251,31 @@ class TestDedupAndConflict:
 
     def test_same_table_pair_different_ids_both_kept(self, tmp_path):
         """同表对不同 relationship_id(双字段映射)→ 全部保留"""
-        reader = _make_reader(tmp_path, {"a.relationships_global.json": [
-            _rel("rel_ship", "orders", "addresses", "shipping_address_id", "id"),
-            _rel("rel_bill", "orders", "addresses", "billing_address_id", "id"),
-        ]})
+        reader = _make_reader(
+            tmp_path,
+            {
+                "a.relationships_global.json": [
+                    _rel(
+                        "rel_ship", "orders", "addresses", "shipping_address_id", "id"
+                    ),
+                    _rel("rel_bill", "orders", "addresses", "billing_address_id", "id"),
+                ]
+            },
+        )
         joins, stats = reader._read_relationships()
         assert len(joins) == 2
         assert {j.relationship_id for j in joins} == {"rel_ship", "rel_bill"}
 
     def test_identical_duplicates_deduped(self, tmp_path):
-        reader = _make_reader(tmp_path, {"a.relationships_global.json": [
-            _rel("rel_dup", "a", "b", "x", "y"),
-            _rel("rel_dup", "a", "b", "x", "y"),
-        ]})
+        reader = _make_reader(
+            tmp_path,
+            {
+                "a.relationships_global.json": [
+                    _rel("rel_dup", "a", "b", "x", "y"),
+                    _rel("rel_dup", "a", "b", "x", "y"),
+                ]
+            },
+        )
         joins, stats = reader._read_relationships()
         assert len(joins) == 1
         assert stats.duplicate_group_count == 1
@@ -228,28 +283,46 @@ class TestDedupAndConflict:
         assert stats.final_count == 1
 
     def test_cross_file_duplicates_deduped(self, tmp_path):
-        reader = _make_reader(tmp_path, {
-            "a.relationships_global.json": [_rel("rel_dup", "a", "b", "x", "y")],
-            "b.relationships_global.json": [_rel("rel_dup", "a", "b", "x", "y")],
-        })
+        reader = _make_reader(
+            tmp_path,
+            {
+                "a.relationships_global.json": [_rel("rel_dup", "a", "b", "x", "y")],
+                "b.relationships_global.json": [_rel("rel_dup", "a", "b", "x", "y")],
+            },
+        )
         joins, stats = reader._read_relationships()
         assert len(joins) == 1
         assert stats.duplicate_group_count == 1
 
     def test_same_id_conflicting_payload_raises(self, tmp_path):
-        reader = _make_reader(tmp_path, {
-            "a.relationships_global.json": [_rel("rel_123", "a", "b", "x", "y", cardinality="N:1")],
-            "b.relationships_global.json": [_rel("rel_123", "a", "b", "x", "y", cardinality="1:1")],
-        })
+        reader = _make_reader(
+            tmp_path,
+            {
+                "a.relationships_global.json": [
+                    _rel("rel_123", "a", "b", "x", "y", cardinality="N:1")
+                ],
+                "b.relationships_global.json": [
+                    _rel("rel_123", "a", "b", "x", "y", cardinality="1:1")
+                ],
+            },
+        )
         with pytest.raises(ValueError, match="冲突"):
             reader._read_relationships()
 
     def test_same_id_conflict_detected_before_filtering(self, tmp_path):
         """同 ID 两条分数不同、低分在阈值之下 → 仍报冲突(冲突检查先于过滤)"""
-        reader = _make_reader(tmp_path, {
-            "a.relationships_global.json": [_rel("rel_123", "a", "b", "x", "y", score=0.95)],
-            "b.relationships_global.json": [_rel("rel_123", "a", "b", "x", "y", score=0.85)],
-        }, threshold=0.9)
+        reader = _make_reader(
+            tmp_path,
+            {
+                "a.relationships_global.json": [
+                    _rel("rel_123", "a", "b", "x", "y", score=0.95)
+                ],
+                "b.relationships_global.json": [
+                    _rel("rel_123", "a", "b", "x", "y", score=0.85)
+                ],
+            },
+            threshold=0.9,
+        )
         with pytest.raises(ValueError, match="冲突"):
             reader._read_relationships()
 
@@ -269,23 +342,30 @@ class TestDedupAndConflict:
         rel_2 = dict(rel_1)
         rel_2["from_columns"] = ["a2", "a1"]
         rel_2["to_columns"] = ["b2", "b1"]
-        reader = _make_reader(tmp_path, {
-            "a.relationships_global.json": [rel_1],
-            "b.relationships_global.json": [rel_2],
-        })
+        reader = _make_reader(
+            tmp_path,
+            {
+                "a.relationships_global.json": [rel_1],
+                "b.relationships_global.json": [rel_2],
+            },
+        )
         joins, stats = reader._read_relationships()
         assert len(joins) == 1
         assert stats.duplicate_group_count == 1
 
     def test_fk_score_difference_not_a_conflict(self, tmp_path):
         """FK 分数差异不报冲突(doc 18 §2.3)"""
-        rel_1 = _rel("rel_fk", "a", "b", "x", "y",
-                     method="foreign_key_constraint", score=1.0)
+        rel_1 = _rel(
+            "rel_fk", "a", "b", "x", "y", method="foreign_key_constraint", score=1.0
+        )
         rel_2 = dict(rel_1, composite_score=0.5)
-        reader = _make_reader(tmp_path, {
-            "a.relationships_global.json": [rel_1],
-            "b.relationships_global.json": [rel_2],
-        })
+        reader = _make_reader(
+            tmp_path,
+            {
+                "a.relationships_global.json": [rel_1],
+                "b.relationships_global.json": [rel_2],
+            },
+        )
         joins, stats = reader._read_relationships()
         assert len(joins) == 1
 
@@ -298,14 +378,20 @@ class TestOrderIndependence:
             _rel("rel_b", "b", "a", "x", "y"),
             _rel("rel_a", "a", "b", "x", "y"),
         ]
-        reader_1 = _make_reader(tmp_path, {
-            "a.relationships_global.json": rels_a,
-            "b.relationships_global.json": [_rel("rel_c", "c", "d", "x", "y")],
-        })
-        reader_2 = _make_reader(tmp_path, {
-            "b.relationships_global.json": [_rel("rel_c", "c", "d", "x", "y")],
-            "a.relationships_global.json": list(reversed(rels_a)),
-        })
+        reader_1 = _make_reader(
+            tmp_path,
+            {
+                "a.relationships_global.json": rels_a,
+                "b.relationships_global.json": [_rel("rel_c", "c", "d", "x", "y")],
+            },
+        )
+        reader_2 = _make_reader(
+            tmp_path,
+            {
+                "b.relationships_global.json": [_rel("rel_c", "c", "d", "x", "y")],
+                "a.relationships_global.json": list(reversed(rels_a)),
+            },
+        )
         joins_1, _ = reader_1._read_relationships()
         joins_2, _ = reader_2._read_relationships()
         assert [j.relationship_id for j in joins_1] == [
@@ -319,15 +405,18 @@ class TestStatsInvariants:
     """六项统计与恒等式（doc 18 §5）"""
 
     def test_stats_invariants(self, tmp_path):
-        reader = _make_reader(tmp_path, {
-            "a.relationships_global.json": [
-                _rel("rel_fk", "a", "b", "x", "y",
-                     method="foreign_key_constraint"),
-                _rel("rel_dup", "c", "d", "x", "y"),
-                _rel("rel_dup", "c", "d", "x", "y"),
-                _rel("rel_low", "e", "f", "x", "y", score=0.5),
-            ],
-        }, threshold=0.9)
+        reader = _make_reader(
+            tmp_path,
+            {
+                "a.relationships_global.json": [
+                    _rel("rel_fk", "a", "b", "x", "y", method="foreign_key_constraint"),
+                    _rel("rel_dup", "c", "d", "x", "y"),
+                    _rel("rel_dup", "c", "d", "x", "y"),
+                    _rel("rel_low", "e", "f", "x", "y", score=0.5),
+                ],
+            },
+            threshold=0.9,
+        )
         joins, stats = reader._read_relationships()
         assert len(joins) == 2
         assert stats.candidate_count == 4

@@ -17,7 +17,7 @@ from metaweave.core.dim_value.models import DimTableConfig, DimTablesConfig
 from metaweave.core.loaders.dim_value_loader import ConfigurationError, DimValueLoader
 
 SOURCE_ID = "11111111-1111-1111-1111-111111111111"
-PUBLISH_ID = "22222222-2222-2222-2222-222222222222"
+PUBLISH_RUN_ID = "22222222-2222-2222-2222-222222222222"
 COLLECTION = "dim_value_embeddings"
 
 
@@ -175,7 +175,7 @@ def _make_loader(tmp_path, tables: dict, *, options=None, embedding=None) -> tup
         pg_manager_cls=FakePGManager,
         embedding_service_cls=lambda cfg: embedding,
         source_id=SOURCE_ID,
-        publish_id=PUBLISH_ID,
+        publish_run_id=PUBLISH_RUN_ID,
         dim_tables=_injected(tables),
     )
     return loader, embedding
@@ -213,7 +213,7 @@ def test_a01_schema_fields_and_index(tmp_path):
     assert set(fields) == {
         "col_id",
         "source_id",
-        "publish_id",
+        "publish_run_id",
         "table_name",
         "col_name",
         "col_value",
@@ -223,7 +223,7 @@ def test_a01_schema_fields_and_index(tmp_path):
     assert fields["col_id"].is_primary is True
     assert fields["col_id"].max_length == 2048
     assert fields["source_id"].max_length == 36
-    assert fields["publish_id"].max_length == 36
+    assert fields["publish_run_id"].max_length == 36
     assert fields["table_name"].max_length == 256
     assert fields["col_name"].max_length == 128
     assert fields["col_value"].max_length == 1024
@@ -257,7 +257,7 @@ def test_a02_col_id_and_upsert_fields(tmp_path):
     assert set(by_value) == {"v1", "v2"}
     row = by_value["v1"]
     assert row["source_id"] == SOURCE_ID
-    assert row["publish_id"] == PUBLISH_ID
+    assert row["publish_run_id"] == PUBLISH_RUN_ID
     assert row["table_name"] == "db.public.t1"
     assert row["col_name"] == "c1"
     assert row["col_id"] == f"{SOURCE_ID}:db.public.t1:c1:v1"
@@ -289,7 +289,7 @@ def test_a03_full_success_deletes_old(tmp_path):
     assert result["replacement_started"] is True
     client = loader._milvus_client
     assert client.deletes == [
-        f'source_id == "{SOURCE_ID}" and publish_id != "{PUBLISH_ID}"'
+        f'source_id == "{SOURCE_ID}" and publish_run_id != "{PUBLISH_RUN_ID}"'
     ]
 
 
@@ -496,7 +496,7 @@ def test_a26_zero_values_success_replace(tmp_path):
     assert result["records_loaded"] == 0
     assert result["replacement_started"] is True  # 删旧前确保置位
     assert loader._milvus_client.deletes == [
-        f'source_id == "{SOURCE_ID}" and publish_id != "{PUBLISH_ID}"'
+        f'source_id == "{SOURCE_ID}" and publish_run_id != "{PUBLISH_RUN_ID}"'
     ]
 
 
@@ -567,7 +567,7 @@ def test_a20_injected_config_never_reads_file(tmp_path):
     assert result["success"] is True
 
 
-def test_source_id_publish_id_required(tmp_path):
+def test_source_id_publish_run_id_required(tmp_path):
     config = _loader_config(tmp_path)
     with pytest.raises(ConfigurationError):
         DimValueLoader(config)

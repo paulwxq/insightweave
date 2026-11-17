@@ -6,26 +6,35 @@ CLI 兼容签名、步骤分流（``StepFilter`` / ``set_current_step()``）与
 步骤记录工厂。
 """
 
+import contextvars
 import logging
 from typing import Optional, Iterable
 
 from services.logging_manager import SCRIPT_PROFILE, configure_logging
 
-
-_CURRENT_STEP: str = "-"
+# doc 10.1 §4.4：step 从进程级全局字符串改为 ContextVar——并行的采集步骤
+# 任务各自持有独立 step 值，互不覆盖；线程池任务须经
+# services.logging_manager.submit_with_context 复制上下文才能继承该值。
+_CURRENT_STEP: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "metaweave_current_step", default="-"
+)
 _STEP_RECORD_FACTORY_INSTALLED: bool = False
 _ORIGINAL_RECORD_FACTORY = logging.getLogRecordFactory()
 
 
-def set_current_step(step: Optional[str]) -> None:
-    """设置当前运行 step（用于按 step 路由日志文件）"""
-    global _CURRENT_STEP
-    _CURRENT_STEP = (step or "-").strip().lower() or "-"
+def set_current_step(step: Optional[str]) -> contextvars.Token:
+    """设置当前运行 step（用于按 step 路由日志文件），返回可恢复的 token。"""
+    return _CURRENT_STEP.set((step or "-").strip().lower() or "-")
+
+
+def reset_current_step(token: contextvars.Token) -> None:
+    """恢复 set 之前的 step 上下文（任务结束时调用，doc 10.1 §4.4）。"""
+    _CURRENT_STEP.reset(token)
 
 
 def get_current_step() -> str:
     """获取当前运行 step（默认 '-'）"""
-    return _CURRENT_STEP
+    return _CURRENT_STEP.get()
 
 
 def _install_step_log_record_factory() -> None:
@@ -64,7 +73,14 @@ class StepFilter(logging.Filter):
         }
 
     def filter(self, record: logging.LogRecord) -> bool:
-        return get_current_step() in self.allowed_steps
+        # doc 10.2 §7.5：改用记录工厂注入的 record.step（记录创建时刻的
+        # 上下文快照），不再实时读取当前上下文——并行任务交错时实时读取
+        # 会把日志路由到错误步骤文件。工厂未安装（record 无 step）时回退
+        # 实时读取，保持 API 配置等场景行为不变。
+        step = getattr(record, "step", None)
+        if step is None:
+            step = get_current_step()
+        return step in self.allowed_steps
 
 
 def setup_metaweave_logging(config_path: Optional[str] = None) -> None:

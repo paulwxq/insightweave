@@ -56,7 +56,19 @@ def svc():
     return ResultAnalysisService(None, results=None)
 
 
-CTX = SimpleNamespace(datasource_id="ds1")
+# R2-09：内部分析服务入口要求有效运行持锁凭据；本文件直调 svc.analyze，
+# 用独立会话的进程内 guard 提供真实凭据（不与 db_agent_context 的 s-test
+# 冲突）。其余私有方法单测仍按原语义直接调用。
+from src.modules.db_deepagent.persistence.session_guard import (  # noqa: E402
+    acquire_memory_lease,
+)
+
+_ANALYSIS_TEST_LEASE = acquire_memory_lease("s-result-analysis-svc-tests")
+CTX = SimpleNamespace(
+    datasource_id="ds1",
+    session_id="s-result-analysis-svc-tests",
+    session_guard_lease=_ANALYSIS_TEST_LEASE,
+)
 
 
 def _no_pushdown(*_a, **_k):

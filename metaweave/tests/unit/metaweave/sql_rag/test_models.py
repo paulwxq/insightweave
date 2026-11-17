@@ -16,9 +16,7 @@ class TestQuestionSQLPair:
         assert p.tables == []
 
     def test_with_domain_and_tables(self):
-        p = QuestionSQLPair(
-            question="Q", sql="S", domain="财务", tables=["t1", "t2"]
-        )
+        p = QuestionSQLPair(question="Q", sql="S", domain="财务", tables=["t1", "t2"])
         assert p.domain == "财务"
         assert p.tables == ["t1", "t2"]
 

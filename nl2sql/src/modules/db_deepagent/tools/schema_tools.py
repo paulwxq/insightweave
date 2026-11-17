@@ -29,8 +29,8 @@ from src.modules.db_deepagent.services import DbAgentServices
 from src.modules.db_deepagent.state import DbDeepAgentState
 from src.modules.db_deepagent.tools._envelope import (
     error_envelope,
-    finalize_output,
     format_tool_validation_error,
+    serialize_tool_output,
     tool_command,
 )
 from src.tools.schema_retrieval.table_names import to_display_name
@@ -64,24 +64,6 @@ class RuntimeToolArgs(StrictToolArgs):
 def _validation_error(exc) -> str:
     """handle_validation_error 回调（§7.1）：只含字段路径与错误类型，不回显输入值。"""
     return format_tool_validation_error(exc)
-
-
-def _merge_warnings(content: str, extra: list[str], *, dedupe: bool = False) -> str:
-    """把 finalize_output 产生的截短 warning 并回返回包。
-
-    整体截断（hard truncate）时文本已不是合法 JSON，无法并回——此时文本已达
-    上限，直接原样返回（截断 warning 已在 finalize_output 内部计入 extra，
-    模型仍可从整体截断的表现感知）。
-    """
-    if not extra:
-        return content
-    try:
-        payload = json.loads(content)
-    except json.JSONDecodeError:
-        return content
-    merged = payload["warnings"] + extra
-    payload["warnings"] = sorted(set(merged)) if dedupe else merged
-    return json.dumps(payload, ensure_ascii=False)
 
 
 def _attach_validation_handler(t) -> None:
@@ -273,15 +255,13 @@ def make_search_schema_tool(services: DbAgentServices):
         status_empty = not any(
             data.get(k) for k in ("tables", "columns", "dim_values", "sql_examples")
         )
-        content, finalize_warnings = finalize_output(
+        content = serialize_tool_output(
             {
                 "status": "empty" if status_empty else "ok",
                 "data": data,
                 "warnings": warnings,
-            },
-            services.config.results.max_tool_output_chars,
+            }
         )
-        content = _merge_warnings(content, finalize_warnings)
         return tool_command(
             content,
             runtime.tool_call_id or "",
@@ -350,15 +330,18 @@ def make_inspect_tables_tool(services: DbAgentServices):
                         "message": type(exc).__name__,
                     }
                 )
-        content, finalize_warnings = finalize_output(
+        # doc 7 §2 步骤 2：直接序列化完整工具结果，不经 finalize_output
+        # 压缩/硬截断；超长内容由 SDK FilesystemMiddleware 按转存阈值写入
+        # 会话文件。indent=2 是按行回读的必要条件，不得改回单行紧凑 JSON。
+        return json.dumps(
             {
                 "status": "ok",
                 "data": {"tables": results},
                 "warnings": sorted(set(all_warnings)),
             },
-            services.config.results.max_tool_output_chars,
+            ensure_ascii=False,
+            indent=2,
         )
-        return _merge_warnings(content, finalize_warnings, dedupe=True)
 
     _attach_validation_handler(inspect_tables)
     return inspect_tables
@@ -484,10 +467,7 @@ def make_plan_joins_tool(services: DbAgentServices):
                 "message": "全部目标查询失败",
                 "retryable": False,
             }
-        content, _ = finalize_output(
-            payload, services.config.results.max_tool_output_chars
-        )
-        return content
+        return serialize_tool_output(payload)
 
     _attach_validation_handler(plan_joins)
     return plan_joins

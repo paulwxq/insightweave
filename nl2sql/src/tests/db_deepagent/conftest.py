@@ -3,16 +3,19 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from types import SimpleNamespace
 from datetime import date, datetime
 from decimal import Decimal
+from types import SimpleNamespace
 from typing import Any
 from zoneinfo import ZoneInfo
 
 import pytest
+from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.outputs import ChatGeneration, ChatResult
 from langgraph.runtime import Runtime
 from langgraph.types import Command
+from pydantic import Field
 
 from src.modules.db_deepagent.config import DbAgentConfig, load_db_agent_config
 from src.modules.db_deepagent.context import DbAgentContext
@@ -27,6 +30,68 @@ from src.modules.db_deepagent.services.sql_pipeline import SqlPipeline
 from src.modules.db_deepagent.services.sql_validation import DbSqlValidator
 from src.modules.db_deepagent.services.table_catalog import TableCatalog
 from src.modules.db_deepagent.services.time_resolver import TimeResolver
+
+
+# 测试统一使用的来源绑定（doc 5.1 §1 短 ID：服务/会话绑定 source_id 的
+# 假数据源 A；双源用例另用 TEST_SOURCE_ID_B 区分同名对象）
+class ScriptedTimeModel(BaseChatModel):
+    """doc 16 测试用可编程 flash 模型：按 source_text 查脚本返回 JSON。
+
+    真实 BaseChatModel 子类——metadata/回调链路与生产一致；未命中脚本时
+    返回 default（固定月区间），供既有工具测试离线使用。
+    """
+
+    script: dict = Field(default_factory=dict)
+    default_response: str = (
+        '{"status":"ok","start":"2026-10-01","end":"2026-11-01","grain":"month",'
+        '"interpretation":"固定测试区间（conftest 默认）","clarification_question":null}'
+    )
+
+    @property
+    def _llm_type(self) -> str:
+        return "scripted-time-test"
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        import json as _json
+
+        source = ""
+        try:
+            payload = _json.loads(messages[-1].content)
+            source = str(payload.get("source_text") or "")
+        except Exception:  # noqa: BLE001（测试假模型容错）
+            source = ""
+        content = self.script.get(source, self.default_response)
+        return ChatResult(
+            generations=[ChatGeneration(message=AIMessage(content=content))]
+        )
+
+
+_DEFAULT_TIME_SCRIPT = {
+    "2026年9月": (
+        '{"status":"ok","start":"2026-09-01","end":"2026-10-01","grain":"month",'
+        '"interpretation":"2026年9月整月（conftest 脚本）","clarification_question":null}'
+    ),
+    "2026年10月1日之前，不含当天": (
+        '{"status":"ok","start":null,"end":"2026-10-01","grain":"day",'
+        '"interpretation":"单边：不含 10-01 当天（conftest 脚本）","clarification_question":null}'
+    ),
+}
+
+
+def fake_time_resolver(script: dict | None = None) -> TimeResolver:
+    """离线 LLM 版时间解析器（doc 16 §8：测试不调真实 flash）。
+
+    自带默认脚本覆盖既有工具测试的两条原文；调用方可传 script 覆盖或扩展。
+    """
+    merged = {**_DEFAULT_TIME_SCRIPT, **(script or {})}
+    return TimeResolver(
+        ScriptedTimeModel(script=merged),
+        "TEST-SYSTEM-PROMPT（conftest 假解析器，不加载真实提示词文件）",
+    )
+
+
+TEST_SOURCE_ID = "db_src_1"
+TEST_SOURCE_ID_B = "db_src_2"
 
 
 @pytest.fixture(scope="session")
@@ -168,13 +233,25 @@ def fake_services(
         catalog=TableCatalog(db_agent_config, fake_milvus, fake_business_db),
         join_graph=FakeJoinGraph(),
         embedding_release={},
+        source_id=TEST_SOURCE_ID,
     )
 
 
 @pytest.fixture()
-def db_agent_context() -> DbAgentContext:
-    """固定字段的运行上下文（时钟对齐 §7.5 固定时钟 2026-10-13 12:00+08）"""
-    return DbAgentContext(
+def db_agent_context():
+    """固定字段的运行上下文（时钟对齐 §7.5 固定时钟 2026-10-13 12:00+08）。
+
+    doc 6.3 §6.5：附带进程内会话守卫租约（生产 ctx 由 Runner 构造时注入；
+    teardown 释放，不跨用例泄漏）。
+    """
+    from src.modules.db_deepagent.persistence.session_guard import (
+        acquire_memory_lease,
+        release_memory_lease,
+    )
+
+    lease = acquire_memory_lease("s-test")
+    assert lease is not None, "测试会话锁被前一用例占用"
+    yield DbAgentContext(
         session_id="s-test",
         thread_id="t-test",
         request_id="req-test",
@@ -186,7 +263,9 @@ def db_agent_context() -> DbAgentContext:
         user_texts=("测试问题",),
         carried_evidence=(),
         deadline_monotonic=0.0,
+        session_guard_lease=lease,
     )
+    release_memory_lease(lease)
 
 
 # ============================================================================
@@ -336,6 +415,92 @@ def pipeline_stack(db_agent_config: DbAgentConfig, tmp_path):
     return pipeline, db, results, budget, cfg
 
 
+# ============================================================================
+# 任务账本构造器（doc 6.3 测试共用）
+# ============================================================================
+
+
+def make_task_record(
+    run_id: str,
+    sub_task_id: str,
+    revision: int,
+    *,
+    status: str = "pending",
+    content: str = "业务任务",
+    dependencies: list[dict] | None = None,
+    evidence_ids: list[str] | None = None,
+    reason_code: str | None = None,
+    reason: str | None = None,
+    clarification_question: str | None = None,
+    session_id: str = "s-test",
+    thread_id: str = "t-test",
+    request_id: str = "req-test",
+    extra: dict | None = None,
+) -> dict:
+    """构造 SubTaskRecord 测试副本（键由 make_task_state 统一编码）。"""
+    record: dict = {
+        "session_id": session_id,
+        "thread_id": thread_id,
+        "request_id": request_id,
+        "run_id": run_id,
+        "sub_task_id": sub_task_id,
+        "revision": revision,
+        "content": content,
+        "dependencies": list(dependencies or []),
+        "status": status,
+        "evidence_ids": list(evidence_ids or []),
+        "creation_operation": {
+            "op": "add",
+            "sub_task_id": sub_task_id,
+            "content": content,
+            "dependencies": list(dependencies or []),
+        },
+        "failure_refs": [],
+        "decision_source": "agent",
+        "created_at": "2026-11-13T10:00:00+08:00",
+        "updated_at": "2026-11-13T10:00:00+08:00",
+        "tool_call_id": "tc-task",
+    }
+    if status in ("failed", "needs_clarification"):
+        record["reason_code"] = reason_code
+        record["reason"] = reason
+    if status == "needs_clarification":
+        record["clarification_question"] = clarification_question
+    if extra:
+        record.update(extra)
+    return record
+
+
+def make_task_state(
+    records: list[dict],
+    *,
+    plan_version: int = 1,
+) -> tuple[dict, dict]:
+    """任务记录列表 → (db_sub_tasks, db_task_plans) 状态段。
+
+    run_id 取自首条记录（空列表返回空段）。
+    """
+    from src.modules.db_deepagent.state import task_ledger_key
+
+    sub_tasks = {
+        task_ledger_key(r["run_id"], r["sub_task_id"], r["revision"]): r
+        for r in records
+    }
+    plans: dict = {}
+    if records and plan_version:
+        first = records[0]
+        plans[first["run_id"]] = {
+            "session_id": first["session_id"],
+            "thread_id": first["thread_id"],
+            "request_id": first["request_id"],
+            "run_id": first["run_id"],
+            "plan_version": plan_version,
+            "updated_at": "2026-11-13T10:00:00+08:00",
+            "tool_call_id": "tc-task",
+        }
+    return {"db_sub_tasks": sub_tasks, "db_task_plans": plans}
+
+
 @pytest.fixture()
 def guard_services(pipeline_stack, db_agent_config: DbAgentConfig) -> DbAgentServices:
     """带步骤 3 服务栈的工具容器（embedding/milvus/catalog 未用，置 None）"""
@@ -348,11 +513,12 @@ def guard_services(pipeline_stack, db_agent_config: DbAgentConfig) -> DbAgentSer
         catalog=None,  # type: ignore[arg-type]
         join_graph=None,  # type: ignore[arg-type]
         embedding_release={},
+        source_id=TEST_SOURCE_ID,
         guard=SqlEvidenceGuard(
             db_agent_config.validation.guard, _db, DimensionProbeBuilder()
         ),
         pipeline=pipeline,
-        time_resolver=TimeResolver(),
+        time_resolver=fake_time_resolver(),
         probe=DimensionProbeBuilder(),
         results=results,
         analysis=_result_analysis(db_agent_config, results),
@@ -369,6 +535,32 @@ def _result_analysis(cfg, results):
 # ============================================================================
 # 步骤 4 假件（装配／Runner 测试）
 # ============================================================================
+
+
+class ScriptedChatModel(BaseChatModel):
+    """受控假模型：顺序返回脚本响应；支持 bind_tools（返回自身）。
+
+    不做真实模型调用；供真实 SDK 中间件栈（Summarization／ModelRefusal）
+    消费，驱动真实图路径（doc 1 §4.4／§6.4 专项）。
+    """
+
+    model_name: str = "scripted-fake"
+    responses: list = Field(default_factory=list)
+
+    @property
+    def _llm_type(self) -> str:
+        return "scripted-fake"
+
+    def bind_tools(self, tools, **kwargs):
+        return self
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        index = min(getattr(self, "_cursor", 0), len(self.responses) - 1)
+        response = self.responses[index]
+        object.__setattr__(self, "_cursor", getattr(self, "_cursor", 0) + 1)
+        if isinstance(response, str):
+            response = AIMessage(content=response)
+        return ChatResult(generations=[ChatGeneration(message=response)])
 
 
 class FakeAgent:
@@ -389,7 +581,9 @@ class FakeAgent:
         if self.invoke_side_effect is not None:
             raise self.invoke_side_effect
         if context is not None:
-            self.state_values = _remap_run_id(self.state_values, context.run_id)
+            self.state_values = _remap_run_id(
+                self.state_values, context.run_id, context.request_id
+            )
         return {"messages": self.state_values.get("messages", [])}
 
     def get_state(self, config):
@@ -414,19 +608,69 @@ class FakeAgent:
         return snapshot
 
 
-def _remap_run_id(state: dict[str, Any], run_id: str) -> dict[str, Any]:
-    """把假状态里的占位 run_id（run-x）改写为实际运行，账本键随之对齐。"""
+def _remap_run_id(
+    state: dict[str, Any], run_id: str, request_id: str | None = None
+) -> dict[str, Any]:
+    """把假状态里的占位 run_id（run-x）改写为实际运行，账本键随之对齐。
+
+    request_id 一并改写（doc 6.2 §7.2.1 运行归属校验）：模拟正常提交工具
+    用 ctx.run_id/ctx.request_id 写入的记录；不传时保持原值（用于构造归属
+    不符的用例）。doc 6.3：任务账本键 (run_id, sub_task_id, revision) 与
+    计划键同步重编码。
+    """
     import copy
+
+    from src.modules.db_deepagent.state import (
+        parse_task_ledger_key,
+        task_ledger_key,
+    )
 
     values = copy.deepcopy(state)
     for key in ("db_executions", "db_analyses"):
         for record in values.get(key) or []:
             if record.get("run_id") == "run-x":
                 record["run_id"] = run_id
+            # 结构化输入血缘/直接来源中的同轮身份由服务端按实际 run_id 写入；
+            # 占位 run-x 的引用需同步改写，跨 run 历史来源（其他 run_id）
+            # 保持原值（R2-02：完整身份寻址，不猜测归属）。
+            for entry in record.get("input_result_refs") or []:
+                if not isinstance(entry, dict):
+                    continue
+                for sub in ("evidence_ref", "source_task_ref"):
+                    ref = entry.get(sub)
+                    if isinstance(ref, dict) and ref.get("run_id") == "run-x":
+                        ref["run_id"] = run_id
+            direct = record.get("direct_reuse_from")
+            if isinstance(direct, dict):
+                for sub in ("evidence_ref", "source_task_ref"):
+                    ref = direct.get(sub)
+                    if isinstance(ref, dict) and ref.get("run_id") == "run-x":
+                        ref["run_id"] = run_id
     answers = values.get("db_final_answers") or {}
     if "run-x" in answers:
         answers[run_id] = answers.pop("run-x")
         answers[run_id]["run_id"] = run_id
+        if request_id is not None:
+            answers[run_id]["request_id"] = request_id
+    sub_tasks = values.get("db_sub_tasks") or {}
+    if sub_tasks:
+        remapped = {}
+        for key, record in sub_tasks.items():
+            parsed = parse_task_ledger_key(key)
+            if parsed is not None and parsed[0] == "run-x":
+                record = {**record, "run_id": run_id}
+                if request_id is not None:
+                    record = {**record, "request_id": request_id}
+                key = task_ledger_key(run_id, parsed[1], parsed[2])
+            remapped[key] = record
+        values["db_sub_tasks"] = remapped
+    plans = values.get("db_task_plans") or {}
+    if "run-x" in plans:
+        record = {**plans["run-x"], "run_id": run_id}
+        if request_id is not None:
+            record = {**record, "request_id": request_id}
+        plans[run_id] = record
+        del plans["run-x"]
     return values
 
 
@@ -478,8 +722,28 @@ class FakeStore:
 
 
 @pytest.fixture()
-def assembly_services(db_agent_config: DbAgentConfig, tmp_path) -> DbAgentServices:
-    """装配测试服务栈：假后端 + 临时工作区 + 步骤 3 服务（内存持久化）。"""
+def assembly_services(
+    db_agent_config: DbAgentConfig, tmp_path, monkeypatch
+) -> DbAgentServices:
+    """装配测试服务栈：假后端 + 临时工作区 + 步骤 3 服务（内存持久化）。
+
+    doc 5.1 §5.1：离线装配一律注入假摘要模型（每次新建、名称不同于假主
+    模型），避免现有离线测试构造/调用真实 Flash。仅作用于本 fixture 的
+    使用者，不设全局 autouse，不影响 --run-llm 真实模型集成测试。
+    """
+    import src.modules.db_deepagent.agent as agent_mod
+
+    def _fake_build_summarizer_model(_cfg):
+        return ScriptedChatModel(
+            model_name="fake-flash-summarizer",
+            responses=["历史业务口径摘要（假摘要模型）：时间范围与统计口径已概括。"],
+            metadata={"dbda_call_kind": "summarization"},
+        )
+
+    monkeypatch.setattr(
+        agent_mod, "build_summarizer_model", _fake_build_summarizer_model
+    )
+
     from src.modules.db_deepagent.services.sql_validation import DbSqlValidator
 
     cfg = db_agent_config.model_copy(deep=True)
@@ -511,10 +775,11 @@ def assembly_services(db_agent_config: DbAgentConfig, tmp_path) -> DbAgentServic
         catalog=TableCatalog(cfg, FakeMilvus(), db),
         join_graph=FakeJoinGraph(),  # type: ignore[arg-type]
         embedding_release={},
+        source_id=TEST_SOURCE_ID,
         validator=validator,
         guard=guard,
         pipeline=pipeline,
-        time_resolver=TimeResolver(),
+        time_resolver=fake_time_resolver(),
         probe=DimensionProbeBuilder(),
         results=results,
         analysis=ResultAnalysisService(cfg, results),

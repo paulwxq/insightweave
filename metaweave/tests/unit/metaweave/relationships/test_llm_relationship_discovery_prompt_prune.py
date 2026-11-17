@@ -1,4 +1,6 @@
-from metaweave.core.relationships.llm_relationship_discovery import LLMRelationshipDiscovery
+from metaweave.core.relationships.llm_relationship_discovery import (
+    LLMRelationshipDiscovery,
+)
 
 
 def test_build_prompt_prunes_column_profile_fields():

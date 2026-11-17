@@ -1,7 +1,8 @@
 """SQLExampleLoader 受管口径单元测试（doc 25.2 §4/§7）。
 
 契约要点：`input_dir` 目录即输入（顶层非忽略 `*.json` 合并）、
-`source_id`/`publish_id` 注入、`example_id` 前缀为 source_id、
+`source_id`（db_src_N 短 ID）/`publish_run_id`（发布运行 UUID）注入、
+`example_id` 前缀为 source_id、
 按源整份替换（upsert + 全部成功后 delete_by_expr）、
 结果规则四计数互斥（提前失败路径允许和小于 total）。
 """
@@ -20,8 +21,8 @@ from metaweave.core.sql_rag.loader import (
     collect_sql_example_input_files,
 )
 
-SOURCE_ID = "11111111-2222-3333-4444-555555555555"
-PUBLISH_ID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeffff"
+SOURCE_ID = "db_src_1"
+PUBLISH_RUN_ID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeffff"
 
 
 class FakeEmbeddingService:
@@ -128,7 +129,7 @@ def _make_loader(
     pairs=None,
     files: Dict[str, Any] | None = None,
     source_id: Any = SOURCE_ID,
-    publish_id: Any = PUBLISH_ID,
+    publish_run_id: Any = PUBLISH_RUN_ID,
     batch_size: Any = 10,
     with_database: bool = True,
     input_dir: Path | None = None,
@@ -159,7 +160,7 @@ def _make_loader(
         milvus_client_cls=FakeMilvusClient,
         embedding_service_cls=FakeEmbeddingService,
         source_id=source_id,
-        publish_id=publish_id,
+        publish_run_id=publish_run_id,
     )
     return loader
 
@@ -192,7 +193,7 @@ class TestSchema:
         assert names == [
             "example_id",
             "source_id",
-            "publish_id",
+            "publish_run_id",
             "question_sql",
             "embedding",
             "domain",
@@ -202,7 +203,7 @@ class TestSchema:
         assert by_name["example_id"]["is_primary"] is True
         assert by_name["example_id"]["auto_id"] is False
         assert by_name["source_id"]["max_length"] == 36
-        assert by_name["publish_id"]["max_length"] == 36
+        assert by_name["publish_run_id"]["max_length"] == 36
         assert by_name["question_sql"]["max_length"] == 16384
         assert by_name["domain"]["max_length"] == 256
 
@@ -239,35 +240,42 @@ class TestComputeExampleId:
 
     def test_different_source_different_id(self):
         id1 = SQLExampleLoader.compute_example_id(SOURCE_ID, "Q", "S")
-        id2 = SQLExampleLoader.compute_example_id(
-            "99999999-2222-3333-4444-555555555555", "Q", "S"
-        )
+        id2 = SQLExampleLoader.compute_example_id("db_src_2", "Q", "S")
         assert id1 != id2
 
-    def test_uuid_object_normalized(self):
-        sid = uuid4()
-        id1 = SQLExampleLoader.compute_example_id(sid, "Q", "S")
-        assert id1 == SQLExampleLoader.compute_example_id(str(sid), "Q", "S")
+    def test_uuid_form_source_id_rejected(self):
+        """断代后 source_id 为短 ID：旧 UUID 形态不再是合法身份。"""
+        with pytest.raises(ValueError):
+            SQLExampleLoader.compute_example_id(
+                "11111111-2222-3333-4444-555555555555", "Q", "S"
+            )
 
 
-class TestUuidNormalization:
-    def test_uuid_object_accepted_and_stringified(self, tmp_path):
-        sid, pid = uuid4(), uuid4()
-        loader = _make_loader(tmp_path, source_id=sid, publish_id=pid)
+class TestIdNormalization:
+    def test_publish_uuid_object_accepted_and_stringified(self, tmp_path):
+        pid = uuid4()
+        loader = _make_loader(tmp_path, source_id=SOURCE_ID, publish_run_id=pid)
         assert loader.validate()
         result = loader.load()
         assert result["success"]
         rows = loader._milvus_client.upsert_calls[0]
-        assert all(r["source_id"] == str(sid) for r in rows)
-        assert all(r["publish_id"] == str(pid) for r in rows)
-        assert all(r["example_id"].startswith(f"{sid}:") for r in rows)
+        assert all(r["source_id"] == SOURCE_ID for r in rows)
+        assert all(r["publish_run_id"] == str(pid) for r in rows)
+        assert all(r["example_id"].startswith(f"{SOURCE_ID}:") for r in rows)
 
     def test_invalid_id_string_rejected(self, tmp_path):
-        loader = _make_loader(tmp_path, source_id="not-a-uuid")
+        loader = _make_loader(tmp_path, source_id="not-a-short-id")
+        assert not loader.validate()
+
+    def test_uuid_form_source_id_rejected_in_constructor(self, tmp_path):
+        """旧 UUID 形态的 source_id 不再合法（doc 6 §1 短 ID 断代）。"""
+        loader = _make_loader(
+            tmp_path, source_id="11111111-2222-3333-4444-555555555555"
+        )
         assert not loader.validate()
 
     def test_missing_ids_rejected(self, tmp_path):
-        loader = _make_loader(tmp_path, source_id=None, publish_id=PUBLISH_ID)
+        loader = _make_loader(tmp_path, source_id=None, publish_run_id=PUBLISH_RUN_ID)
         assert not loader.validate()
 
 
@@ -343,7 +351,7 @@ class TestInputDirCaliber:
             milvus_client_cls=FakeMilvusClient,
             embedding_service_cls=FakeEmbeddingService,
             source_id=SOURCE_ID,
-            publish_id=PUBLISH_ID,
+            publish_run_id=PUBLISH_RUN_ID,
         )
         assert not loader.validate()
 
@@ -365,7 +373,7 @@ class TestInputDirCaliber:
             milvus_client_cls=FakeMilvusClient,
             embedding_service_cls=FakeEmbeddingService,
             source_id=SOURCE_ID,
-            publish_id=PUBLISH_ID,
+            publish_run_id=PUBLISH_RUN_ID,
         )
         assert loader.validate()
         result = loader.load()
@@ -386,7 +394,7 @@ class TestReplaceSemantics:
         assert result["replacement_started"] is True
         milvus = loader._milvus_client
         assert milvus.delete_calls == [
-            f'source_id == "{SOURCE_ID}" and publish_id != "{PUBLISH_ID}"'
+            f'source_id == "{SOURCE_ID}" and publish_run_id != "{PUBLISH_RUN_ID}"'
         ]
 
     def test_identical_pairs_share_example_id(self, tmp_path):
@@ -796,7 +804,7 @@ class TestBatchSizeValidation:
             milvus_client_cls=FakeMilvusClient,
             embedding_service_cls=FakeEmbeddingService,
             source_id=SOURCE_ID,
-            publish_id=PUBLISH_ID,
+            publish_run_id=PUBLISH_RUN_ID,
         )
         assert loader.validate()
 
@@ -825,7 +833,7 @@ class TestBatchSizeValidation:
             milvus_client_cls=FakeMilvusClient,
             embedding_service_cls=FakeEmbeddingService,
             source_id=SOURCE_ID,
-            publish_id=PUBLISH_ID,
+            publish_run_id=PUBLISH_RUN_ID,
         )
         assert loader.input_dir == ""
         loader._embedding_service = FakeEmbeddingService({})

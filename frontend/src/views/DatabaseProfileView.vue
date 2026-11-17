@@ -5,6 +5,7 @@ import { getAssetProfile } from '../api/assets'
 import { displayDate } from '../api/format'
 import type { AssetProfileDetail, AssetProfileResponse } from '../api/types'
 import { formatSize } from '../utils/format'
+import PageBreadcrumbs from '../components/PageBreadcrumbs.vue'
 
 const PAGE_SIZE = 10
 const route = useRoute()
@@ -47,13 +48,6 @@ function versionText(detail: AssetProfileDetail): string {
   return detail.server_version ? `${detail.db_type_label} ${detail.server_version}` : detail.db_type_label
 }
 
-function failedText(): string {
-  const publish = payload.value?.publish
-  if (!publish) return '最近一次发布失败'
-  const summary = publish.error_summary ?? ''
-  return `最近一次发布失败（${displayDate(publish.published_at)}）：${summary}`
-}
-
 async function reload() {
   loading.value = true
   error.value = ''
@@ -71,6 +65,12 @@ async function reload() {
 
 <template>
   <div class="ds-page profile-page">
+    <PageBreadcrumbs
+      :segments="[
+        { label: '数据资产', to: '/data-assets' },
+        { label: payload?.source.display_name ?? '数据源' },
+      ]"
+    />
     <header class="ds-header">
       <div class="ds-title">
         <span class="ds-kicker">DATABASE PROFILE</span>
@@ -82,7 +82,6 @@ async function reload() {
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 12H5" /><path d="m12 19-7-7 7-7" /></svg>
           返回
         </RouterLink>
-        <RouterLink :to="`/data-sources/${sourceId}/collection-jobs/new`" class="button button-primary">重新采集画像</RouterLink>
       </div>
     </header>
 
@@ -93,16 +92,10 @@ async function reload() {
     </div>
     <div v-else-if="payload?.state === 'not_published'" class="state-block empty-state">
       <h3>尚未发布数据库画像</h3>
-      <p>请先完成采集并发布数据库画像。</p>
-    </div>
-    <div v-else-if="payload?.state === 'failed'" class="state-block error-state">
-      <p>{{ failedText() }}</p>
-    </div>
-    <div v-else-if="payload?.state === 'inconsistent'" class="state-block error-state">
-      <p>画像数据不一致，请联系管理员</p>
+      <p>请先在工作区内完成采集并发布数据库画像（db 步骤）。</p>
     </div>
     <template v-else-if="payload?.state === 'ready' && profile">
-      <section class="profile-facts" :key="payload.publish?.publish_id">
+      <section class="profile-facts" :key="payload.publish?.publish_run_id">
         <div class="profile-fact"><small>数据源名称</small><strong>{{ payload.source.display_name }}</strong></div>
         <div class="profile-fact"><small>数据库名称</small><strong>{{ profile.db_name }}</strong></div>
         <div class="profile-fact"><small>连接信息</small><strong>{{ profile.host }}:{{ profile.port }}</strong></div>
@@ -224,3 +217,10 @@ async function reload() {
     </template>
   </div>
 </template>
+
+<style scoped>
+/* doc 9 验收统一：返回按钮顶对齐标题首行（ds-header 全局为 flex-end 且与数据源列表共用，故本页局部覆盖） */
+.ds-header {
+  align-items: flex-start;
+}
+</style>

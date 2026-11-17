@@ -1,15 +1,22 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { deleteDataSource, getDataSource, setDataSourceActivation } from '../api/dataSources'
+import { getDataSource, setDataSourceActivation } from '../api/dataSources'
 import { displayDate } from '../api/format'
 import { ApiError } from '../api/http'
 import type { DataSourceListItem } from '../api/types'
 import DeactivateSourceDialog from '../components/DeactivateSourceDialog.vue'
 import DeleteSourceDialog from '../components/DeleteSourceDialog.vue'
+import DeleteResourceDialog from '../components/DeleteResourceDialog.vue'
+import PageBreadcrumbs from '../components/PageBreadcrumbs.vue'
+import type { DeletionTaskSummary } from '../api/types'
+import { resolveBack, withFrom } from '../navigation/from'
 
 const route = useRoute()
 const router = useRouter()
+
+/** doc 9 §7.4：数据源详情不认来源，返回默认上一级（数据源列表） */
+const backSpec = computed(() => resolveBack('source-detail', null, {}))
 const sourceId = computed(() =>
   typeof route.params.sourceId === 'string' ? route.params.sourceId : '',
 )
@@ -17,8 +24,9 @@ const source = ref<DataSourceListItem | null>(null)
 const loading = ref(true)
 const loadError = ref('')
 const confirmOpen = ref(false)
-const deleteBusy = ref(false)
-const deleteError = ref('')
+const clearOpen = ref(false)
+// doc 8.1 §7.0：从源响应的 deletion_task 找回未解决任务（刷新后同样适用）
+const resumeTask = ref<DeletionTaskSummary | null>(null)
 const activationOpen = ref(false)
 const activationBusy = ref(false)
 const activationError = ref('')
@@ -52,27 +60,38 @@ async function load() {
 }
 
 function openDelete() {
-  deleteBusy.value = false
-  deleteError.value = ''
+  resumeTask.value = null
   confirmOpen.value = true
 }
 
-async function confirmDelete(deleteOutput: boolean) {
-  if (deleteBusy.value || !source.value) return
-  deleteBusy.value = true
-  deleteError.value = ''
-  try {
-    await deleteDataSource(source.value.source_id, deleteOutput)
+function openClear() {
+  resumeTask.value = null
+  clearOpen.value = true
+}
+
+function openTaskProgress(task: DeletionTaskSummary) {
+  if (task.action === 'delete_workspace' && task.workspace_id) {
+    resumeTask.value = task
+    return
+  }
+  resumeTask.value = task
+  if (task.action === 'clear_source_knowledge') {
+    clearOpen.value = true
+  } else {
+    confirmOpen.value = true
+  }
+}
+
+/** 弹窗自身负责提交与任务轮询；完成（删除/清理成功）后刷新或离开。 */
+async function onDeleteDone(action: string) {
+  confirmOpen.value = false
+  clearOpen.value = false
+  // doc 8.1 §7.0：工作区任务弹窗由 resumeTask 驱动，成功后一并关闭
+  resumeTask.value = null
+  if (action === 'delete') {
     await router.push('/data-sources')
-  } catch (error) {
-    if (error instanceof ApiError && error.code === 'not_found') {
-      confirmOpen.value = false
-      await leaveMissing()
-      return
-    }
-    deleteError.value = error instanceof Error ? error.message : '删除失败。'
-  } finally {
-    deleteBusy.value = false
+  } else {
+    await load()
   }
 }
 
@@ -112,22 +131,34 @@ watch(sourceId, () => void load(), { immediate: true })
 
 <template>
   <div class="ds-detail">
-    <RouterLink to="/data-sources" class="ds-back">← 返回数据源管理</RouterLink>
     <div v-if="loading" class="state-block" role="status">正在读取数据源…</div>
     <div v-else-if="loadError" class="state-block error-state" role="alert">
       <p>{{ loadError }}</p>
       <button type="button" class="button button-outline" @click="load">重试</button>
-      <RouterLink to="/data-sources" class="button button-outline">返回数据源管理</RouterLink>
+      <RouterLink to="/data-sources" class="ds-jobs-back">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 12H5" /><path d="m12 19-7-7 7-7" /></svg>
+          返回
+        </RouterLink>
     </div>
     <template v-else-if="source">
+      <PageBreadcrumbs
+        :segments="[
+          { label: '数据源管理', to: '/data-sources' },
+          { label: source.display_name },
+        ]"
+      />
       <header class="ds-detail-header">
         <div class="ds-title">
           <span class="ds-kicker">DATA SOURCE</span>
           <h1>{{ source.display_name }}</h1>
           <p class="ds-source-id">Source ID: {{ source.source_id }}</p>
-          <p class="ds-lead">已登记的连接信息，只可查看。</p>
+          <p class="ds-lead">已登记的连接信息，只可查看；采集与发布作业在工作区内管理。</p>
         </div>
         <div class="ds-detail-actions">
+          <RouterLink class="ds-jobs-back" :to="backSpec.target!">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 12H5" /><path d="m12 19-7-7 7-7" /></svg>
+            {{ backSpec.label }}
+          </RouterLink>
           <button
             type="button"
             class="ds-enable"
@@ -140,6 +171,15 @@ watch(sourceId, () => void load(), { immediate: true })
             <span class="ds-switch" :class="{ off: !source.is_active }" aria-hidden="true"><span></span></span>
           </button>
           <p v-if="activationError && !activationOpen" class="status-message" role="alert">{{ activationError }}</p>
+          <button
+            v-if="source.deletion_task"
+            type="button"
+            class="ds-danger"
+            @click="openTaskProgress(source.deletion_task)"
+          >
+            {{ source.deletion_task.status === "failed" ? "处理失败任务" : "查看删除/清理进度" }}
+          </button>
+          <button type="button" class="ds-danger" @click="openClear">清理已发布数据</button>
           <button type="button" class="ds-danger" @click="openDelete">删除</button>
           <RouterLink class="ds-edit" :to="`/data-sources/${source.source_id}/edit`">修改</RouterLink>
         </div>
@@ -207,10 +247,30 @@ watch(sourceId, () => void load(), { immediate: true })
         <p class="ds-note">{{ source.description || '未填写' }}</p>
       </section>
 
+      <section class="ds-panel">
+        <div class="ds-panel-head">
+          <span class="ds-step">5</span>
+          <div>
+            <h2>工作区</h2>
+            <p>工作区隔离文件产物；同一数据源可有多个工作区，采集与发布作业都保存在工作区内</p>
+          </div>
+        </div>
+        <div class="ws-entry-actions">
+          <RouterLink class="ws-entry-link" :to="withFrom(`/workspaces?source_id=${source.source_id}`, `/data-sources/${source.source_id}`)">
+            <strong>查看该数据源的工作区</strong>
+            <small>进入工作区管理列表（按本数据源过滤）</small>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14" /><path d="m12 5 7 7-7 7" /></svg>
+          </RouterLink>
+          <RouterLink class="ws-entry-link" :to="withFrom(`/workspaces/new?source_id=${source.source_id}`, `/data-sources/${source.source_id}`)">
+            <strong>新建工作区</strong>
+            <small>为本数据源创建新的工作区</small>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14" /><path d="M5 12h14" /></svg>
+          </RouterLink>
+        </div>
+      </section>
+
       <div class="ds-job-links">
         <RouterLink :to="`/data-assets/${source.source_id}/objects`">JSON 对象画像 <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14" /><path d="m12 5 7 7-7 7" /></svg></RouterLink>
-        <RouterLink :to="`/data-sources/${source.source_id}/collection-jobs`">相关数据采集作业 <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14" /><path d="m12 5 7 7-7 7" /></svg></RouterLink>
-        <RouterLink :to="`/data-sources/${source.source_id}/publish-jobs`">相关画像发布作业 <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14" /><path d="m12 5 7 7-7 7" /></svg></RouterLink>
       </div>
     </template>
     <DeactivateSourceDialog
@@ -223,11 +283,75 @@ watch(sourceId, () => void load(), { immediate: true })
     />
     <DeleteSourceDialog
       v-if="confirmOpen && source"
+      :source-id="source.source_id"
       :display-name="source.display_name"
-      :busy="deleteBusy"
-      :error="deleteError"
-      @cancel="confirmOpen = false"
-      @confirm="confirmDelete"
+      :resume-task-id="resumeTask?.action === 'delete_source' ? resumeTask.task_id : undefined"
+      @cancel="confirmOpen = false; resumeTask = null"
+      @done="onDeleteDone"
+    />
+    <DeleteSourceDialog
+      v-if="clearOpen && source"
+      :source-id="source.source_id"
+      :display-name="source.display_name"
+      mode="clear"
+      :resume-task-id="resumeTask?.action === 'clear_source_knowledge' ? resumeTask.task_id : undefined"
+      @cancel="clearOpen = false; resumeTask = null"
+      @done="onDeleteDone"
+    />
+    <DeleteResourceDialog
+      v-if="resumeTask?.action === 'delete_workspace' && resumeTask.workspace_id"
+      kind="workspace"
+      :target-id="resumeTask.workspace_id"
+      :display-name="resumeTask.workspace_id"
+      :resume-task-id="resumeTask.task_id"
+      @cancel="resumeTask = null"
+      @done="onDeleteDone('delete_workspace')"
     />
   </div>
 </template>
+
+<style scoped>
+.ws-entry-actions {
+  display: flex;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+.ws-entry-link {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  border: 1px solid #e1e9f4;
+  border-radius: 12px;
+  background: #fcfdff;
+  padding: 14px 18px;
+  min-width: 240px;
+  color: inherit;
+}
+.ws-entry-link:hover {
+  border-color: #2e7cd6;
+}
+.ws-entry-link strong {
+  color: #17293f;
+  font-size: 14px;
+}
+.ws-entry-link small {
+  color: #66788f;
+  font-size: 11px;
+}
+.ws-entry-link svg {
+  width: 14px;
+  height: 14px;
+  margin-top: 6px;
+  align-self: flex-end;
+  fill: none;
+  stroke: #2e7cd6;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+@media (max-width: 800px) {
+  .ws-entry-actions {
+    flex-direction: column;
+  }
+}
+</style>

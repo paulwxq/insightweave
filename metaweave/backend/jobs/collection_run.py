@@ -1,51 +1,80 @@
-"""从数据源发起采集作业：执行 db 步骤与受管 ddl 步骤（doc 16 §4）。"""
+"""采集运行编排（doc 6 §3、6.2 §6.3、§7.1）。
 
-import asyncio
-from datetime import datetime, timezone
+一次点击（一次请求）= 一个 `collection_run_id`：创建运行时把本次所选步骤
+整组交给现有拓扑排序（`normalize_collection_steps`，算法未改写，仅
+`dim_config` 标识更名为 `dim`），同一事务写入 pending run_info 与每个已选
+步骤的 pending run_step；后台任务只执行本次请求新建的那一个运行，逐步骤
+写状态、采集 marker 与 manifest，最后按 §6.4 汇总整体终态。
+"""
+
+import logging
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from uuid import UUID
 
-from backend.data_sources.db_step_service import DbStepConfigError, run_db_step
+from sqlalchemy.exc import SQLAlchemyError
+
+from backend.data_sources.db_step_service import run_db_step
 from backend.data_sources.ddl_step_service import run_ddl_step
 from backend.data_sources.dim_config_step_service import run_dim_config_step
-from backend.data_sources.domain_step_service import _UNSET, run_domain_step
+from backend.data_sources.domain_step_service import run_domain_step
 from backend.data_sources.json_step_service import run_json_step
 from backend.data_sources.md_step_service import run_md_step
 from backend.data_sources.rel_step_service import run_rel_step
 from backend.data_sources.sql_step_service import run_sql_step
-from backend.data_sources.registration_service import (
-    PlatformUnavailableError,
-    SourceNotFoundError,
-    get_registered_source,
+from backend.data_sources.step_context import (
+    DbStepConfigError,
+    SourceDisabledError,
+    StepOutcome,
+    load_step_context,
 )
-from backend.persistence.platform_db import PlatformSettings
-from metaweave.utils.time_utils import utc_isoformat
-from metaweave.utils.file_utils import resolve_project_path
+from backend.jobs.job_params import (
+    COLLECTION_STEP_PARAMS,
+    COLLECTION_STEPS,
+    StepConfigError,
+)
+from backend.jobs.job_repository import COLLECTION_JOB, get_job, get_revision
+from backend.jobs.manifests import build_input_manifest, build_output_manifest
+from backend.jobs.run_repository import (
+    COLLECTION_RUN,
+    STATUS_BLOCKED,
+    STATUS_FAILED,
+    STATUS_SUCCESS,
+    create_run,
+    finalize_run,
+    finish_step,
+    list_run_steps,
+    mark_run_running,
+    mark_step_running,
+    new_run_id,
+)
+from backend.jobs.run_request import resolve_run_request
+from backend.persistence.platform_db import PlatformSettings, platform_session
+from backend.workspace_files.markers import write_collection_marker
+from backend.workspaces.repository import get_workspace
+from metaweave.core.metadata.execution import set_operation_step
+from metaweave.utils.logger import reset_current_step
+from services.logging_manager import submit_with_context
 
-METADATA_CONFIG = "configs/metadata_config.yaml"
+logger = logging.getLogger("backend.jobs")
+
 DB_STEP = "db"
 DDL_STEP = "ddl"
 JSON_STEP = "json"
 MD_STEP = "md"
 DOMAIN_STEP = "domain"
-DIM_CONFIG_STEP = "dim_config"
+DIM_STEP = "dim"
 REL_STEP = "rel"
 SQL_STEP = "sql"
-_SUPPORTED_STEPS = (
-    DB_STEP,
-    DDL_STEP,
-    JSON_STEP,
-    MD_STEP,
-    DOMAIN_STEP,
-    DIM_CONFIG_STEP,
-    REL_STEP,
-    SQL_STEP,
-)
-_SUPPORTED_STEPS_TEXT = "db、ddl、json、md、domain、dim_config、rel、sql"
-_UNREGISTERED_FAILURES = ("平台库连接或读取失败", "作业状态登记失败")
+_SUPPORTED_STEPS = COLLECTION_STEPS
+_SUPPORTED_STEPS_TEXT = "db、ddl、json、md、domain、dim、rel、sql"
 
 
 class UnsupportedCollectionStepError(ValueError):
     """请求里包含当前还不能执行的步骤，或一个步骤都没选。"""
+
+
+class CollectionRunError(ValueError):
+    """运行创建的受控错误（作业/版本/来源/工作区不满足）。"""
 
 
 def normalize_collection_steps(steps: list[str]) -> list[str]:
@@ -62,27 +91,32 @@ def normalize_collection_steps(steps: list[str]) -> list[str]:
     return _ensure_managed_step_order(chosen)
 
 
-# 受管步骤依赖边（doc 19.1 §3、doc 21.1 §6.2、doc 22.1 §6.2、doc 23.1 §6.2）：
-# 与既有 _move_after 锚点关系一一对应，外加 json→dim_config 与 json→rel、domain→rel；
-# ddl→md 在 json 未选时仍生效。只保留两端都在本次选择内的边。
+# 受管步骤依赖边（doc 6 §3）：与既有拓扑排序锚点关系一一对应，
+# dim_config 标识随断代改造更名为 dim。只保留两端都在本次选择内的边。
 _STEP_DEPS = {
     JSON_STEP: (DDL_STEP,),
     MD_STEP: (DDL_STEP, JSON_STEP),
     DOMAIN_STEP: (MD_STEP,),
-    DIM_CONFIG_STEP: (JSON_STEP,),
+    DIM_STEP: (JSON_STEP,),
     REL_STEP: (JSON_STEP, DOMAIN_STEP),
     SQL_STEP: (MD_STEP, DOMAIN_STEP, REL_STEP),
 }
 
+# doc 10.1 §4.3：本阶段步骤并发上限 2（并行收益与资源占用的取舍），
+# 达到上限时按请求优先级等待空位；后续根据实测调整，不设页面参数。
+_MAX_PARALLEL_STEPS = 2
+
+
+def _same_request_deps(step: str, chosen: set[str]) -> list[str]:
+    """本次选择内的上游依赖（doc 10.1 §4.1：只对同选上游做启动门控）。"""
+    return [dep for dep in _STEP_DEPS.get(step, ()) if dep in chosen]
+
 
 def _ensure_managed_step_order(chosen: list[str]) -> list[str]:
-    """同请求偏序（doc 22.1 §6.2，审核修订 3/4）：拓扑排序。
+    """同请求偏序拓扑排序（既有算法原样保留，doc 6.2 §2.1.1）。
 
     规则：每轮在当前可执行（有效入度为 0）的步骤中，优先选传入顺序最靠前
-    （原始下标最小）者。保证是这条确定性规则而非普遍相对序——阻塞场景下
-    "所有无依赖步对保持相对序"成环不可满足（[md, dim_config, ddl] →
-    [dim_config, ddl, md] 为既定结果）。对既有五步的链式依赖，与连续
-    _move_after 的结果一致（既有排序用例为回归护栏）。
+    （原始下标最小）者。
     """
     position = {step: index for index, step in enumerate(chosen)}
     pending = {
@@ -113,8 +147,8 @@ _BLOCK_MESSAGES = {
     (MD_STEP, DOMAIN_STEP): (
         "本次请求的 MD 未成功，Domain 未启动；如需使用已有 MD 产物，请单独重跑 Domain"
     ),
-    (JSON_STEP, DIM_CONFIG_STEP): (
-        "本次请求的 JSON 未成功，Dim Config 未启动；如需使用已有 JSON 产物，请单独重跑 Dim Config"
+    (JSON_STEP, DIM_STEP): (
+        "本次请求的 JSON 未成功，Dim 未启动；如需使用已有 JSON 产物，请单独重跑 Dim"
     ),
     (JSON_STEP, REL_STEP): (
         "本次请求的 JSON 未成功，Rel 未启动；如需使用已有 JSON 产物，请单独重跑 Rel"
@@ -133,183 +167,637 @@ _BLOCK_MESSAGES = {
 def _blocked_by_same_request_upstream(
     step: str, chosen: list[str], results: list[dict]
 ) -> str | None:
-    """本次请求内上游失败则阻断后继步骤（doc 19.1 §3）。
-
-    只扫描内存 results 的上游 step/status 条目：上游须是本次选择
-    （`chosen`）且已按失败计入结果；MD 在未选 JSON 时改看 DDL。
-    """
-    failed = {row["step"] for row in results if row["status"] == "failed"}
+    """本次请求内上游失败或被阻断，则阻断后继步骤，不能复用旧产物。"""
+    unsuccessful = {
+        row["step"]
+        for row in results
+        if row["status"] in (STATUS_FAILED, STATUS_BLOCKED)
+    }
     pairs = [pair for pair in _BLOCK_MESSAGES if pair[1] == step]
     if step == MD_STEP and JSON_STEP not in chosen:
         pairs = [(DDL_STEP, MD_STEP)]
     elif step == MD_STEP:
         pairs = [(JSON_STEP, MD_STEP)]
     for upstream, _downstream in pairs:
-        if upstream in chosen and upstream in failed:
+        if upstream in chosen and upstream in unsuccessful:
             return _BLOCK_MESSAGES[(upstream, step)]
     return None
 
 
-def _finished_at() -> str:
-    return utc_isoformat(datetime.now(timezone.utc))
+_WORKERS = {
+    DB_STEP: run_db_step,
+    DDL_STEP: run_ddl_step,
+    JSON_STEP: run_json_step,
+    MD_STEP: run_md_step,
+    DOMAIN_STEP: run_domain_step,
+    DIM_STEP: run_dim_config_step,
+    REL_STEP: run_rel_step,
+    SQL_STEP: run_sql_step,
+}
+
+# 步骤产物目录名与步骤标识一致的映射（doc 6 §2）
 
 
-def _response_from_step_result(step: str, result: dict) -> dict:
-    message = str(result.get("message") or "")
-    job_id = result.get("job_id")
-    registered = bool(job_id) and not message.startswith(_UNREGISTERED_FAILURES)
-    if not result.get("success") and not registered:
-        raise PlatformUnavailableError("平台库暂不可用")
-    if not job_id:
-        raise PlatformUnavailableError("平台库暂不可用")
+def _step_output_dir(source_id: str, workspace_id: str, step_name: str):
+    from metaweave.core.clean_targets import resolve_step_output_dir
+
+    return resolve_step_output_dir(source_id, workspace_id, step_name)
+
+
+def _claim_step(
+    settings: PlatformSettings,
+    workspace_id: str,
+    step_name: str,
+    run_id: UUID,
+) -> str | None:
+    """在工作区行锁下原子认领步骤：置 running 前核对同名步骤无其他运行。
+
+    冲突只认 `running` 状态的其他运行——pending 记录可能属于尚未启动或
+    已中断的后台任务，不得永久阻塞后续运行（doc 6.2 §6.3、A25）。工作区
+    行锁使「查冲突 + 认领」对同一工作区的并发运行串行化。
+    返回 None 表示认领成功，否则返回阻断原因。
+    """
+    from sqlalchemy import select
+
+    from backend.persistence.models import (
+        CollectionJobInfo,
+        CollectionRunInfo,
+        CollectionRunStep,
+        WorkspaceInfo,
+    )
+
+    with platform_session(settings) as session:
+        # doc 8.1 §5.1.1：普通查询只用于定位父级，不在此处加锁、不作准入结论
+        from backend.deletion.locks import lock_source_row, lock_workspace_row
+
+        probe = session.get(WorkspaceInfo, workspace_id)
+        if probe is None:
+            return "工作区不存在"
+        source_row = lock_source_row(session, probe.source_id)
+        workspace_row = lock_workspace_row(session, workspace_id)
+        if source_row is None or workspace_row is None:
+            return "数据源或工作区不存在"
+        if workspace_row.source_id != source_row.source_id:
+            return "工作区归属已变化，不能认领步骤"
+        if getattr(source_row, "deletion_state", "active") != "active":
+            return "数据源正在删除或已删除，不能认领步骤"
+        if getattr(workspace_row, "deletion_state", "active") != "active":
+            return "工作区正在删除，不能认领步骤"
+        if step_name in ("json", "domain", "rel"):
+            # doc 8.1 §5.1.1：Rel 发布执行期不再持工作区行锁；其输入
+            # （json/domain/rel 产物）的采集以运行中检查互斥
+            from backend.publishing.repository import rel_publish_in_progress
+
+            if rel_publish_in_progress(session, workspace_id) is not None:
+                return (
+                    "该工作区 Rel 发布正在执行，不能采集 "
+                    f"{step_name}（Rel 发布输入），请稍后重试"
+                )
+        # doc 10.2 §5.2 双向保留：认领复查遇同工作区 pending/running 发布
+        # → 记 blocked，不创建替代运行（pending 也占用：发布可能尚未启动）。
+        from backend.publishing.repository import active_publish_run_for_workspace
+
+        if active_publish_run_for_workspace(session, workspace_id) is not None:
+            return (
+                "该工作区存在进行中的发布，不能认领采集步骤，"
+                "请等待发布完成或收尾后重试"
+            )
+        conflict = session.execute(
+            select(CollectionRunInfo.collection_run_id)
+            .join(
+                CollectionRunStep,
+                CollectionRunStep.collection_run_id
+                == CollectionRunInfo.collection_run_id,
+            )
+            .join(
+                CollectionJobInfo,
+                CollectionJobInfo.collection_job_id
+                == CollectionRunInfo.collection_job_id,
+            )
+            .where(
+                CollectionJobInfo.workspace_id == workspace_id,
+                CollectionRunStep.step_name == step_name,
+                CollectionRunStep.status == "running",
+                CollectionRunInfo.status == "running",
+                CollectionRunInfo.collection_run_id != run_id,
+            )
+            .limit(1)
+        ).scalar_one_or_none()
+        if conflict is not None:
+            session.rollback()
+            return "该工作区此步骤可能正在执行（其他运行占用），请稍后重试"
+        if not mark_step_running(COLLECTION_RUN, session, run_id, step_name):
+            # doc 10.2 §5.3：条件认领失败——已被其他执行者认领或已终结，
+            # 不得执行 worker（与发布侧一致）
+            session.rollback()
+            return "步骤已不在 pending（可能已被认领或已终结），本次不执行"
+        session.commit()
+    return None
+
+
+def create_collection_run(
+    settings: PlatformSettings,
+    job_id: str,
+    *,
+    run_id: UUID | None = None,
+    revision_no: int,
+    mode: str,
+    steps: object,
+    step_config: object,
+) -> dict:
+    """校验并创建一次采集运行（doc 6.2 §6.3 步骤 1–4）；不执行。
+
+    返回 202 载荷与后台执行计划。请求不合法、作业/版本/工作区/来源不满足
+    时不创建运行、不写业务记录。``run_id`` 由创建路由在注册执行者后传入
+    （doc 11 §4.2 提交前注册）；缺省时内部生成，CLI/测试路径行为不变。
+    """
+    from metaweave.utils.source_id import normalize_collection_job_id
+
+    job_id = normalize_collection_job_id(job_id)
+    try:
+        with platform_session(settings) as session:
+            job = get_job(COLLECTION_JOB, session, job_id)
+            if job is None:
+                raise CollectionRunError("采集作业不存在")
+            revision = get_revision(COLLECTION_JOB, session, job_id, revision_no)
+            if revision is None:
+                raise CollectionRunError("引用的作业版本不存在")
+            workspace = get_workspace(session, job.workspace_id)
+            if workspace is None:
+                raise CollectionRunError("工作区不存在")
+            from backend.data_sources.repository import get_db_source
+
+            source = get_db_source(session, workspace.source_id)
+            if source is None:
+                raise CollectionRunError("数据源不存在")
+            if not source.is_active:
+                raise CollectionRunError("数据源已禁用，不能发起采集")
+            # doc 8.1 §5.1.1：源 → 工作区 → 作业加锁，锁内经完整层级守卫复查
+            # （作业/工作区/源已删 410、删除中 409、知识清理冻结 409）
+            from backend.access_guards import require_job
+            from backend.deletion.locks import (
+                lock_job_row,
+                lock_source_row,
+                lock_workspace_row,
+            )
+
+            source = lock_source_row(session, workspace.source_id)
+            workspace = lock_workspace_row(session, job.workspace_id)
+            job = lock_job_row(session, "collection", job_id)
+            require_job(session, "collection", job_id, for_write=True)
+            if job is None or workspace is None or source is None:
+                raise CollectionRunError("作业、工作区或数据源不存在")
+            if not source.is_active:
+                raise CollectionRunError("数据源已禁用，不能发起采集")
+            resolved = resolve_run_request(
+                mode=mode,
+                revision_steps=list(revision.steps),
+                revision_step_config=revision.step_config,
+                request_steps=steps,
+                request_step_config=step_config,
+                whitelist=COLLECTION_STEPS,
+                params_table=COLLECTION_STEP_PARAMS,
+            )
+            ordered = normalize_collection_steps(list(resolved.steps))
+            # doc 10.2 §5.2 双向保留：同工作区有 pending/running 发布运行时
+            # 拒绝创建采集（409 workspace_publish_active，携带阻塞运行定位）。
+            from backend.publishing.repository import (
+                WorkspacePublishActiveError,
+                active_publish_run_for_workspace,
+            )
+
+            publish_active = active_publish_run_for_workspace(
+                session, job.workspace_id
+            )
+            if publish_active is not None:
+                raise WorkspacePublishActiveError(publish_active)
+            if run_id is None:
+                run_id = new_run_id()
+            create_run(
+                COLLECTION_RUN,
+                session,
+                run_id=run_id,
+                job_id=job_id,
+                revision_no=revision_no,
+                steps=ordered,
+                step_params=resolved.effective_step_params,
+                trigger_type="manual",
+            )
+            session.commit()
+    except SQLAlchemyError:
+        from backend.data_sources.registration_service import PlatformUnavailableError
+
+        raise PlatformUnavailableError("平台库暂不可用") from None
+    except StepConfigError as exc:
+        raise CollectionRunError(str(exc)) from None
     return {
-        "job_id": str(job_id),
-        "results": [
-            {
-                "step": step,
-                "status": "success" if result.get("success") else "failed",
-                "message": message,
-                "finished_at": _finished_at(),
-            }
-        ],
+        "collection_run_id": str(run_id),
+        "collection_job_id": job_id,
+        "revision_no": revision_no,
+        "steps": ordered,
+        "status": "pending",
     }
 
 
-def start_db_collection(
-    source_id: UUID,
-    steps: list[str],
-    job_id: UUID | None = None,
-    *,
-    domain_description=_UNSET,
-    sync_domain_description: bool = False,
-) -> dict:
-    """校验步骤后按选择顺序调用各步骤准备链。
+def _manifest_or_none(builder, entries):
+    if not entries:
+        return None
+    return builder(entries)
 
-    未传入 job_id 时新建工作区，后续步骤沿同一 job_id 执行；传入时在该
-    工作区执行。两种情况都不清理已有产物。各步骤分别记录结果，不把一次
-    采集请求视作单个数据库事务（doc 16 §4）。
 
-    `domain_description` / `sync_domain_description`（doc 21.1 §5）：仅 domain
-    步骤消费、原样透传给 `run_domain_step`；其余步骤忽略，未包含 domain 时
-    不改写任何描述字段。默认哨兵表示本次会话未保存过描述。
+def execute_collection_run(
+    settings: PlatformSettings, run_id: UUID, execution_steps: list[str]
+) -> None:
+    """后台执行本次请求新建的采集运行（doc 6.2 §6.3 步骤 5–6）。
+
+    只执行传入的那一个运行：仍为 pending 才置 running；按依赖就绪并行
+    调度步骤（doc 10.1 §4.1，并发上限 `_MAX_PARALLEL_STEPS`）：同选上游
+    全部成功并完成结果提交后才启动下游，任一步骤完成即重新检查可启动
+    步骤，不以整批完成作为下一步的启动条件。各步骤执行前写 running、
+    后写终态与 manifest；成功/失败写采集 marker，blocked 不写。
+    不扫描、不接管其他 pending/running 记录。
+    execution_steps 由创建运行的请求传入，保留本次选择的顺序（作为多个
+    就绪步骤之间的调度优先级）；数据库步骤行没有顺序字段，不能将查询
+    结果的展示顺序当作执行计划。
     """
-    chosen = normalize_collection_steps(steps)
-    config_path = resolve_project_path(METADATA_CONFIG)
+
+    from backend.persistence.models import CollectionJobInfo, CollectionRunInfo
+
+    with platform_session(settings) as session:
+        run = session.get(CollectionRunInfo, run_id)
+        if run is None:
+            logger.error("采集运行不存在 run_id=%s", run_id)
+            return
+        if run.status != "pending":
+            logger.warning(
+                "采集运行已不是 pending，跳过执行 run_id=%s status=%s",
+                run_id,
+                run.status,
+            )
+            return
+        job = session.get(CollectionJobInfo, run.collection_job_id)
+        if job is None:
+            logger.error(
+                "采集作业不存在 run_id=%s job_id=%s", run_id, run.collection_job_id
+            )
+            return
+        workspace = get_workspace(session, job.workspace_id)
+        if workspace is None:
+            logger.error(
+                "工作区不存在 run_id=%s workspace_id=%s", run_id, job.workspace_id
+            )
+            return
+        source_id = workspace.source_id
+        workspace_id = workspace.workspace_id
+        step_rows = list_run_steps(COLLECTION_RUN, session, run_id)
+        # 保留请求顺序并再次确保依赖序，不能依赖 started_at 或名称排序。
+        steps = normalize_collection_steps(execution_steps)
+        if set(steps) != {row.step_name for row in step_rows}:
+            raise CollectionRunError("执行计划与本次运行记录的步骤不一致")
+        params_by_step = {row.step_name: row.step_config for row in step_rows}
+        # 未到终态的步骤从这里推进；已终态（如前次中断）不再执行
+        if not mark_run_running(COLLECTION_RUN, session, run_id):
+            logger.warning("采集运行无法置 running run_id=%s", run_id)
+            return
+        session.commit()
+
     results: list[dict] = []
-    active_job_id = job_id
-    for step in chosen:
-        blocked_message = _blocked_by_same_request_upstream(step, chosen, results)
-        if blocked_message is not None:
-            # 编排层阻断（doc 19.1 §3，含 doc 18 §3.3 修订）：本次上游失败
-            # 时后继步骤不执行、不登记 running、不清理旧目录；不得依赖
-            # job_info 历史状态推断本次结果。
-            results.append(
-                {
-                    "step": step,
-                    "status": "failed",
-                    "message": blocked_message,
-                    "finished_at": _finished_at(),
-                }
-            )
-            continue
-        result = None
-        try:
-            if step == DB_STEP:
-                result = run_db_step(config_path, source_id, False, active_job_id)
-            elif step == DDL_STEP:
-                result = run_ddl_step(config_path, source_id, active_job_id)
-            elif step == JSON_STEP:
-                result = run_json_step(config_path, source_id, active_job_id)
-            elif step == MD_STEP:
-                result = run_md_step(config_path, source_id, active_job_id)
-            elif step == DOMAIN_STEP:
-                result = run_domain_step(
-                    config_path,
+    statuses: dict[str, str] = {}
+    running: dict = {}  # Future -> step_name，仅调度线程读写
+    running_steps: set[str] = set()
+    chosen = set(steps)
+
+    def record_result(row: dict) -> None:
+        results.append(row)
+        statuses[row["step"]] = row["status"]
+
+    with ThreadPoolExecutor(max_workers=_MAX_PARALLEL_STEPS) as pool:
+        while len(statuses) < len(steps):
+            # 1) 阻断级联：同选依赖全部终态且存在未成功 → 待依赖齐后按
+            #    既有文案优先级阻断（完成先后不改变文案，doc 10.1 §4.1）。
+            cascaded = True
+            while cascaded:
+                cascaded = False
+                for step in steps:
+                    if step in statuses or step in running_steps:
+                        continue
+                    deps = _same_request_deps(step, chosen)
+                    if not deps or not all(dep in statuses for dep in deps):
+                        continue
+                    if all(statuses[dep] == STATUS_SUCCESS for dep in deps):
+                        continue
+                    message = _blocked_by_same_request_upstream(step, steps, results)
+                    if message is None:  # 防御：不应到达的兜底文案
+                        message = f"本次请求的上游未成功，{step} 未启动"
+                    _record_terminal(settings, run_id, step, STATUS_BLOCKED, message)
+                    record_result({"step": step, "status": STATUS_BLOCKED})
+                    cascaded = True
+            # 2) 启动就绪步骤：同选上游全部 success 并完成结果提交后放行；
+            #    请求（拓扑）顺序作为多个就绪步骤之间的优先级，受并发上限约束。
+            for step in steps:
+                if len(running) >= _MAX_PARALLEL_STEPS:
+                    break
+                if step in statuses or step in running_steps:
+                    continue
+                deps = _same_request_deps(step, chosen)
+                if any(statuses.get(dep) != STATUS_SUCCESS for dep in deps):
+                    continue
+                future = submit_with_context(
+                    pool,
+                    _execute_one_step,
+                    settings,
+                    run_id,
                     source_id,
-                    active_job_id,
-                    domain_description=domain_description,
-                    sync_domain_description=sync_domain_description,
+                    workspace_id,
+                    step,
+                    params_by_step.get(step),
                 )
-            elif step == DIM_CONFIG_STEP:
-                result = run_dim_config_step(config_path, source_id, active_job_id)
-            elif step == REL_STEP:
-                result = run_rel_step(config_path, source_id, active_job_id)
-            elif step == SQL_STEP:
-                result = run_sql_step(config_path, source_id, active_job_id)
-            else:  # normalize 已过滤白名单，防未来新增步骤被静默错路由
-                raise UnsupportedCollectionStepError(
-                    f"当前仅支持 {_SUPPORTED_STEPS_TEXT} 步骤（收到: {step}）"
+                running[future] = step
+                running_steps.add(step)
+            if len(statuses) >= len(steps):
+                break
+            if not running:  # 防御：无在执行任务则不得空转等待
+                logger.error(
+                    "采集调度无进展 run_id=%s pending=%s",
+                    run_id,
+                    sorted(set(steps) - set(statuses)),
                 )
-            response = _response_from_step_result(step, result)
-        except DbStepConfigError as exc:
-            if str(exc) == "未找到指定 source_id 的数据源":
-                raise SourceNotFoundError("数据源不存在") from None
-            if not results:
-                # 本次请求还没有任何已执行步骤：整体抛出。不能把请求自带
-                # 的 job_id 当作"已有步骤完成"——重跑指定工作区时第一步就
-                # 报工作区校验错误，同样没有任何已执行结果可返回。
-                raise
-            # 已有步骤在本请求内执行并计入结果后，后续步骤报配置错误不再
-            # 整体抛出：已完成步骤保持成功，本步骤按配置错误计入结果，
-            # 带 job_id 返回部分结果（doc 16 §4：各步骤分别记录，不视作
-            # 单个事务）。
-            results.append(
-                {
-                    "step": step,
-                    "status": "failed",
-                    "message": str(exc),
-                    "finished_at": _finished_at(),
-                }
+                break
+            # 3) 单一调度线程统一收集 Future 完成结果，更新终态表并推进任务；
+            #    worker 不直接修改共享终态表（doc 10.1 §4.1）。
+            done, _ = wait(list(running), return_when=FIRST_COMPLETED)
+            for future in done:
+                step = running.pop(future)
+                running_steps.discard(step)
+                try:
+                    record_result(future.result())
+                except Exception as exc:  # noqa: BLE001 —— 兜底：任务不应抛出
+                    logger.exception(
+                        "采集步骤结果收集失败 run_id=%s step=%s type=%s",
+                        run_id,
+                        step,
+                        type(exc).__name__,
+                    )
+                    record_result({"step": step, "status": STATUS_FAILED})
+
+    with platform_session(settings) as session:
+        try:
+            final = finalize_run(COLLECTION_RUN, session, run_id)
+            session.commit()
+        except Exception as exc:  # noqa: BLE001
+            logger.error(
+                "采集运行汇总失败 run_id=%s type=%s", run_id, type(exc).__name__
             )
-            continue
-        except PlatformUnavailableError as exc:
-            # 正常由 _response_from_step_result 抛出（步骤服务对平台库故障
-            # 一律返回结果字典而非抛错）；domain 服务会直接抛其子类
-            # DomainPreparationError（本地段非预期故障，doc 21.1 §5.2），
-            # 同样按下列分流、由更具体的 API handler 映射 503。
-            if not results:
-                # 本次请求还没有任何已执行步骤：整体 503（重跑请求同样
-                # 不返回部分结果，请求自带的 job_id 不代表步骤已执行）。
-                raise
-            # 已有步骤在本请求内执行后，后续步骤的平台库故障不再整体
-            # 503：该步骤按失败计入结果（其 job_info 多半未能登记，状态
-            # 以平台库为准），带 job_id 返回已完成步骤的结果。
-            results.append(
-                {
-                    "step": step,
-                    "status": "failed",
-                    "message": str((result or {}).get("message") or exc),
-                    "finished_at": _finished_at(),
-                }
-            )
-            continue
-        if active_job_id is None:
-            active_job_id = UUID(response["job_id"])
-        results.extend(response["results"])
-    return {"job_id": str(active_job_id), "results": results}
-
-
-async def start_collection_job(
-    settings: PlatformSettings,
-    source_id: UUID,
-    steps: list[str],
-    job_id: UUID | None = None,
-    *,
-    domain_description=_UNSET,
-    sync_domain_description: bool = False,
-) -> dict:
-    """先确认数据源存在，再在线程中执行采集，避免堵住事件循环。
-
-    `domain_description` / `sync_domain_description` 原样透传到
-    `start_db_collection`（doc 21.1 §5）。
-    """
-    normalize_collection_steps(steps)
-    get_registered_source(settings, source_id)
-    return await asyncio.to_thread(
-        start_db_collection,
-        source_id,
-        steps,
-        job_id,
-        domain_description=domain_description,
-        sync_domain_description=sync_domain_description,
+            return
+    logger.info(
+        "采集运行结束 run_id=%s status=%s steps=%s",
+        run_id,
+        final,
+        results,
     )
+
+
+def _execute_one_step(
+    settings: PlatformSettings,
+    run_id: UUID,
+    source_id: str,
+    workspace_id: str,
+    step_name: str,
+    step_params: dict | None,
+) -> dict:
+    """执行一个采集步骤的完整流程（doc 10.1 §4.1）。
+
+    包含日志步骤设置、认领、上下文装配、worker 调用、异常处理、产物
+    清单、marker 与状态写回；Future 完成即代表上述流程全部结束——
+    下游由调度器在收到结果后才放行。worker 成功但 marker 或状态写回
+    失败时按 failed 降级返回，不凭内存成功放行（doc 10.1 §4.1）。
+    在线程池任务内运行：经 submit_with_context 复制调度线程上下文，
+    步骤 ContextVar 的设置与恢复（finally）只作用于本任务。
+    返回结果行 {"step", "status"} 供调度线程汇总；不抛出。
+    """
+    step_token = None
+    claimed = False
+    try:
+        try:
+            # 日志设置、认领及上下文装配也可能失败，须纳入步骤异常处理，
+            # 避免后台任务退出后遗留 pending 步骤和 running 整体状态。
+            step_token = set_operation_step(step_name)
+            blocked_message = _claim_step(settings, workspace_id, step_name, run_id)
+            if blocked_message is not None:
+                _record_terminal(
+                    settings, run_id, step_name, STATUS_BLOCKED, blocked_message
+                )
+                return {"step": step_name, "status": STATUS_BLOCKED}
+            claimed = True
+
+            from backend.data_sources.step_context import METADATA_CONFIG
+
+            ctx = load_step_context(
+                settings,
+                source_id=source_id,
+                workspace_id=workspace_id,
+                run_id=run_id,
+                step_name=step_name,
+                step_params=step_params,
+                config_path=METADATA_CONFIG,
+            )
+            # 认领即置 running（工作区行锁下原子完成）
+            outcome: StepOutcome = _WORKERS[step_name](ctx)
+        except (DbStepConfigError, SourceDisabledError) as exc:
+            # 步骤前置条件不满足（上游产物缺失、配置非法）：blocked 不写 marker
+            _record_terminal(settings, run_id, step_name, STATUS_BLOCKED, str(exc))
+            return {"step": step_name, "status": STATUS_BLOCKED}
+        except Exception as exc:  # noqa: BLE001 —— 非受控故障按步骤失败计
+            logger.exception(
+                "采集步骤非受控失败 run_id=%s step=%s type=%s",
+                run_id,
+                step_name,
+                type(exc).__name__,
+            )
+            if not claimed:
+                # 认领前/认领中异常（如 _claim_step 数据库故障）：步骤仍
+                # pending，failed 的合法来源不含 pending，会被条件 UPDATE
+                # 拒绝导致运行无法汇总——记 blocked（DeepSeek R1 #2）。
+                # 调度器回传状态必须是终态常量：bool 会使下游级联文案退化
+                # 为兜底（DeepSeek R2 新问题 1）。
+                recorded = _record_terminal(
+                    settings,
+                    run_id,
+                    step_name,
+                    STATUS_BLOCKED,
+                    f"步骤启动失败（{type(exc).__name__}）：未认领即异常，"
+                    "按 blocked 收尾",
+                )
+                if not recorded:
+                    logger.error(
+                        "采集步骤 blocked 写回未生效 run_id=%s step=%s",
+                        run_id,
+                        step_name,
+                    )
+                return {"step": step_name, "status": STATUS_BLOCKED}
+            _write_marker_for_step(
+                source_id, workspace_id, step_name, run_id, failed=True
+            )
+            recorded = _record_terminal(
+                settings,
+                run_id,
+                step_name,
+                STATUS_FAILED,
+                f"步骤执行失败（{type(exc).__name__}）",
+            )
+            if not recorded:
+                logger.error(
+                    "采集步骤 failed 写回未生效 run_id=%s step=%s",
+                    run_id,
+                    step_name,
+                )
+            return {"step": step_name, "status": STATUS_FAILED}
+
+        input_manifest = _manifest_or_none(build_input_manifest, outcome.input_files)
+        output_manifest = (
+            _manifest_or_none(build_output_manifest, outcome.output_files)
+            if outcome.success
+            else None
+        )
+        marker_written = _write_marker_for_step(
+            source_id,
+            workspace_id,
+            step_name,
+            run_id,
+            failed=not outcome.success,
+        )
+        status = STATUS_SUCCESS if outcome.success else STATUS_FAILED
+        recorded = _record_terminal(
+            settings,
+            run_id,
+            step_name,
+            status,
+            outcome.message,
+            input_manifest=input_manifest,
+            output_manifest=output_manifest,
+        )
+        if status == STATUS_SUCCESS and not (marker_written and recorded):
+            # doc 10.1 §4.1：状态或 marker 未能可靠写入时，不得仅凭内存中
+            # 的成功结果放行——降级为 failed，下游走级联阻断与既定文案。
+            failures = []
+            if not marker_written:
+                failures.append("marker 写入失败")
+            if not recorded:
+                failures.append("状态写回失败")
+                # marker 已写 success 而状态写回失败时有意保留 success marker：
+                # worker 实际成功、产物完整，marker 如实反映产物状态，后续运行
+                # 可按 §4.2 复用有效产物；同运行内下游已因本步骤 failed 级联
+                # 阻断，不存在错误放行（Kimi R2 S1）。
+            logger.error(
+                "采集步骤结果提交失败，按失败处理 run_id=%s step=%s parts=%s",
+                run_id,
+                step_name,
+                failures,
+            )
+            try:
+                if not marker_written:
+                    _write_marker_for_step(
+                        source_id, workspace_id, step_name, run_id, failed=True
+                    )
+                _record_terminal(
+                    settings,
+                    run_id,
+                    step_name,
+                    STATUS_FAILED,
+                    f"步骤执行成功，但结果提交失败（{'、'.join(failures)}），"
+                    "按失败处理（doc 10.1 §4.1）",
+                )
+            except Exception as exc:  # noqa: BLE001 —— 降级写回异常不改变 failed 结论
+                logger.exception(
+                    "采集步骤降级写回失败 run_id=%s step=%s type=%s",
+                    run_id,
+                    step_name,
+                    type(exc).__name__,
+                )
+            return {"step": step_name, "status": STATUS_FAILED}
+        return {"step": step_name, "status": status}
+    finally:
+        # 任务结束恢复步骤上下文（doc 10.1 §4.4）；set 失败（如映射缺失）
+        # 时 token 为 None，无需恢复。
+        if step_token is not None:
+            reset_current_step(step_token)
+
+
+def _write_marker_for_step(
+    source_id: str,
+    workspace_id: str,
+    step_name: str,
+    run_id: UUID,
+    *,
+    failed: bool,
+) -> bool:
+    """成功/失败写采集 marker（doc 6 §6）；blocked/pending 不写。
+
+    返回是否写入成功——调用方在成功路径必须核对（doc 10.1 §4.1：
+    marker 未能可靠写入时不得仅凭内存成功放行下游）。
+    """
+    try:
+        directory = _step_output_dir(source_id, workspace_id, step_name)
+        write_collection_marker(directory, run_id, "failed" if failed else "success")
+    except (OSError, ValueError) as exc:
+        logger.error(
+            "采集 marker 写入失败 run_id=%s step=%s type=%s",
+            run_id,
+            step_name,
+            type(exc).__name__,
+        )
+        return False
+    return True
+
+
+def _record_terminal(
+    settings: PlatformSettings,
+    run_id: UUID,
+    step_name: str,
+    status: str,
+    message: str,
+    *,
+    input_manifest: dict | None = None,
+    output_manifest: dict | None = None,
+) -> bool:
+    """写回步骤终态与清单；返回是否写回成功（doc 10.1 §4.1）。
+
+    doc 10.2 §5.3 口径说明：finish_step 为条件 UPDATE，rowcount=0 时返回
+    行上实际状态而不抛异常——本侧返回值只表达"是否成功提交了本次写回"，
+    协议内（提交前注册 + 条件认领保证单执行者）不会出现行已被他人终结
+    的分支；若未来放开多执行者，应对照返回的实际状态（与发布侧一致）。
+    """
+    with platform_session(settings) as session:
+        try:
+            recorded = finish_step(
+                COLLECTION_RUN,
+                session,
+                run_id,
+                step_name,
+                status,
+                message,
+                input_manifest=input_manifest,
+                output_manifest=output_manifest,
+            )
+            if recorded != status:
+                # 条件 UPDATE 未生效（行处于其他状态）：不以"commit 成功"
+                # 冒充"状态生效"（DeepSeek R1 #2，与发布侧 §6.1 口径一致）
+                logger.error(
+                    "采集步骤终态写回未生效 run_id=%s step=%s 意图=%s 实际=%s",
+                    run_id,
+                    step_name,
+                    status,
+                    recorded,
+                )
+                session.rollback()
+                return False
+            session.commit()
+        except Exception as exc:  # noqa: BLE001
+            logger.error(
+                "采集步骤状态写回失败 run_id=%s step=%s type=%s",
+                run_id,
+                step_name,
+                type(exc).__name__,
+            )
+            return False
+    return True

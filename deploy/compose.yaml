@@ -1,0 +1,248 @@
+# InsightWeave 七服务部署 Compose（doc 13 §3/§4/§5；13.1 §1/§7）
+# 严格七个服务；五条回环端口映射；稳定命名卷；运行期不使用代理。
+# 插值变量来自 deploy.env（模板 deploy/env/deploy.env.example，实值不入 Git）。
+name: insightweave-local
+
+x-proxy-cleared: &proxy-cleared
+  HTTP_PROXY: ""
+  HTTPS_PROXY: ""
+  ALL_PROXY: ""
+  http_proxy: ""
+  https_proxy: ""
+  all_proxy: ""
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: 10m
+    max-file: "3"
+
+services:
+  postgres:
+    image: ${POSTGRES_IMAGE}
+    platform: linux/amd64
+    restart: unless-stopped
+    environment:
+      <<: *proxy-cleared
+      POSTGRES_USER: ${POSTGRES_USER:?deploy.env 需提供 POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?deploy.env 需提供 POSTGRES_PASSWORD}
+      PLATFORM_DB_NAME: ${PLATFORM_DB_NAME:-metaweave}
+      LANGGRAPH_DB_NAME: ${LANGGRAPH_DB_NAME:-lg_persist}
+    ports:
+      - "127.0.0.1:6432:5432"
+    volumes:
+      - pg-data:/var/lib/postgresql
+      - ./postgres/01-create-databases.sh:/docker-entrypoint-initdb.d/01-create-databases.sh:ro
+    healthcheck:
+      # TCP 回环 + 管理库，避免把 initdb 阶段 Unix socket 当就绪（doc 13 §6.1）
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U $${POSTGRES_USER} -d postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 120s
+    logging: *default-logging
+    mem_limit: 2g
+    cpus: 2.0
+
+  neo4j:
+    image: ${NEO4J_IMAGE}
+    platform: linux/amd64
+    restart: unless-stopped
+    environment:
+      <<: *proxy-cleared
+      NEO4J_AUTH: neo4j/${NEO4J_PASSWORD:?deploy.env 需提供 NEO4J_PASSWORD}
+      # APOC 由启动前的插件卷离线提供（13.1 §2.2），禁止入口在线安装
+      NEO4J_PLUGINS: ""
+      NEO4J_dbms_security_procedures_unrestricted: "apoc.*"
+    ports:
+      - "127.0.0.1:7474:7474"
+      - "127.0.0.1:7687:7687"
+    volumes:
+      - neo4j-data:/data
+      - neo4j-logs:/logs
+      - neo4j-plugins:/plugins
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:7474 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 120s
+    logging: *default-logging
+    mem_limit: 3g
+    cpus: 2.0
+
+  milvus:
+    image: ${MILVUS_IMAGE}
+    platform: linux/amd64
+    restart: unless-stopped
+    # 官方内嵌脚本机制（doc 13 §3.1；任务 1 实测采用）
+    security_opt:
+      - seccomp:unconfined
+    environment:
+      <<: *proxy-cleared
+      ETCD_USE_EMBED: "true"
+      ETCD_DATA_DIR: /var/lib/milvus/etcd
+      ETCD_CONFIG_PATH: /milvus/configs/embedEtcd.yaml
+      COMMON_STORAGETYPE: local
+    command: ["milvus", "run", "standalone"]
+    volumes:
+      - milvus-data:/var/lib/milvus
+      - ./milvus/embedEtcd.yaml:/milvus/configs/embedEtcd.yaml:ro
+      - ./milvus/user.yaml:/milvus/configs/user.yaml:ro
+    healthcheck:
+      test: ["CMD", "/usr/bin/curl", "--noproxy", "*", "--fail", "--silent", "--show-error", "--max-time", "3", "http://127.0.0.1:9091/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 120s
+    logging: *default-logging
+    mem_limit: 4g
+    cpus: 4.0
+
+  metaweave:
+    image: ${METAWEAVE_IMAGE:?deploy.env 需提供 METAWEAVE_IMAGE}
+    platform: linux/amd64
+    pull_policy: never
+    restart: unless-stopped
+    env_file:
+      - ${METAWEAVE_ENV_FILE:?deploy.env 需提供 METAWEAVE_ENV_FILE}
+    environment:
+      <<: *proxy-cleared
+      # 容器内 marker 目录（§5.2；部署目录 control/ 只读挂载）
+      DEPLOY_CONTROL_DIR: /run/insightweave-deploy
+    command:
+      - uvicorn
+      - backend.api.logged_app:create_logged_app
+      - --factory
+      - --no-access-log
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8001"
+      - --timeout-graceful-shutdown
+      - "120"
+    volumes:
+      - ${DEPLOY_CONTROL_DIR:?deploy.env 需提供 DEPLOY_CONTROL_DIR}:/run/insightweave-deploy:ro
+      - metaweave-output:/app/metaweave/output
+      - metaweave-logs:/app/metaweave/logs
+    depends_on:
+      postgres:
+        condition: service_healthy
+      neo4j:
+        condition: service_healthy
+      milvus:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "--noproxy", "*", "--fail", "--silent", "--show-error", "--max-time", "5", "http://127.0.0.1:8001/openapi.json"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 60s
+    stop_grace_period: 150s
+    logging: *default-logging
+    mem_limit: 2g
+    cpus: 2.0
+
+  nl2sql:
+    image: ${NL2SQL_IMAGE:?deploy.env 需提供 NL2SQL_IMAGE}
+    platform: linux/amd64
+    pull_policy: never
+    restart: unless-stopped
+    env_file:
+      - ${NL2SQL_ENV_FILE:?deploy.env 需提供 NL2SQL_ENV_FILE}
+    environment:
+      <<: *proxy-cleared
+      DEPLOY_CONTROL_DIR: /run/insightweave-deploy
+    command:
+      - uvicorn
+      - src.api.main:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8008"
+      - --timeout-graceful-shutdown
+      - "120"
+    volumes:
+      - ${DEPLOY_CONTROL_DIR:?deploy.env 需提供 DEPLOY_CONTROL_DIR}:/run/insightweave-deploy:ro
+      - nl2sql-workspace:/app/nl2sql/var/db_deepagent
+      - nl2sql-logs:/app/nl2sql/logs
+    depends_on:
+      postgres:
+        condition: service_healthy
+      neo4j:
+        condition: service_healthy
+      milvus:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "--noproxy", "*", "--fail", "--silent", "--show-error", "--max-time", "5", "http://127.0.0.1:8008/api/v2/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 60s
+    stop_grace_period: 150s
+    logging: *default-logging
+    mem_limit: 3g
+    cpus: 2.0
+
+  attu:
+    image: ${ATTU_IMAGE}
+    platform: linux/amd64
+    restart: unless-stopped
+    environment:
+      <<: *proxy-cleared
+      MILVUS_URL: milvus:19530
+    ports:
+      - "127.0.0.1:3000:3000"
+    depends_on:
+      milvus:
+        condition: service_healthy
+    healthcheck:
+      # 镜像内无 curl/wget，仅 Node（13.1 §2.3 实测）
+      test:
+        - CMD
+        - /usr/local/bin/node
+        - -e
+        - >-
+          const r=require('node:http').get('http://127.0.0.1:3000/',s=>{s.resume();process.exit(s.statusCode>=200&&s.statusCode<300?0:1)});r.setTimeout(3000,()=>r.destroy(new Error('timeout')));r.on('error',()=>process.exit(1));
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 60s
+    logging: *default-logging
+    mem_limit: 512m
+    cpus: 1.0
+
+  frontend:
+    image: ${FRONTEND_IMAGE:?deploy.env 需提供 FRONTEND_IMAGE}
+    platform: linux/amd64
+    pull_policy: never
+    restart: unless-stopped
+    environment:
+      <<: *proxy-cleared
+    ports:
+      - "127.0.0.1:18080:80"
+    depends_on:
+      metaweave:
+        condition: service_started
+      nl2sql:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "curl", "--noproxy", "*", "--fail", "--silent", "--show-error", "--max-time", "5", "http://127.0.0.1:80/"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 60s
+    logging: *default-logging
+    mem_limit: 256m
+    cpus: 1.0
+
+volumes:
+  pg-data:
+  neo4j-data:
+  neo4j-logs:
+  neo4j-plugins:
+  milvus-data:
+  metaweave-output:
+  metaweave-logs:
+  nl2sql-workspace:
+  nl2sql-logs:
