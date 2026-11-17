@@ -58,9 +58,10 @@ export PYTHONPATH="$REPO_ROOT:$NL"
 (cd "$MW" && .venv/bin/python -m pytest tests/unit -q    --ignore=tests/unit/metaweave/relationships/test_repository.py)   || die "MetaWeave tests/unit 失败"
 # 排除原因（§7.2 记入 README）：test_repository.py 12 例硬依赖本机历史产物
 # output/json/*.json（开发环境产物，干净 checkout 不存在；实测空目录亦失败）。
+(cd "$FE" && npm ci --include=dev) || die "前端依赖安装失败"
 (cd "$FE" && mapfile_test_count=$(find src -type f \( -name '*.test.cjs' -o -name '*.test.ts' \) | wc -l) \
-   && [ "$mapfile_test_count" -gt 0 ] || die "未发现前端测试文件") \
-  && (cd "$FE" && node --version && mapfile -d '' files < <(find src -type f \( -name '*.test.cjs' -o -name '*.test.ts' \) -print0 | sort -z) \
+   && [ "$mapfile_test_count" -gt 0 ] || die "未发现前端测试文件")
+(cd "$FE" && node --version && mapfile -d '' files < <(find src -type f \( -name '*.test.cjs' -o -name '*.test.ts' \) -print0 | sort -z) \
    && node --test "${files[@]}" && npm run typecheck) || die "前端测试/类型检查失败"
 
 # ---------------------------------------------------------------- 3) 构建三镜像（§7.2）
