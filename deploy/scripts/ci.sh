@@ -90,10 +90,17 @@ precheck_backend() {  # 无端口/无数据卷/无外网；真实部署开关
     -e NEO4J_URI=bolt://127.0.0.1:1 -e NEO4J_USER=x -e NEO4J_PASSWORD=x -e NEO4J_DATABASE=neo4j \
     -e MILVUS_HOST=127.0.0.1 -e MILVUS_PORT=1 -e MILVUS_DATABASE=x \
     "insightweave/$app:$RELEASE_ID" >/dev/null
-  $DOCKER_BIN exec "$probe" curl -s --noproxy '*' --fail --max-time 5 \
-    -H 'x-insightweave-deploy-token: probe-token' \
-    "http://127.0.0.1:$([ "$app" = metaweave ] && echo 8001/api/_deploy/state || echo 8008/api/v2/_deploy/state)" \
-    | grep -q '"deployment_contract_version": *1' \
+  local state_url="http://127.0.0.1:$([ "$app" = metaweave ] && echo 8001/api/_deploy/state || echo 8008/api/v2/_deploy/state)"
+  local probe_ok=0 waited=0
+  while [ "$waited" -lt 60 ]; do
+    if $DOCKER_BIN exec "$probe" curl -s --noproxy '*' --fail --max-time 5 \
+        -H 'x-insightweave-deploy-token: probe-token' "$state_url" \
+        | grep -q '"deployment_contract_version": *1'; then
+      probe_ok=1; break
+    fi
+    waited=$((waited+3)); sleep 3
+  done
+  [ "$probe_ok" = 1 ] \
     && $DOCKER_BIN exec "$probe" python -c "import deploy.runtime.lifecycle, deploy.scripts.init_platform, deploy.scripts.smoke" \
     || { $DOCKER_BIN rm -f "$probe" >/dev/null 2>&1; die "候选预检失败：$app（控制状态/契约/脚本导入）"; }
   $DOCKER_BIN rm -f "$probe" >/dev/null
