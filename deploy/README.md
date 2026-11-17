@@ -62,17 +62,9 @@ sudo nano /home/iw-runner/insightweave-runtime/config/metaweave.env
 sudo nano /home/iw-runner/insightweave-runtime/config/nl2sql.env
 ```
 
-**生效方式（推荐）**：在 GitHub → Actions → InsightWeave local release → Run workflow 手动触发。流水线会自动排空在途任务、重新创建后端容器（读取新配置）、两阶段冒烟验证后标记就绪。
+**生效方式**：在 GitHub → Actions → InsightWeave local release → Run workflow 手动触发。流水线会自动选择正确版本、排空在途任务、重新创建后端容器（读取新配置）、两阶段冒烟验证后标记就绪。
 
-**手动生效（不走流水线时）**：注意 `docker compose restart` **不会**加载新配置——它只重启原容器、沿用创建时注入的环境变量。配置变更需要重新创建容器（不需要重新构建镜像）：
-
-```bash
-sudo -u iw-runner docker --context default compose \
-  -f deploy/compose.yaml --env-file $D/deploy.env \
-  --project-name insightweave-local up -d --force-recreate metaweave nl2sql
-# 后端 IP 变化后需刷新前端代理：
-docker exec insightweave-local-frontend-1 nginx -s reload
-```
+**注意**：`docker compose restart` 不会加载新配置（沿用创建时的 env）；手动 `--force-recreate` 会使用 deploy.env 中的镜像 tag（可能指向旧版本）且跳过排空与冒烟。**不推荐绕过流水线手动操作**；确需手动时理解上述风险。
 
 ## 测试排除原因（doc 13 §7.2）
 

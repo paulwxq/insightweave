@@ -52,7 +52,7 @@ export SOURCE_CREDENTIAL_KEY=ci-dummy-credential-key
 # MetaWeave 形状键（实库 live 用例已由 METAWEAVE_RUN_LIVE_TESTS 显式开关门控跳过）
 export PLATFORM_DB_HOST=127.0.0.1 PLATFORM_DB_PORT=5432
 export PYTHONPATH="$REPO_ROOT:$NL"
-(cd "$NL" && .venv/bin/python -m pytest src/tests/unit/api src/tests/unit/services \
+(cd "$NL" && .venv/bin/python -m pytest src/tests/unit/api src/tests/unit/services src/tests/unit/utils \
    tests/unit/db_deepagent/test_independent_summarizer.py -q) || die "NL2SQL 离线套件失败"
 (cd "$NL" && .venv/bin/python -m pytest "$REPO_ROOT/deploy/tests" -q) || die "deploy/tests 失败"
 (cd "$MW" && .venv/bin/python -m pytest tests/unit -q    --ignore=tests/unit/metaweave/relationships/test_repository.py)   || die "MetaWeave tests/unit 失败"

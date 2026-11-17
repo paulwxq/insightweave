@@ -447,9 +447,8 @@ class TestComposeSevenServices:
             "nl2sql-logs",
         }
         assert compose_managed <= set(volumes), sorted(compose_managed - set(volumes))
-        ext_key = "insightweave-local_neo4j-plugins"
-        assert volumes.get(ext_key, {}).get("external") is True
-        assert volumes[ext_key]["name"] == ext_key
+        assert volumes.get("neo4j-plugins", {}).get("external") is True
+        assert volumes["neo4j-plugins"]["name"] == "insightweave-local_neo4j-plugins"
 
 
 class TestNginxConf:

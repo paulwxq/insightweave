@@ -209,7 +209,7 @@ apps_smoke() {  # apps_smoke <public|maintenance>
 # ---------------------------------------------------------------- bootstrap（§6）
 
 prepare_neo4j_plugin() {  # compose 命名卷（项目名_neo4j-plugins，任务 3 实证）
-  local vol="${PROJECT}_neo4j-plugins" img
+  local vol="insightweave-local_neo4j-plugins" img  # 与 compose.yaml external name 一致
   img=$(grep '^NEO4J_IMAGE=' "$ENV_FILE" | cut -d= -f2-)
   # 显式确保卷存在（compose 声明为 external:true，不存在时 compose 会明确报错）
   $DOCKER_BIN volume create "$vol" >/dev/null 2>&1 || true
