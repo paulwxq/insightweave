@@ -128,6 +128,8 @@ Windows 电脑
 | `neo4j` | **7687 → 7687** | `127.0.0.1:7687:7687` | Neo4j Browser 登录、执行查询所需的 Bolt/WebSocket 连接 |
 | `postgres` | **6432 → 5432** | `127.0.0.1:6432:5432` | 本机数据库客户端通过 `127.0.0.1:6432` 连接平台 PG |
 
+**端口预检实施（M01）：**`deploy.sh` 调用 `release_manifest.py ports --project <项目名>`，按上述固定五项映射核对运行容器的 Compose 项目/服务标签、实际宿主 IP/端口和容器 TCP 端口；预检表与 Compose 由同一契约用例交叉核对。只有本项目正确服务的精确回环映射可沿用，其他程序、其他项目、错误服务/容器端口及通配地址发布都拒绝，不再使用 HTTP 响应或“有任一本项目容器”作为判断依据。未匹配合法 Docker 映射时，以标准库 TCP 连接检测监听，不发送应用协议数据；WSL 同时通过 Windows PowerShell `Get-NetTCPConnection` 只读查询宿主回环/通配监听，因为实测 Windows 监听可能对 WSL 回环连接不可见。Windows 查询限时 10 秒，执行失败、超时、无效响应及 Docker/TCP 状态未知均停止，不视为空闲。bootstrap/release/实际 rollback 和自动恢复在维护、替换前检查，同版本只读核验也检查归属；失败保留版本引用，现场核验失败仍按 §7.3.1 收尾。预检不占住端口，Docker 实际绑定失败继续走既有错误处理，不新增端口管理服务或自动杀进程。Runner 要求和实测边界见 deploy/README.md 的“宿主端口预检（M01）”。
+
 其余端口均不设置 `ports`：MetaWeave `8001`、NL2SQL `8008`、Milvus `19530/9091`、内嵌 etcd `2379`。容器间通过 `metaweave:8001`、`nl2sql:8008`、`postgres:5432`、`neo4j:7687` 和 `milvus:19530` 通信，不绕行宿主映射。Attu 设置 `MILVUS_URL=milvus:19530`，由其容器连接 Milvus，浏览器不需要访问 19530。
 
 PostgreSQL 的宿主端口固定为 6432，容器内部仍为 5432。部署环境中的 `PLATFORM_DB_PORT`、`LANGGRAPH_DB_PORT` 仍设为 5432，配合主机名 `postgres`；只有宿主机数据库客户端使用 `127.0.0.1:6432`。不因此修改现有本地开发的数据库配置。
@@ -152,7 +154,7 @@ PostgreSQL 的宿主端口固定为 6432，容器内部仍为 5432。部署环�
 
 用户当前的开发启动方式是：Vue `127.0.0.1:5173` 直连 MetaWeave `127.0.0.1:8001`、NL2SQL `127.0.0.1:8002`，两个后端放行 `http://127.0.0.1:5173,http://localhost:5173`。Docker 仍复用 MetaWeave 的 `--factory backend.api.logged_app:create_logged_app` 和 NL2SQL 的 `src.api.main:app` 入口，但监听 `0.0.0.0`，内部端口按本节定为 8001/8008；NL2SQL 的开发端口 8002 不必照搬为容器端口。浏览器改经 `localhost:18080` 访问，Vite 构建值和后端白名单必须一起切换，不修改当前开发服务。
 
-采用静态 upstream 名称时，实际发布/恢复必须在后端就绪后刷新代理解析：前端新建容器会重新解析；前端容器被保留时执行 `nginx -t` 并 reload，再做入口冒烟，避免沿用被替换后端的旧 IP。
+采用静态 upstream 名称时，实际发布/恢复必须在后端就绪后刷新代理解析：前端新建容器会重新解析；前端容器被保留时执行 `nginx -t` 并 reload，再做入口冒烟，避免沿用被替换后端的旧 IP。保留须同时核对镜像引用与实际 image ID；标签相同但实际 ID 不符时强制重建，不能仅凭标签沿用。
 
 部署控制路径 `/api/_deploy/` 和 `/api/v2/_deploy/` 在 Nginx 中显式拒绝，不能跟随普通 API 代理暴露给浏览器；控制调用只从容器内执行，见 §7.5。
 
@@ -308,6 +310,8 @@ NL2SQL：uvicorn src.api.main:app --host 0.0.0.0 --port 8008 --timeout-graceful-
 
 实际恢复演练完成前交付记录标记“恢复未验证”。自动定期备份、异地容灾及定期演练调度不作为首版发布阻塞项，不宣称已具备这些能力。
 
+**M02 文档收尾（2026-11-18）：**`deploy/README.md` 已补齐维护锁/排空、两库逻辑备份、Neo4j/Milvus 完整冷卷、APOC 与两个应用文件卷、配置/原密钥和实际应用镜像的配套备份，以及固定 Compose/env/项目参数的原服务重启和独立环境恢复顺序。演练必须单独修改固定 external APOC 卷名，不能只换项目名；前端构建 origin 也不能因临时端口改变而误连生产 API。复用已锁定 PG 镜像中的工具，不引入备份平台或新增常驻服务。此处只完成操作说明，未执行真实备份、恢复演练或数据解密验收。
+
 ## 6. 首次部署和初始化
 
 首次安装与日常发布是两个明确入口：
@@ -431,6 +435,8 @@ INSIGHTWEAVE_DEPLOY_ROOT/
 
 快照只包括 Compose 模板、其引用的非敏感相对配置、源码 SHA、镜像 ID/digest 和非敏感配置版本/哈希。部署时显式固定 env-file、项目名和路径，不能依赖 Runner 当时的 cwd。命名卷使用稳定显式名称或稳定项目级命名，不能随 `releases/<release_id>` 改变。
 
+**实施落点（问题 3 补充）：**`ci.sh` 在候选预检全部通过后写入真正的 JSON 候选清单，记录 release_id、完整源码 SHA、deployment_contract_version 和三个应用的镜像引用/实际 image ID；工作流显式传递清单路径。`snapshot_release()` 从该清单取应用身份，不从可能过期的 deploy.env 复制应用标签，并在维护前核验清单与当前 checkout、本地镜像一致。快照按原相对结构保存 compose.yaml、contract.json、postgres/01-create-databases.sh、milvus/embedEtcd.yaml、milvus/user.yaml，并在 manifest.json 记录各文件 SHA256 和四项上游引用。目录先完整准备再原子改名，不覆盖输入不同的既有版本。自动/手动恢复共用目标快照加载入口，显式切换到目标 Compose 及其目录，继续使用原项目名与当前密钥；普通冒烟通过后核对三个运行容器的实际 image ID，再写成功状态。缺失/损坏快照或镜像 ID 不符在维护前拒绝；旧 manifest.env 的缺项只能经人工核验补齐，不自动追认。过渡操作见 deploy/README.md。
+
 快照清单同时记录 PostgreSQL、Neo4j、Milvus、Attu 四项完整固定镜像引用，对应 `POSTGRES_IMAGE`、`NEO4J_IMAGE`、`MILVUS_IMAGE`、`ATTU_IMAGE`。**应用 rollback 前，目标快照的四项上游镜像引用必须与当前生效的部署配置一致，运行容器身份也须核验匹配；任一不一致就在进入维护前拒绝自动回退。**告警后继续套用旧引用不可接受。应用回退只恢复三个应用服务（Compose 操作限定服务名并使用 `--no-deps`），不以旧 Compose 全量 up 改动数据库或 Attu。发生显式数据库/Attu 版本变更后，旧应用快照能否继续使用由人工确认，不在首版增加上游自动降级或迁移回退机制。
 
 真实 env、令牌及 `SOURCE_CREDENTIAL_KEY` 只保留在权限受限的 `config/`，不复制到 release 目录或 artifact；不能保存/打印会展开密钥的 `docker compose config` 输出，校验可用 `config --quiet`。应用回退复用当前密钥，不自动恢复旧凭据。配置回退是独立显式操作；若当前非敏感配置与旧应用不兼容，拒绝自动回退并提示处理，不能静默覆盖配置。
@@ -438,6 +444,8 @@ INSIGHTWEAVE_DEPLOY_ROOT/
 兼容判断不依赖配置哈希。首版在 `deploy/contract.json` 集中定义 **`deployment_contract_version: 1`**，同时覆盖配置字段语义、Compose 接线和部署控制协议；发布清单、应用镜像标签及控制 `state` 响应声明该版本。部署脚本首版只支持精确相等的版本 1，不引入三套版本号、范围匹配或自动协议转换。
 
 替换前核对脚本、目标发布清单、镜像标签及当前存活应用的控制响应版本，并用当前运行配置对目标镜像做 §7.2 预检；配置解析/必需项不通过则拒绝操作。哈希只用于追溯，不证明兼容。密钥值正常轮换不升级契约；必需环境变量语义、控制路径/请求头/响应或 Compose 挂载约定发生不兼容变化时升级统一版本并给出显式操作说明。契约不匹配时在进入维护前停止，README 提供人工处理说明，不临时猜旧协议。
+
+**实施落点（问题 4 补充）：**复用 `release_manifest.py preflight`，日常 release 在写 `deploying`、维护标记、调用 enter 之前，核对四项运行中上游的实际 image ID，并严格解析两个后端的 `/state` JSON（契约为整数 1，maintaining 为布尔值，active 为非负整数；允许 active>0，随后按正常流程排空）。以无宿主端口的 `compose run --rm --no-deps --pull never -T --entrypoint python`，分别在目标 MetaWeave、NL2SQL 镜像内用当前 env 调用已有纯配置解析入口，检查平台数据库配置、MetaWeave CORS、部署开关/令牌/契约，每项限时 30 秒，不启动 API、不连库或调用模型。再用目标 MetaWeave 镜像运行既有 `smoke.py --scope infra`，只读验证两个 PG 库/对象、Neo4j/APOC、Milvus，不执行初始化，不新增常驻服务。infra 检查限时 60 秒并按唯一容器名清理，控制请求限时 10 秒；失败在维护前退出，日志不回显配置解析或 SDK 原始异常及凭据。首次 bootstrap 在初始化及四项上游启动后执行完整检查；恢复时仅可跳过 Docker 确认不存在或已停止的后端，存活但控制不可达仍拒绝，排空阶段再次核实后端状态。操作说明及旧快照过渡见 deploy/README.md。
 
 相同源码的重复运行生成不同 release_id，避免覆盖上次成功镜像。保留当前和上一套应用镜像供回退，不在首版自动执行全局镜像/卷清理。
 
@@ -468,6 +476,8 @@ INSIGHTWEAVE_DEPLOY_ROOT/
 
 排空超时且**尚未替换容器**时，移除维护标记、确认两个后端 leave，再做无令牌普通请求冒烟；恢复入口及现场均核验成功才将原版本引用以 phase=ready 写回，原发布仍失败。脚本异常退出、标记残留、leave 失败或现场未知，不能仅靠 finally 将 phase 写回 ready。
 
+**实施落点（问题 5 补充）：**`verify_current_release()` 统一核验无维护标记、两个后端开放（复用 preflight 的严格状态检查）、三个实际镜像 ID 和普通冒烟。bootstrap/release 同版本失败仅记录 recovery_required 并提示 rollback，保留 current/previous；rollback current 的同版本核验不通过则进入已有实际恢复流程，恢复成功保留 previous。首次 bootstrap 无论是否存在旧应用，都先写维护标记；已确认不存在/退出的后端不参与排空。排空超时未替换容器时，仅在原先无维护标记、leave 全部成功且原版本完整核验通过后写回 ready；否则保持/重新进入维护并记录 recovery_required。原本处于维护的恢复现场超时继续关闭，不自动开放未知现场。退出处理只收尾本次已开始、仍停留 deploying 的失败操作：重建维护标记，尽力 enter 存活后端，再记录 recovery_required，不改写成功版本引用；控制不可达时仍须人工处理，不能声称该进程已关闭入口。强制终止保留非 ready 状态，下一次仍需人工触发核验恢复。
+
 ### 7.4 更新、失败和回退
 
 - 测试或构建失败：不触碰现有运行容器。
@@ -491,7 +501,8 @@ INSIGHTWEAVE_DEPLOY_ROOT/
 - 控制操作只有 `enter`、`state`、`leave`，按各自 `/api/_deploy/`、`/api/v2/_deploy/` 前缀处理；要求独立控制令牌，Nginx 永久拒绝代理这些路径。普通业务 API 请求在维护期间返回 503 和 `Retry-After`。门闩只安装在两个后端，前端静态页面和 Vue 资源仍可访问，不新增前端维护状态管理或静态页面封锁。
 - 活动计数只统计已放行的业务请求：从 ASGI 调用开始直到其 `finally`，包含响应发送后的 `BackgroundTasks`。**enter/state/leave、MetaWeave `/openapi.json`、NL2SQL `/api/v2/health` 不计入排空指标**，被维护门闩拒绝的请求也不登记；控制操作先分派，再进入业务计数，避免 state 自己返回 active=1。携令牌放行的业务读取冒烟仍计数，不能把所有含令牌的请求一概排除。
 - NL2SQL 的 `submit_run()`、`submit_read()` 在提交 executor **之前**登记、提交失败撤销、future 完成才减计数，不能只统计 HTTP、查看线程池私有队列或按超时假定工作已结束。计数不记录请求正文或保留 future 结果。
-- 部署脚本先在稳定 `control/` 目录写入维护标记，再令两个后端进入维护，等待活动请求和 future 均为 0；默认最多等待 900 秒，可由部署配置调整。只有此时才替换应用。等待超时、状态未知或控制失败：不停止旧容器，移除标记并 leave 退出维护，取消本次发布；若恢复入口失败，明确报错并提示人工恢复，不冒充恢复成功。
+- 部署脚本先在稳定 `control/` 目录写入维护标记，再令两个后端进入维护，等待活动请求和 future 均为 0；默认最多等待 900 秒，可由部署配置调整。只有此时才替换应用。等待超时、状态未知或控制失败均不停止旧容器、取消本次发布；仅正常发布的排空超时可按 §7.3.1 尝试恢复原入口，完整核验后才能写回 ready。状态未知、控制失败或恢复受阻时保持/重建维护标记并记录 recovery_required，提示人工恢复，不冒充已排空或已恢复。
+- 每次排空轮询复用预检的严格 JSON 解析，并额外要求 `maintaining=true`；传输失败、截断响应、错误字段类型或未处于维护均不能当作 active=0。leave 或普通冒烟失败后的自动恢复先重新维护并排空，再做恢复预检；预检失败继续保留维护标记与非 ready 状态。
 - 新后端启动时读取维护标记，存在就保持入口关闭；维护阶段冒烟通过后移除标记并 leave，随后执行普通请求冒烟，再记录发布成功。后续正常容器重启时无标记则恢复服务，不能配置成“每次重启永久维护”。脚本中断遗留标记时保持关闭并提示人工核验；标记不包含凭据、不是数据库初始化完成证明。
 - 维护期间 MetaWeave `/openapi.json` 和 NL2SQL `/api/v2/health` 可用于进程健康检查；读取冒烟 GET/HEAD 可携带 `X-InsightWeave-Deploy-Token` 通过门闩，不能让令牌为普通业务写接口开放例外。控制操作单独校验方法和令牌。普通业务 API 请求在维护阶段仍被拒绝；开放业务入口及后续验证顺序按 §7.4，不能把维护阶段通过当作最终成功。令牌不进入普通日志或浏览器；本机 CLI、其他直连内部 API 的进程须遵守同一维护窗口，不能声称控制了用户独立启动的作业。
 - 回退同样先排空待替换的候选应用；不能为了回退去强杀它刚接受的查询。NL2SQL 现有 `shutdown(wait=True)` 保留作为退出保障，不重复开发任务取消或恢复引擎。

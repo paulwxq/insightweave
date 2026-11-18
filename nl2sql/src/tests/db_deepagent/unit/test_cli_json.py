@@ -21,13 +21,16 @@ _CMD = [sys.executable, "-m", "src.modules.db_deepagent.cli"]
 _PROJECT_ROOT = Path(__file__).resolve().parents[4]
 
 
-def _run(argv: list[str]) -> subprocess.CompletedProcess:
+def _run(
+    argv: list[str], *, bootstrap: str | None = None
+) -> subprocess.CompletedProcess:
     return subprocess.run(
-        [*_CMD, *argv],
+        [*([sys.executable, "-c", bootstrap] if bootstrap else _CMD), *argv],
         capture_output=True,
         text=True,
         timeout=120,
         cwd=str(_PROJECT_ROOT),
+        check=False,
     )
 
 
@@ -56,12 +59,30 @@ class TestJsonModeSingleDocument:
 
     def test_doctor_json_single_doc(self):
         """doctor --json：stdout 单文档（初始化直写被重定向到 stderr）。"""
-        proc = _run(["doctor", "--stage", "env", "--json"])
+        bootstrap = """
+import sys
+from unittest.mock import patch
+from src.modules.db_deepagent import cli
+
+def database_diagnostic():
+    print("[OK] offline database diagnostic")
+    return True, "isolated database diagnostic"
+
+with (
+    patch("psycopg_pool.ConnectionPool.open", side_effect=RuntimeError("unexpected external database access")),
+    patch.object(cli, "_check_business_db", database_diagnostic),
+    patch.object(cli, "_check_platform_db", database_diagnostic),
+):
+    sys.exit(cli.main())
+"""
+        proc = _run(["doctor", "--stage", "env", "--json"], bootstrap=bootstrap)
         assert proc.returncode in (0, 1)
         payload = json.loads(proc.stdout)
         assert {"stage", "passed", "total", "items"} <= set(payload)
+        assert "unexpected external database access" not in proc.stdout + proc.stderr
         # ConfigLoader 的 [OK] 直写不得出现在 stdout
         assert "[OK]" not in proc.stdout
+        assert "[OK] offline database diagnostic" in proc.stderr
 
     def test_chat_with_json_rejected(self):
         proc = _run(["chat", "--json"])

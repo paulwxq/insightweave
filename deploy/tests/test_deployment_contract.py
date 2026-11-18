@@ -13,6 +13,7 @@ import stat
 import subprocess
 from pathlib import Path
 
+import pytest
 import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -308,6 +309,97 @@ class TestCiSh:
         ]:
             assert importlib.import_module(module) is not None
 
+    @pytest.mark.parametrize("core_exit", [0, 37])
+    def test_agent_core_suite_runs_before_build_and_failure_stops_ci(
+        self, tmp_path, core_exit
+    ):
+        """真实 CI 脚本 + 干净临时仓库；外部命令替身在首次构建处停止。"""
+        repo = tmp_path / "repo"
+        script = repo / "deploy/scripts/ci.sh"
+        script.parent.mkdir(parents=True)
+        script.write_bytes((REPO_ROOT / "deploy/scripts/ci.sh").read_bytes())
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        calls = tmp_path / "calls.log"
+        tool = """#!/bin/bash
+echo "$PWD|$(basename "$0") $*" >> "$CI_PROBE_CALLS"
+case "$(basename "$0")" in
+  python|ci-python)
+    [[ " $* " == *" -m pytest src/tests/db_deepagent "* ]] && exit "$CI_CORE_EXIT" ;;
+  node) [ "$1" != --version ] || echo v22.23.0 ;;
+  docker) exit 47 ;; # 禁止实际构建；证明已经进入构建阶段即可
+esac
+exit 0
+"""
+        for path in (
+            bin_dir / "ci-python",
+            bin_dir / "node",
+            bin_dir / "uv",
+            bin_dir / "npm",
+            bin_dir / "docker",
+            repo / "nl2sql/.venv/bin/python",
+            repo / "metaweave/.venv/bin/python",
+        ):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(tool)
+            path.chmod(0o755)
+        for name in (
+            "frontend/src/probe.test.cjs",
+            "nl2sql/src/tests/db_deepagent/test_probe.py",
+        ):
+            path = repo / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.touch()
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(repo),
+                "-c",
+                "user.name=CI Test",
+                "-c",
+                "user.email=ci@example.invalid",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-qm",
+                "CI fixture",
+            ],
+            check=True,
+        )
+        result = subprocess.run(
+            ["bash", str(script), "probe-rid"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+            env={
+                "PATH": f"{bin_dir}:/usr/bin:/bin",
+                "REPO_ROOT": str(repo),
+                "INSIGHTWEAVE_CI_PYTHON": str(bin_dir / "ci-python"),
+                "DOCKER_BIN": str(bin_dir / "docker"),
+                "CI_PROBE_CALLS": str(calls),
+                "CI_CORE_EXIT": str(core_exit),
+            },
+        )
+        commands = calls.read_text().splitlines()
+        core = [
+            line for line in commands if " -m pytest src/tests/db_deepagent " in line
+        ]
+        assert len(core) == 1, commands
+        assert core[0].startswith(f"{repo}/nl2sql|python ")
+        assert "--run-db" not in core[0] and "--run-llm" not in core[0]
+        builds = [line for line in commands if "|docker buildx build " in line]
+        assert result.returncode != 0  # 核心失败或首次构建处的受控停止
+        if core_exit:
+            assert not builds
+            assert "Agent 核心离线测试失败" in result.stderr
+        else:
+            assert builds and commands.index(core[0]) < commands.index(builds[0])
+            assert "镜像构建失败" in result.stderr
+
 
 # ---------------------------------------------------------------- 任务 2B
 
@@ -359,6 +451,14 @@ class TestComposeSevenServices:
         for name, svc in _compose()["services"].items():
             ports = {str(p) for p in svc.get("ports", [])}
             assert ports == expected.get(name, set()), f"{name}: {ports}"
+        from deploy.scripts.release_manifest import HOST_PORTS
+
+        precheck = {}
+        for service, host, internal in HOST_PORTS:
+            precheck.setdefault(service, set()).add(
+                f"127.0.0.1:{host}:{internal.removesuffix('/tcp')}"
+            )
+        assert precheck == expected, "端口预检表必须与 Compose 的五项映射一致"
 
     def test_all_services_clear_proxy_env(self):
         cleared = {

@@ -22,5 +22,6 @@ jobs:
         shell: bash
         run: |
           release_id="${GITHUB_SHA:0:12}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          bash deploy/scripts/ci.sh "$release_id"
-          bash deploy/scripts/deploy.sh release "$release_id"
+          candidate_manifest="$GITHUB_WORKSPACE/deploy/candidate-${release_id}.json"
+          MANIFEST_OUT="$candidate_manifest" bash deploy/scripts/ci.sh "$release_id"
+          CANDIDATE_MANIFEST="$candidate_manifest" bash deploy/scripts/deploy.sh release "$release_id"

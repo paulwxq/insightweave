@@ -54,6 +54,9 @@ export PLATFORM_DB_HOST=127.0.0.1 PLATFORM_DB_PORT=5432
 export PYTHONPATH="$REPO_ROOT:$NL"
 (cd "$NL" && .venv/bin/python -m pytest src/tests/unit/api src/tests/unit/services src/tests/unit/utils \
    tests/unit/db_deepagent/test_independent_summarizer.py -q) || die "NL2SQL 离线套件失败"
+log "运行 NL2SQL Agent 核心离线测试"
+(cd "$NL" && .venv/bin/python -m pytest src/tests/db_deepagent -q -ra) \
+  || die "NL2SQL Agent 核心离线测试失败"
 (cd "$NL" && .venv/bin/python -m pytest "$REPO_ROOT/deploy/tests" -q) || die "deploy/tests 失败"
 (cd "$MW" && .venv/bin/python -m pytest tests/unit -q    --ignore=tests/unit/metaweave/relationships/test_repository.py)   || die "MetaWeave tests/unit 失败"
 # 排除原因（§7.2 记入 README）：test_repository.py 12 例硬依赖本机历史产物
@@ -119,9 +122,9 @@ $DOCKER_BIN exec "$FE_PROBE" nginx -t >/dev/null 2>&1 \
 $DOCKER_BIN rm -f "$FE_PROBE" >/dev/null
 
 # ---------------------------------------------------------------- 5) 候选清单
-for app in metaweave nl2sql frontend; do
-  echo "insightweave/$app:$RELEASE_ID $($DOCKER_BIN image inspect --format '{{.Id}}' insightweave/$app:$RELEASE_ID)"
-done > "$MANIFEST_OUT"
-echo "source_sha=$GIT_SHA" >> "$MANIFEST_OUT"
+export DOCKER_BIN
+"$PYTHON_BIN" "$REPO_ROOT/deploy/scripts/release_manifest.py" candidate \
+  --release-id "$RELEASE_ID" --source-sha "$GIT_SHA" \
+  --contract "$REPO_ROOT/deploy/contract.json" --output "$MANIFEST_OUT"
 log "候选清单：$MANIFEST_OUT"
 log "CI 完成：$RELEASE_ID"
