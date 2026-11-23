@@ -1,0 +1,126 @@
+# InsightWeave CI（doc 15 §7.1）：PR 与 main 的云端只读检查。
+#
+# 五个套件 job 与 deploy/scripts/check.sh 共用同一份套件定义，每个 job 只选一个 selector；
+# 汇总 job ci-required 是分支保护引用的唯一稳定门槛。以下名称是跨仓库约定，被通知工作流、
+# 保护规则和私有部署核验（按 jobs API 的 name 精确匹配）依赖，修改前先同步相关配置：
+#   - workflow name：InsightWeave CI
+#   - 套件 job 的 ID 与 name 同名：nl2sql / agent_core / metaweave / deploy_tests / frontend
+#   - 汇总 job：ID 为 ci_required，name 为 ci-required
+# 不做路径过滤：main 的每次推送都必须产出完整、成功的 CI（合并即授权发布）。
+name: InsightWeave CI
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+permissions:
+  contents: read
+
+jobs:
+  nl2sql:
+    name: nl2sql
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: "0.11.2"
+      - name: Point INSIGHTWEAVE_CI_PYTHON at the pinned interpreter
+        run: echo "INSIGHTWEAVE_CI_PYTHON=$(command -v python3.12)" >> "$GITHUB_ENV"
+      - name: Offline checks
+        run: bash deploy/scripts/check.sh nl2sql
+
+  agent_core:
+    name: agent_core
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: "0.11.2"
+      - name: Point INSIGHTWEAVE_CI_PYTHON at the pinned interpreter
+        run: echo "INSIGHTWEAVE_CI_PYTHON=$(command -v python3.12)" >> "$GITHUB_ENV"
+      - name: Offline checks
+        run: bash deploy/scripts/check.sh agent_core
+
+  deploy_tests:
+    name: deploy_tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: "0.11.2"
+      - name: Point INSIGHTWEAVE_CI_PYTHON at the pinned interpreter
+        run: echo "INSIGHTWEAVE_CI_PYTHON=$(command -v python3.12)" >> "$GITHUB_ENV"
+      - name: Offline checks
+        run: bash deploy/scripts/check.sh deploy_tests
+
+  metaweave:
+    name: metaweave
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: "0.11.2"
+      - name: Point INSIGHTWEAVE_CI_PYTHON at the pinned interpreter
+        run: echo "INSIGHTWEAVE_CI_PYTHON=$(command -v python3.12)" >> "$GITHUB_ENV"
+      - name: Offline checks
+        run: bash deploy/scripts/check.sh metaweave
+
+  frontend:
+    name: frontend
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
+      - name: Offline checks
+        run: bash deploy/scripts/check.sh frontend
+
+  # 分支保护只引用这个稳定门槛；它不下载源码、不执行长任务，只检查依赖结果。
+  ci_required:
+    name: ci-required
+    needs: [nl2sql, agent_core, metaweave, deploy_tests, frontend]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require every mandatory suite to succeed
+        env:
+          ALL_REQUIRED_SUCCEEDED: >-
+            ${{ needs.nl2sql.result == 'success' &&
+                needs.agent_core.result == 'success' &&
+                needs.metaweave.result == 'success' &&
+                needs.deploy_tests.result == 'success' &&
+                needs.frontend.result == 'success' }}
+        run: test "$ALL_REQUIRED_SUCCEEDED" = true
