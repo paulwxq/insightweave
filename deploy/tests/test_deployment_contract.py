@@ -235,13 +235,124 @@ class TestDeployRuntimeFiles:
         assert "usage:" in result.stdout, "argparse 未接管，__main__ 调用块缺失"
 
 
-class TestCiSh:
-    """ci.sh 门禁分支（doc 13 §7.2）；完整构建流水由实机/后续验收。"""
+# CI 脚本测试共用的外部命令替身：记录 cwd 与完整命令。python 可在版本探测或 Agent 核心
+# 套件处失败，node 的版本应答可改，docker 在首次构建处停止（证明已进入构建阶段，不实际构建）。
+CI_TOOL_STUB = """#!/bin/bash
+echo "$PWD|$(basename "$0") $*" >> "$CI_PROBE_CALLS"
+case "$(basename "$0")" in
+  python|ci-python)
+    [[ " $* " == *" -c import sys; assert sys.version_info"* ]] && exit "${CI_PY_EXIT:-0}"
+    [[ " $* " == *" -m pytest src/tests/db_deepagent "* ]] && exit "${CI_CORE_EXIT:-0}" ;;
+  node) [ "$1" != --version ] || echo "${CI_NODE_VERSION:-v22.23.0}" ;;
+  docker) exit 47 ;; # 禁止实际构建；证明已经进入构建阶段即可
+esac
+exit 0
+"""
 
-    def test_bash_syntax_and_executable(self):
+SUITES = ("nl2sql", "agent_core", "deploy_tests", "metaweave", "frontend")
+
+
+def make_ci_repo(tmp_path, scripts=("ci.sh", "check.sh")):
+    """干净临时仓库（含工作区里的真实脚本）+ 外部命令替身；返回仓库、命令日志、运行环境。"""
+    repo = tmp_path / "repo"
+    for name in scripts:
+        target = repo / "deploy" / "scripts" / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes((REPO_ROOT / "deploy" / "scripts" / name).read_bytes())
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    calls = tmp_path / "calls.log"
+    for path in (
+        bin_dir / "ci-python",
+        bin_dir / "node",
+        bin_dir / "uv",
+        bin_dir / "npm",
+        bin_dir / "docker",
+        repo / "nl2sql/.venv/bin/python",
+        repo / "metaweave/.venv/bin/python",
+    ):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(CI_TOOL_STUB)
+        path.chmod(0o755)
+    for name in (
+        "frontend/src/probe.test.cjs",
+        "nl2sql/src/tests/db_deepagent/test_probe.py",
+    ):
+        path = repo / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.touch()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repo),
+            "-c",
+            "user.name=CI Test",
+            "-c",
+            "user.email=ci@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-qm",
+            "CI fixture",
+        ],
+        check=True,
+    )
+    env = {
+        "PATH": f"{bin_dir}:/usr/bin:/bin",
+        "REPO_ROOT": str(repo),
+        "INSIGHTWEAVE_CI_PYTHON": str(bin_dir / "ci-python"),
+        "DOCKER_BIN": str(bin_dir / "docker"),
+        "CI_PROBE_CALLS": str(calls),
+        "CI_CORE_EXIT": "0",
+    }
+    return repo, calls, env
+
+
+def run_ci_script(script, env, *args):
+    return subprocess.run(
+        ["bash", str(script), *args],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+        env=env,
+    )
+
+
+def suites_run(repo, commands):
+    """按各套件唯一的测试命令，从命令日志得出实际执行过的套件及其顺序。"""
+    markers = (
+        ("nl2sql", " -m pytest src/tests/unit/api "),
+        ("agent_core", " -m pytest src/tests/db_deepagent "),
+        ("deploy_tests", f" -m pytest {repo}/deploy/tests -q"),
+        ("metaweave", " -m pytest tests/unit -q "),
+        ("frontend", "|npm run typecheck"),
+    )
+    return [
+        name for line in commands for name, marker in markers if marker in line
+    ]
+
+
+def real_work(log):
+    """命令日志里版本探测之外的实际动作：依赖安装与测试命令。"""
+    return [
+        line
+        for line in log.splitlines()
+        if "uv sync " in line or " -m pytest " in line or "npm ci " in line
+    ]
+
+
+class TestCiSh:
+    """ci.sh 门禁分支（doc 13 §7.2）；离线检查已提取到 check.sh，完整构建由实机/后续验收。"""
+
+    @pytest.mark.parametrize("script", ["ci.sh", "check.sh"])
+    def test_bash_syntax_and_executable(self, script):
         import stat as _stat
 
-        sh = REPO_ROOT / "deploy" / "scripts" / "ci.sh"
+        sh = REPO_ROOT / "deploy" / "scripts" / script
         r = subprocess.run(
             ["bash", "-n", str(sh)], capture_output=True, text=True, check=False
         )
@@ -256,14 +367,15 @@ class TestCiSh:
         repo = tmp_path / "dirty-repo"
         (repo / "deploy" / "scripts").mkdir(parents=True)
         _sp.run(["git", "init", "-q", str(repo)], check=True)
-        sh = repo / "deploy" / "scripts" / "ci.sh"
-        sh.write_bytes(
-            _sp.run(
-                ["git", "-C", str(REPO_ROOT), "show", "HEAD:deploy/scripts/ci.sh"],
+        # 干净源码检查位于 check.sh，ci.sh 经它拒绝；两个脚本都取已提交版本。
+        for name in ("ci.sh", "check.sh"):
+            committed = _sp.run(
+                ["git", "-C", str(REPO_ROOT), "show", f"HEAD:deploy/scripts/{name}"],
                 check=True,
                 stdout=_sp.PIPE,
             ).stdout
-        )
+            (repo / "deploy" / "scripts" / name).write_bytes(committed)
+        sh = repo / "deploy" / "scripts" / "ci.sh"
         (repo / "untracked.txt").write_text("x", encoding="utf-8")
         env = {
             **_os.environ,
@@ -314,76 +426,9 @@ class TestCiSh:
         self, tmp_path, core_exit
     ):
         """真实 CI 脚本 + 干净临时仓库；外部命令替身在首次构建处停止。"""
-        repo = tmp_path / "repo"
-        script = repo / "deploy/scripts/ci.sh"
-        script.parent.mkdir(parents=True)
-        script.write_bytes((REPO_ROOT / "deploy/scripts/ci.sh").read_bytes())
-        bin_dir = tmp_path / "bin"
-        bin_dir.mkdir()
-        calls = tmp_path / "calls.log"
-        tool = """#!/bin/bash
-echo "$PWD|$(basename "$0") $*" >> "$CI_PROBE_CALLS"
-case "$(basename "$0")" in
-  python|ci-python)
-    [[ " $* " == *" -m pytest src/tests/db_deepagent "* ]] && exit "$CI_CORE_EXIT" ;;
-  node) [ "$1" != --version ] || echo v22.23.0 ;;
-  docker) exit 47 ;; # 禁止实际构建；证明已经进入构建阶段即可
-esac
-exit 0
-"""
-        for path in (
-            bin_dir / "ci-python",
-            bin_dir / "node",
-            bin_dir / "uv",
-            bin_dir / "npm",
-            bin_dir / "docker",
-            repo / "nl2sql/.venv/bin/python",
-            repo / "metaweave/.venv/bin/python",
-        ):
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(tool)
-            path.chmod(0o755)
-        for name in (
-            "frontend/src/probe.test.cjs",
-            "nl2sql/src/tests/db_deepagent/test_probe.py",
-        ):
-            path = repo / name
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.touch()
-        subprocess.run(["git", "init", "-q", str(repo)], check=True)
-        subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
-        subprocess.run(
-            [
-                "git",
-                "-C",
-                str(repo),
-                "-c",
-                "user.name=CI Test",
-                "-c",
-                "user.email=ci@example.invalid",
-                "-c",
-                "commit.gpgsign=false",
-                "commit",
-                "-qm",
-                "CI fixture",
-            ],
-            check=True,
-        )
-        result = subprocess.run(
-            ["bash", str(script), "probe-rid"],
-            capture_output=True,
-            text=True,
-            timeout=30,
-            check=False,
-            env={
-                "PATH": f"{bin_dir}:/usr/bin:/bin",
-                "REPO_ROOT": str(repo),
-                "INSIGHTWEAVE_CI_PYTHON": str(bin_dir / "ci-python"),
-                "DOCKER_BIN": str(bin_dir / "docker"),
-                "CI_PROBE_CALLS": str(calls),
-                "CI_CORE_EXIT": str(core_exit),
-            },
-        )
+        repo, calls, env = make_ci_repo(tmp_path)
+        env["CI_CORE_EXIT"] = str(core_exit)
+        result = run_ci_script(repo / "deploy/scripts/ci.sh", env, "probe-rid")
         commands = calls.read_text().splitlines()
         core = [
             line for line in commands if " -m pytest src/tests/db_deepagent " in line
@@ -399,6 +444,101 @@ exit 0
         else:
             assert builds and commands.index(core[0]) < commands.index(builds[0])
             assert "镜像构建失败" in result.stderr
+
+
+class TestCheckSh:
+    """check.sh 套件入口（doc 15 §7.1）：真实脚本 + 命令替身，按调用记录断言行为。"""
+
+    def test_default_selector_runs_exactly_what_all_runs(self, tmp_path):
+        repo, calls, env = make_ci_repo(tmp_path, scripts=("check.sh",))
+        script = repo / "deploy/scripts/check.sh"
+        assert run_ci_script(script, env).returncode == 0
+        default = calls.read_text().splitlines()
+        calls.unlink()
+        assert run_ci_script(script, env, "all").returncode == 0
+        via_all = calls.read_text().splitlines()
+        assert via_all and via_all == default
+
+    @pytest.mark.parametrize("selector", SUITES)
+    def test_selector_runs_only_its_suite(self, tmp_path, selector):
+        repo, calls, env = make_ci_repo(tmp_path, scripts=("check.sh",))
+        result = run_ci_script(repo / "deploy/scripts/check.sh", env, selector)
+        assert result.returncode == 0, result.stderr
+        assert suites_run(repo, calls.read_text().splitlines()) == [selector]
+
+    def test_all_reuses_the_suite_commands_in_fixed_order(self, tmp_path):
+        repo, calls, env = make_ci_repo(tmp_path, scripts=("check.sh",))
+        script = repo / "deploy/scripts/check.sh"
+        result = run_ci_script(script, env, "all")
+        assert result.returncode == 0, result.stderr
+        everything = calls.read_text().splitlines()
+        assert suites_run(repo, everything) == list(SUITES)
+        expected = []
+        for selector in SUITES:
+            solo = tmp_path / f"{selector}.log"
+            env["CI_PROBE_CALLS"] = str(solo)
+            result = run_ci_script(script, env, selector)
+            assert result.returncode == 0, result.stderr
+            expected += solo.read_text().splitlines()
+        # all 不增不减：与逐个执行是同一套命令、同一顺序
+        assert everything == expected
+
+    @pytest.mark.parametrize("args", [["bogus"], ["ALL"], ["all", "frontend"], [""]])
+    def test_unknown_selector_is_rejected_before_any_tool_runs(self, tmp_path, args):
+        repo, calls, env = make_ci_repo(tmp_path, scripts=("check.sh",))
+        result = run_ci_script(repo / "deploy/scripts/check.sh", env, *args)
+        assert result.returncode != 0
+        assert "未知 selector" in result.stderr
+        assert not calls.exists() or calls.read_text() == ""
+
+    def test_dirty_tree_refused(self, tmp_path):
+        repo, calls, env = make_ci_repo(tmp_path, scripts=("check.sh",))
+        (repo / "untracked.txt").write_text("x", encoding="utf-8")
+        result = run_ci_script(repo / "deploy/scripts/check.sh", env, "all")
+        assert result.returncode != 0
+        assert "不干净" in result.stderr
+        assert not calls.exists()
+
+    def test_frontend_does_not_prepare_backend_dependencies(self, tmp_path):
+        repo, calls, env = make_ci_repo(tmp_path, scripts=("check.sh",))
+        env.pop("INSIGHTWEAVE_CI_PYTHON")  # 纯前端 job 不被后端 Python 配置阻塞
+        result = run_ci_script(repo / "deploy/scripts/check.sh", env, "frontend")
+        assert result.returncode == 0, result.stderr
+        commands = calls.read_text().splitlines()
+        assert suites_run(repo, commands) == ["frontend"]
+        assert not [
+            line for line in commands if re.search(r"\|(uv|python|ci-python) ", line)
+        ]
+
+    @pytest.mark.parametrize(
+        "selector", ["all", "nl2sql", "agent_core", "deploy_tests", "metaweave"]
+    )
+    def test_python_suites_refuse_missing_ci_python(self, tmp_path, selector):
+        repo, calls, env = make_ci_repo(tmp_path, scripts=("check.sh",))
+        env.pop("INSIGHTWEAVE_CI_PYTHON")
+        result = run_ci_script(repo / "deploy/scripts/check.sh", env, selector)
+        assert result.returncode != 0
+        assert "INSIGHTWEAVE_CI_PYTHON" in result.stderr
+        assert not calls.exists()
+
+    def test_wrong_python_version_stops_python_suites_but_not_frontend(self, tmp_path):
+        repo, calls, env = make_ci_repo(tmp_path, scripts=("check.sh",))
+        script = repo / "deploy/scripts/check.sh"
+        env["CI_PY_EXIT"] = "1"
+        result = run_ci_script(script, env, "nl2sql")
+        assert result.returncode != 0 and "Python 3.12" in result.stderr
+        assert not real_work(calls.read_text())  # 版本不符时不准备依赖、不跑测试
+        calls.unlink()
+        result = run_ci_script(script, env, "frontend")
+        assert result.returncode == 0, result.stderr
+        assert suites_run(repo, calls.read_text().splitlines()) == ["frontend"]
+
+    def test_wrong_node_version_stops_frontend_before_install(self, tmp_path):
+        repo, calls, env = make_ci_repo(tmp_path, scripts=("check.sh",))
+        env["CI_NODE_VERSION"] = "v20.19.0"
+        result = run_ci_script(repo / "deploy/scripts/check.sh", env, "frontend")
+        assert result.returncode != 0 and "Node 22" in result.stderr
+        assert not real_work(calls.read_text())  # 只做了版本探测，没有安装依赖
 
 
 # ---------------------------------------------------------------- 任务 2B
