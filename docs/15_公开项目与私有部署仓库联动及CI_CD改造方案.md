@@ -386,11 +386,11 @@ CI 范围以当前脚本和部署手册为基线：
 | --- | --- |
 | `nl2sql` / `agent_core` | Python 3.12、uv，按 NL2SQL 锁文件准备 `.venv` 和 dev extra；各自运行上表对应范围 |
 | `deploy_tests` | Python 3.12、uv，沿用当前 CI 的 NL2SQL `.venv` 执行根 `deploy/tests/`；准备其测试实际需要的模块、哑配置及导入路径，不依赖开发机现有 venv |
-| `metaweave` | Python 3.12、uv，按 MetaWeave 锁文件准备 platform/dev extras，保留历史产物排除及 live 门控 |
+| `metaweave` | Python 3.12、uv，按 MetaWeave 锁文件准备 platform/dev extras，保留历史产物排除及 live 门控；独立初始化平台库哑配置（`PLATFORM_DB_*` 五项，取值同原 `ci.sh`），不依赖前序 suite 或其他 job 的环境变量 |
 | `frontend` | Node 22 和 npm，使用前端 lockfile 执行 `npm ci`；不安装全部后端依赖，也不要求后端 Python 环境 |
 | `all` | 上述全部工具；同一次执行可复用已准备的同锁文件依赖，不能改变 suite 定义或跳过检查 |
 
-`nl2sql`、`agent_core`、`deploy_tests` 的哑配置集合与导入路径按现有 `ci.sh` 的导出面整体提取，随每个独立 suite 初始化，包括 `PYTHONPATH="$REPO_ROOT:$NL"`；不能只搬 pytest 命令或依赖其他 job 的环境变量。
+`nl2sql`、`agent_core`、`deploy_tests` 的哑配置集合与导入路径按现有 `ci.sh` 的导出面整体提取，随每个独立 suite 初始化，包括 `PYTHONPATH="$REPO_ROOT:$NL"`；不能只搬 pytest 命令或依赖其他 job 的环境变量。`metaweave` 的 `create_app` 在导入时就要求平台库配置形状完整，该 suite 因此只带其中的平台库五项（不连库），同样独立初始化。
 
 云端固定 Python 3.12、Node 22（满足现有脚本要求）、uv 版本，并复用 `uv sync --frozen`、`npm ci`。云端不配置 WSL/Windows 代理地址，不连接业务数据库，不使用真实模型 Key。现有跳过原因仍须显示；不得把跳过数当作通过数。
 
