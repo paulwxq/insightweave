@@ -2,7 +2,7 @@
 # check.sh —— 受维护的离线检查（doc 13 §7.2；doc 15 §7.1）：干净源码、依赖准备、离线哑配置、
 # 各套件测试与前端类型检查。与 ci.sh 共用同一份套件定义；云端 CI 的每个 job 只选一个套件。
 # 用法：check.sh [all|nl2sql|agent_core|metaweave|deploy_tests|frontend]   缺省 all
-# 经 DOCKER_BIN/CURL_BIN 等替身测试的行为见 deploy/tests（TestCheckSh、TestCiSh）。
+# 行为由 deploy/tests 以 PATH 上的命令替身验证（TestCheckSh、TestCiSh）。
 set -euo pipefail
 
 SELECTOR="${1-all}"  # 只有不传参数才缺省为 all；显式传入空串按未知 selector 拒绝
