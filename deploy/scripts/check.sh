@@ -37,19 +37,24 @@ require_ci_python() {  # 需要 Python 的套件：解释器路径固定，且�
   uv --version >/dev/null 2>&1 || die "需要 uv（Runner 环境准备，13.1 §5.4）"
 }
 
-offline_dummy_config() {  # 干净 checkout 无 .env（被忽略，正确）；部分单测要求配置形状
-  # 完整（不连库），与开发机 .env 等价的最小集合在此集中注入。
+platform_db_dummy_config() {  # 平台库连接形状：MetaWeave 的 create_app 在导入时就要求这三项
+  # 存在（不连库）；metaweave 套件单独运行时没有其他套件代为导出，须自带。
+  export PLATFORM_DB_NAME=metaweave PLATFORM_DB_USER=postgres PLATFORM_DB_PASSWORD=ci-dummy
+  # MetaWeave 形状键（实库 live 用例已由 METAWEAVE_RUN_LIVE_TESTS 显式开关门控跳过）
+  export PLATFORM_DB_HOST=127.0.0.1 PLATFORM_DB_PORT=5432
+}
+
+offline_dummy_config() {  # NL2SQL / Agent 核心 / deploy 套件的离线哑配置：干净 checkout 无 .env
+  # （被忽略，正确）；部分单测要求配置形状完整（不连库），与开发机 .env 等价的最小集合在此集中注入。
+  platform_db_dummy_config
   export DB_NAME=orders DB_USER=orders DB_PASSWORD=ci-dummy
   export LANGGRAPH_DB_NAME=lg_persist LANGGRAPH_DB_USER=postgres LANGGRAPH_DB_PASSWORD=ci-dummy
-  export PLATFORM_DB_NAME=metaweave PLATFORM_DB_USER=postgres PLATFORM_DB_PASSWORD=ci-dummy
   export NEO4J_PASSWORD=ci-dummy NEO4J_USER=neo4j NEO4J_URI=bolt://127.0.0.1:1 NEO4J_DATABASE=neo4j
   export MILVUS_HOST=127.0.0.1 MILVUS_PORT=19530 MILVUS_DATABASE=nl2sql
   export DASHSCOPE_API_KEY=ci-dummy DEEPSEEK_API_KEY=ci-dummy MINIMAX_API_KEY=ci-dummy
   export OPENAI_API_KEY=ci-dummy OPENROUTER_API_KEY=ci-dummy LANGSMITH_API_KEY=ci-dummy
   export REDIS_PASSWORD=ci-dummy
   export SOURCE_CREDENTIAL_KEY=ci-dummy-credential-key
-  # MetaWeave 形状键（实库 live 用例已由 METAWEAVE_RUN_LIVE_TESTS 显式开关门控跳过）
-  export PLATFORM_DB_HOST=127.0.0.1 PLATFORM_DB_PORT=5432
   export PYTHONPATH="$REPO_ROOT:$NL"
 }
 
@@ -85,7 +90,7 @@ suite_deploy_tests() {
 }
 
 suite_metaweave() {
-  require_ci_python; prepare_metaweave
+  require_ci_python; platform_db_dummy_config; prepare_metaweave
   # 排除原因（§7.2 记入 README）：test_repository.py 12 例硬依赖本机历史产物
   # output/json/*.json（开发环境产物，干净 checkout 不存在；实测空目录亦失败）。
   (cd "$MW" && .venv/bin/python -m pytest tests/unit -q    --ignore=tests/unit/metaweave/relationships/test_repository.py)   || die "MetaWeave tests/unit 失败"

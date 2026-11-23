@@ -235,12 +235,17 @@ class TestDeployRuntimeFiles:
         assert "usage:" in result.stdout, "argparse 未接管，__main__ 调用块缺失"
 
 
-# CI 脚本测试共用的外部命令替身：记录 cwd 与完整命令。python 可在版本探测或 Agent 核心
-# 套件处失败，node 的版本应答可改，docker 在首次构建处停止（证明已进入构建阶段，不实际构建）。
+# CI 脚本测试共用的外部命令替身：记录 cwd 与完整命令；每次 pytest 调用另记一行平台库
+# 哑配置是否就位（只记有无，不记值）。python 可在版本探测或 Agent 核心套件处失败，node 的
+# 版本应答可改，docker 在首次构建处停止（证明已进入构建阶段，不实际构建）。
 CI_TOOL_STUB = """#!/bin/bash
 echo "$PWD|$(basename "$0") $*" >> "$CI_PROBE_CALLS"
 case "$(basename "$0")" in
   python|ci-python)
+    if [[ " $* " == *" -m pytest "* ]]; then
+      set_flag() { [ -n "${!1:-}" ] && echo set || echo unset; }
+      echo "$PWD|env-for-pytest PLATFORM_DB_HOST=${PLATFORM_DB_HOST:-<unset>} PLATFORM_DB_USER=${PLATFORM_DB_USER:-<unset>} PLATFORM_DB_PASSWORD=$(set_flag PLATFORM_DB_PASSWORD)" >> "$CI_PROBE_CALLS"
+    fi
     [[ " $* " == *" -c import sys; assert sys.version_info"* ]] && exit "${CI_PY_EXIT:-0}"
     [[ " $* " == *" -m pytest src/tests/db_deepagent "* ]] && exit "${CI_CORE_EXIT:-0}" ;;
   node) [ "$1" != --version ] || echo "${CI_NODE_VERSION:-v22.23.0}" ;;
@@ -465,6 +470,22 @@ class TestCheckSh:
         result = run_ci_script(repo / "deploy/scripts/check.sh", env, selector)
         assert result.returncode == 0, result.stderr
         assert suites_run(repo, calls.read_text().splitlines()) == [selector]
+
+    def test_metaweave_suite_injects_its_own_platform_db_shape(self, tmp_path):
+        """云端 metaweave job 不经过其他套件：create_app 在导入时就要求平台库配置
+        形状完整（不连库），这份哑配置必须由该套件自己初始化。"""
+        repo, calls, env = make_ci_repo(tmp_path, scripts=("check.sh",))
+        result = run_ci_script(repo / "deploy/scripts/check.sh", env, "metaweave")
+        assert result.returncode == 0, result.stderr
+        shapes = [
+            line
+            for line in calls.read_text().splitlines()
+            if "|env-for-pytest " in line
+        ]
+        assert shapes == [
+            f"{repo}/metaweave|env-for-pytest PLATFORM_DB_HOST=127.0.0.1 "
+            "PLATFORM_DB_USER=postgres PLATFORM_DB_PASSWORD=set"
+        ]
 
     def test_all_reuses_the_suite_commands_in_fixed_order(self, tmp_path):
         repo, calls, env = make_ci_repo(tmp_path, scripts=("check.sh",))
