@@ -31,7 +31,9 @@ export NO_PROXY="$no_proxy"
 # ---------------------------------------------------------------- 套件共用的准备步骤
 
 require_ci_python() {  # 需要 Python 的套件：解释器路径固定，且必须是 3.12
-  PYTHON_BIN="${PYTHON_BIN:-${INSIGHTWEAVE_CI_PYTHON:?需要 INSIGHTWEAVE_CI_PYTHON（Python 3.12 绝对路径，§7.2）}}"
+  # 与原 ci.sh 一致：只认 INSIGHTWEAVE_CI_PYTHON，不接受环境里的 PYTHON_BIN 顶替——
+  # 版本探测和下面的 uv sync 必须针对同一个解释器。
+  PYTHON_BIN="${INSIGHTWEAVE_CI_PYTHON:?需要 INSIGHTWEAVE_CI_PYTHON（Python 3.12 绝对路径，§7.2）}"
   "$PYTHON_BIN" -c 'import sys; assert sys.version_info[:2] == (3, 12), "需要 Python 3.12"' \
     || die "INSIGHTWEAVE_CI_PYTHON 不是 Python 3.12"
   uv --version >/dev/null 2>&1 || die "需要 uv（Runner 环境准备，13.1 §5.4）"

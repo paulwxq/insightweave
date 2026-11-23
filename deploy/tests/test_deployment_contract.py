@@ -542,6 +542,31 @@ class TestCheckSh:
         assert "INSIGHTWEAVE_CI_PYTHON" in result.stderr
         assert not calls.exists()
 
+    def test_inherited_python_bin_does_not_override_the_ci_interpreter(self, tmp_path):
+        """环境里残留的 PYTHON_BIN（其他运维脚本的注入入口）顶替不了 CI 解释器：
+        版本探测与 uv sync 必须针对同一个 INSIGHTWEAVE_CI_PYTHON。"""
+        repo, calls, env = make_ci_repo(tmp_path, scripts=("check.sh",))
+        other = tmp_path / "bin" / "other-python"  # 任何探测都失败的另一个解释器
+        other.write_text(
+            '#!/bin/bash\necho "$PWD|$(basename "$0") $*" >> "$CI_PROBE_CALLS"\nexit 1\n',
+            encoding="utf-8",
+        )
+        other.chmod(0o755)
+        env["PYTHON_BIN"] = str(other)
+        result = run_ci_script(repo / "deploy/scripts/check.sh", env, "nl2sql")
+        assert result.returncode == 0, result.stderr
+        commands = calls.read_text().splitlines()
+        assert suites_run(repo, commands) == ["nl2sql"]
+        assert not [line for line in commands if "|other-python " in line]
+
+    def test_python_bin_alone_does_not_satisfy_the_ci_python_requirement(self, tmp_path):
+        repo, calls, env = make_ci_repo(tmp_path, scripts=("check.sh",))
+        env["PYTHON_BIN"] = env.pop("INSIGHTWEAVE_CI_PYTHON")  # 只给 PYTHON_BIN
+        result = run_ci_script(repo / "deploy/scripts/check.sh", env, "nl2sql")
+        assert result.returncode != 0
+        assert "INSIGHTWEAVE_CI_PYTHON" in result.stderr
+        assert not calls.exists()  # 缺必填变量时在安装依赖前拒绝
+
     def test_wrong_python_version_stops_python_suites_but_not_frontend(self, tmp_path):
         repo, calls, env = make_ci_repo(tmp_path, scripts=("check.sh",))
         script = repo / "deploy/scripts/check.sh"
