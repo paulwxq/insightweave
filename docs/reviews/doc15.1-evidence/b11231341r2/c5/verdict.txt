@@ -1,0 +1,1 @@
+PASS: 跨 workflow 互斥（maintenance 起点 > release 终点，执行区间不重叠）

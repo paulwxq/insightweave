@@ -1,0 +1,6 @@
+2026-11-23T13:42:12Z dispatched concurrency-probe.yml role=A mode=ok hold=120 finalize_hold=0 group=insightweave-concurrency-probe-b11231341-c1
+2026-11-23T13:42:28Z snapshot A-exec-inprogress run=45186529737 status=in_progress/-
+2026-11-23T13:42:31Z dispatched concurrency-probe.yml role=B mode=ok hold=30 finalize_hold=0 group=insightweave-concurrency-probe-b11231341-c1
+2026-11-23T13:48:49Z snapshot AB-invalid-A run=45186529737 status=completed/success
+2026-11-23T13:48:56Z snapshot AB-invalid-B run=45186585821 status=completed/success
+INCONCLUSIVE 未建立 B 前置（B.verify=completed/success B.release=completed）

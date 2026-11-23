@@ -1,0 +1,1 @@
+PASS: B 在 A finalize 持有期间开始执行（组范围=执行 job，非整个 workflow）

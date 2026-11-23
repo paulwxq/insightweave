@@ -1,0 +1,10 @@
+2026-11-23T14:12:49Z dispatched concurrency-probe.yml role=A mode=ok hold=30 finalize_hold=75 group=insightweave-concurrency-probe-b11231341r2-c6
+2026-11-23T14:13:41Z snapshot A-finalize-holding run=45191763927 status=in_progress/-
+2026-11-23T14:13:44Z dispatched concurrency-probe.yml role=B mode=ok hold=20 finalize_hold=0 group=insightweave-concurrency-probe-b11231341r2-c6
+2026-11-23T14:15:02Z snapshot A-final run=45191763927 status=completed/success
+2026-11-23T14:15:06Z snapshot B-final run=45191925656 status=completed/success
+2026-11-23T14:15:13Z log saved A-finalize (job=137752082550)
+2026-11-23T14:15:20Z log saved B-exec (job=137752290674)
+2026-11-23T14:15:26Z TIMES: A.releaseEnd=2026-11-23T14:13:30Z A.finalize=[2026-11-23T14:13:32Z,2026-11-23T14:14:51Z] B.started=2026-11-23T14:13:52Z B.result=success
+PASS: B 在 A finalize 持有期间开始执行（组范围=执行 job，非整个 workflow）
+2026-11-23T14:15:26Z case c6 done

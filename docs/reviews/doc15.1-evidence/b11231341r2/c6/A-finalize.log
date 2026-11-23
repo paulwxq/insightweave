@@ -1,0 +1,63 @@
+finalize	Set up job	﻿2026-11-23T14:13:33.5934923Z Current runner version: '2.338.2'
+finalize	Set up job	2026-11-23T14:13:33.5962348Z ##[group]Runner Image Provisioner
+finalize	Set up job	2026-11-23T14:13:33.5963362Z Hosted Compute Agent
+finalize	Set up job	2026-11-23T14:13:33.5963970Z Version: 20261111.635
+finalize	Set up job	2026-11-23T14:13:33.5964595Z Commit: b8a594ea514ff44cadb5342986c68b1eac6e22ed
+finalize	Set up job	2026-11-23T14:13:33.5965414Z Build Date: 2026-11-11T01:49:01Z
+finalize	Set up job	2026-11-23T14:13:33.5966103Z Worker ID: {30d46a3a-8dfb-4c9a-a241-7790628c030c}
+finalize	Set up job	2026-11-23T14:13:33.5966922Z Region: westus
+finalize	Set up job	2026-11-23T14:13:33.5967491Z Cloud: Azure
+finalize	Set up job	2026-11-23T14:13:33.5968044Z ##[endgroup]
+finalize	Set up job	2026-11-23T14:13:33.5969785Z ##[group]Operating System
+finalize	Set up job	2026-11-23T14:13:33.5970456Z Ubuntu
+finalize	Set up job	2026-11-23T14:13:33.5971100Z 26.04.1
+finalize	Set up job	2026-11-23T14:13:33.5971642Z LTS
+finalize	Set up job	2026-11-23T14:13:33.5972153Z ##[endgroup]
+finalize	Set up job	2026-11-23T14:13:33.5972765Z ##[group]Runner Image
+finalize	Set up job	2026-11-23T14:13:33.5973371Z Image: ubuntu-26.04
+finalize	Set up job	2026-11-23T14:13:33.5973963Z Version: 20261116.202.1
+finalize	Set up job	2026-11-23T14:13:33.5975113Z Included Software: https://github.com/actions/runner-images/blob/ubuntu26/20261116.202/images/ubuntu/Ubuntu2604-Readme.md
+finalize	Set up job	2026-11-23T14:13:33.5976913Z Image Release: https://github.com/actions/runner-images/releases/tag/ubuntu26%2F20261116.202
+finalize	Set up job	2026-11-23T14:13:33.5977878Z ##[endgroup]
+finalize	Set up job	2026-11-23T14:13:33.5979341Z ##[group]GITHUB_TOKEN Permissions
+finalize	Set up job	2026-11-23T14:13:33.5981246Z Metadata: read
+finalize	Set up job	2026-11-23T14:13:33.5981859Z ##[endgroup]
+finalize	Set up job	2026-11-23T14:13:33.5984100Z Secret source: Actions
+finalize	Set up job	2026-11-23T14:13:33.5985097Z Cache mode: write
+finalize	Set up job	2026-11-23T14:13:33.5985919Z Prepare workflow directory
+finalize	Set up job	2026-11-23T14:13:33.6550391Z Prepare all required actions
+finalize	Set up job	2026-11-23T14:13:33.6618304Z Complete job name: finalize
+finalize	Strict result check (doc 15 §6.2 semantics)	﻿2026-11-23T14:13:33.7654188Z ##[group]Run printf '[finalize] %s role=%s verify=%s release=%s run=%s attempt=%s\n' \
+finalize	Strict result check (doc 15 §6.2 semantics)	2026-11-23T14:13:33.7655614Z ^[[36;1mprintf '[finalize] %s role=%s verify=%s release=%s run=%s attempt=%s\n' \^[[0m
+finalize	Strict result check (doc 15 §6.2 semantics)	2026-11-23T14:13:33.7656615Z ^[[36;1m  "$(date -u +%FT%TZ)" "$ROLE_TAG" \^[[0m
+finalize	Strict result check (doc 15 §6.2 semantics)	2026-11-23T14:13:33.7657368Z ^[[36;1m  "success" "success" \^[[0m
+finalize	Strict result check (doc 15 §6.2 semantics)	2026-11-23T14:13:33.7658209Z ^[[36;1m  "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT"^[[0m
+finalize	Strict result check (doc 15 §6.2 semantics)	2026-11-23T14:13:33.7659273Z ^[[36;1mif [ "$STRICT_OK" != true ]; then^[[0m
+finalize	Strict result check (doc 15 §6.2 semantics)	2026-11-23T14:13:33.7660195Z ^[[36;1m  echo "finalize STRICT-FAIL（拒绝/no-op/失败案例的预期行为，不代表部署成功）"^[[0m
+finalize	Strict result check (doc 15 §6.2 semantics)	2026-11-23T14:13:33.7661071Z ^[[36;1m  exit 1^[[0m
+finalize	Strict result check (doc 15 §6.2 semantics)	2026-11-23T14:13:33.7661620Z ^[[36;1mfi^[[0m
+finalize	Strict result check (doc 15 §6.2 semantics)	2026-11-23T14:13:33.7662283Z ^[[36;1mecho "finalize STRICT-OK（模拟 deployed）"^[[0m
+finalize	Strict result check (doc 15 §6.2 semantics)	2026-11-23T14:13:33.8058054Z shell: /usr/bin/bash -e {0}
+finalize	Strict result check (doc 15 §6.2 semantics)	2026-11-23T14:13:33.8059373Z env:
+finalize	Strict result check (doc 15 §6.2 semantics)	2026-11-23T14:13:33.8060005Z   STRICT_OK: true
+finalize	Strict result check (doc 15 §6.2 semantics)	2026-11-23T14:13:33.8060575Z   FINALIZE_HOLD: 75
+finalize	Strict result check (doc 15 §6.2 semantics)	2026-11-23T14:13:33.8061231Z   ROLE_TAG: b11231341r2-c6-A
+finalize	Strict result check (doc 15 §6.2 semantics)	2026-11-23T14:13:33.8061954Z ##[endgroup]
+finalize	Strict result check (doc 15 §6.2 semantics)	2026-11-23T14:13:33.8270302Z [finalize] 2026-11-23T14:13:33Z role=b11231341r2-c6-A verify=success release=success run=45191763927 attempt=1
+finalize	Strict result check (doc 15 §6.2 semantics)	2026-11-23T14:13:33.8364786Z finalize STRICT-OK（模拟 deployed）
+finalize	Finalize hold (C6)	﻿2026-11-23T14:13:33.8579858Z ##[group]Run s="${FINALIZE_HOLD:-0}"
+finalize	Finalize hold (C6)	2026-11-23T14:13:33.8580563Z ^[[36;1ms="${FINALIZE_HOLD:-0}"^[[0m
+finalize	Finalize hold (C6)	2026-11-23T14:13:33.8581159Z ^[[36;1mif [ "$s" -gt 0 ]; then^[[0m
+finalize	Finalize hold (C6)	2026-11-23T14:13:33.8581940Z ^[[36;1m  printf 'FINALIZE-HOLD-START %s role=%s\n' "$(date -u +%FT%TZ)" "$ROLE_TAG"^[[0m
+finalize	Finalize hold (C6)	2026-11-23T14:13:33.8582752Z ^[[36;1m  sleep "$s"^[[0m
+finalize	Finalize hold (C6)	2026-11-23T14:13:33.8583462Z ^[[36;1m  printf 'FINALIZE-HOLD-END %s role=%s\n' "$(date -u +%FT%TZ)" "$ROLE_TAG"^[[0m
+finalize	Finalize hold (C6)	2026-11-23T14:13:33.8584234Z ^[[36;1mfi^[[0m
+finalize	Finalize hold (C6)	2026-11-23T14:13:33.8617471Z shell: /usr/bin/bash -e {0}
+finalize	Finalize hold (C6)	2026-11-23T14:13:33.8618014Z env:
+finalize	Finalize hold (C6)	2026-11-23T14:13:33.8618428Z   STRICT_OK: true
+finalize	Finalize hold (C6)	2026-11-23T14:13:33.8619166Z   FINALIZE_HOLD: 75
+finalize	Finalize hold (C6)	2026-11-23T14:13:33.8619648Z   ROLE_TAG: b11231341r2-c6-A
+finalize	Finalize hold (C6)	2026-11-23T14:13:33.8620159Z ##[endgroup]
+finalize	Finalize hold (C6)	2026-11-23T14:13:33.8716638Z FINALIZE-HOLD-START 2026-11-23T14:13:33Z role=b11231341r2-c6-A
+finalize	Finalize hold (C6)	2026-11-23T14:14:48.8788756Z FINALIZE-HOLD-END 2026-11-23T14:14:48Z role=b11231341r2-c6-A
+finalize	Complete job	﻿2026-11-23T14:14:48.8889601Z Cleaning up orphan processes

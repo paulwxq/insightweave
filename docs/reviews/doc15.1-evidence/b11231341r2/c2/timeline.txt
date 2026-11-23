@@ -1,0 +1,15 @@
+2026-11-23T13:58:12Z dispatched concurrency-probe.yml role=A mode=ok hold=120 finalize_hold=0 group=insightweave-concurrency-probe-b11231341r2-c2
+2026-11-23T13:58:28Z snapshot A-exec-inprogress run=45189202139 status=in_progress/-
+2026-11-23T13:58:31Z dispatched concurrency-probe.yml role=B mode=ok hold=30 finalize_hold=0 group=insightweave-concurrency-probe-b11231341r2-c2
+2026-11-23T13:58:46Z snapshot B-waiting run=45189255255 status=pending/-
+2026-11-23T13:58:46Z PRECONDITION-OK: A.release in_progress; B verify=success & release=queued
+2026-11-23T13:58:48Z dispatched concurrency-probe.yml role=C mode=bind-mismatch hold=30 finalize_hold=0 group=insightweave-concurrency-probe-b11231341r2-c2
+2026-11-23T13:59:05Z snapshot C-final run=45189302285 status=completed/failure
+2026-11-23T14:01:10Z snapshot A-final run=45189202139 status=completed/success
+2026-11-23T14:01:14Z snapshot B-final run=45189255255 status=completed/success
+2026-11-23T14:01:20Z log saved A-exec (job=137742798576)
+2026-11-23T14:01:27Z log saved B-exec (job=137742991060)
+2026-11-23T14:01:34Z log saved C-verify (job=137743104283)
+2026-11-23T14:01:42Z RESULTS: C.verify=success C.release=skipped A.release=success B.release=success B.started=2026-11-23T14:00:25Z A.completed=2026-11-23T14:00:23Z
+PASS: C 被拒（release=skipped）未替换等待中的 B；A 完成；B 保留并在 A 结束后执行
+2026-11-23T14:01:42Z case c2 done
