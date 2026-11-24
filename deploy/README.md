@@ -1,16 +1,19 @@
 # InsightWeave 部署手册
 
-> 对应设计：[doc 13](../docs/13_项目Docker容器化与本地CI_CD发布设计.md) / [doc 13.1](../docs/13.1_镜像与依赖安装明细.md)
-> 首次实施：2026-11-17；全部六项任务已完成。
+> 对应设计：[doc 13](../docs/13_项目Docker容器化与本地CI_CD发布设计.md) / [doc 13.1](../docs/13.1_镜像与依赖安装明细.md)；发布入口与自动联动见 [doc 15](../docs/15_公开项目与私有部署仓库联动及CI_CD改造方案.md)。
+> 首次实施：2026-11-17，六项任务已完成；发布入口按 doc 15 改造，旧入口 `local-release.yml` 已于 2026-11-24 停用并删除。
 
 ## 架构概览
 
 ```
-git push origin main
-→ GitHub Actions 触发（.github/workflows/local-release.yml）
-→ 本机 Runner（iw-runner 账号，WSL Debian）接单
-→ ci.sh：干净 checkout → 离线测试 → 三镜像构建 → 隔离预检
-→ deploy.sh release：契约/依赖预检 → 排空 → 替换应用容器 → 两阶段冒烟 → 状态就绪
+PR 合并到公开仓 paulwxq/insightweave 的 main
+→ 云端 CI（.github/workflows/ci.yml：五个套件 + ci-required）
+→ main 的 CI 成功后，notify-deploy.yml 请求私有部署仓 paulwxq/insightweave-deploy
+→ 私有 deploy.yml 的 verify（托管 Runner）：核验维护者身份与来源
+→ 私有 deploy.yml 的 release（本机 Runner，iw-runner 账号，WSL Debian）：复核后检出该源码提交
+    → ci.sh：干净 checkout → 离线测试 → 三镜像构建 → 隔离预检
+    → deploy.sh release：契约/依赖预检 → 排空 → 替换应用容器 → 两阶段冒烟 → 状态就绪
+→ 私有 deploy.yml 的 finalize（托管 Runner）：确认本次确实部署成功
 → http://localhost:18080 提供完整服务
 ```
 
@@ -85,23 +88,54 @@ TCP 连接被拒绝表示未发现监听；超时、权限错误或 Docker 状�
 ### 发布（全自动）
 
 ```bash
-git push origin main    # 这就是你唯一需要做的事
+git switch -c <分支>              # 在功能分支上提交
+git push -u origin <分支>         # 开 PR；云端 CI 通过后合并，无需再点部署
 ```
+
+合并后 main 的 CI 成功即自动部署。main 受分支保护：必须走 PR，必需检查 `ci-required` 成功才能合并；规则对维护者同样生效，不能直接推送 main。
+
+### 追踪、重试与暂停
+
+| 环节 | 在哪里看 |
+|---|---|
+| 来源 CI | 公开仓 Actions → `InsightWeave CI`（main 的 push 运行） |
+| 通知 | 公开仓 Actions → `Notify private deployment`；摘要里有来源参数、通知编号和私有 run ID |
+| 部署 | 私有仓 `paulwxq/insightweave-deploy` Actions → `Deploy verified source`（verify → release → finalize） |
+
+通知为绿色只表示私有仓已受理，不表示服务已更新；以私有运行的 finalize 为准。
+
+**重试**：先确认旧的执行已结束、本机现场是 `ready`，再按出问题的位置选**一个**运行完整重跑。三条命令不能连续执行，也不加 `--failed` 或 `--job`：
+
+| 出问题的位置 | 命令 |
+|---|---|
+| 私有部署失败 | `gh run rerun <私有运行ID> --repo paulwxq/insightweave-deploy` |
+| 通知明确未受理 | `gh run rerun <通知运行ID> --repo paulwxq/insightweave` |
+| main 的来源 CI 需要完整重新验证 | `gh run rerun <来源运行ID> --repo paulwxq/insightweave` |
+
+通知是否受理不明时先查清，不重复发送。完整重跑会生成新的 release_id，并可能再次构建和部署同一份源码。
+
+**暂停自动发布**（维护或回退之前）：`gh workflow disable notify-deploy.yml --repo paulwxq/insightweave`，读回 `state` 为 `disabled_manually`。停用不取消已经在运行的部署，要等它正常收尾。维护结束并确认后，用 `gh workflow enable notify-deploy.yml --repo paulwxq/insightweave` 恢复。完整程序见 doc 15 §8.3、§8.5。
 
 ### 手动发布/回退
 
-```bash
-D=/home/iw-runner/insightweave-runtime
-sudo -u iw-runner env DEPLOY_ROOT=$D ENV_FILE=$D/deploy.env \
-  PROJECT=insightweave-local \
-  PYTHON_BIN=/home/iw-runner/.venv-smoke/bin/python \
-  bash deploy/scripts/deploy.sh release <release_id>     # 发布指定版本
+自动发布停用或不可用时才手动操作，并且先暂停自动发布。工具用独立运维检出 `/home/iw-runner/insightweave-ops/source/`，不依赖 Runner 的 `_work`。每次操作前把它固定到**当前线上版本**（`deployment.json` 的 current）的来源提交，核对 HEAD 和干净状态；脚本写绝对路径。占位值替换为已核实的值：
 
-sudo -u iw-runner env DEPLOY_ROOT=$D ENV_FILE=$D/deploy.env \
+```bash
+set -euo pipefail
+OPS_SOURCE=/home/iw-runner/insightweave-ops/source
+D=/home/iw-runner/insightweave-runtime
+EXPECTED_TOOL_SHA=<已核实的 current 来源提交，40 位>
+TARGET_RELEASE_ID=<已核实的 current 或 previous 的 release_id>
+
+sudo -u iw-runner git -C "$OPS_SOURCE" rev-parse HEAD        # 必须等于 EXPECTED_TOOL_SHA
+sudo -u iw-runner git -C "$OPS_SOURCE" status --porcelain    # 必须为空
+sudo -u iw-runner env DEPLOY_ROOT="$D" ENV_FILE="$D/deploy.env" \
   PROJECT=insightweave-local \
   PYTHON_BIN=/home/iw-runner/.venv-smoke/bin/python \
-  bash deploy/scripts/deploy.sh rollback <release_id>    # 回退（仅 current/previous）
+  bash "$OPS_SOURCE/deploy/scripts/deploy.sh" rollback "$TARGET_RELEASE_ID"   # 回退（仅 current/previous）
 ```
+
+手动发布先在同一检出里用 `ci.sh` 生成镜像和候选清单，再执行 `deploy.sh release`；完整命令和注意事项见 `/home/iw-runner/insightweave-ops/README.md` 与 doc 15 §8.4。
 
 ### 修改配置（换 LLM key、改业务库连接等）
 
@@ -110,7 +144,7 @@ sudo nano /home/iw-runner/insightweave-runtime/config/metaweave.env
 sudo nano /home/iw-runner/insightweave-runtime/config/nl2sql.env
 ```
 
-**生效方式**：在 GitHub → Actions → InsightWeave local release → Run workflow 手动触发。流水线会自动选择正确版本、排空在途任务、重新创建后端容器（读取新配置）、两阶段冒烟验证后标记就绪。
+**生效方式**：后端容器必须真正重建才会读取新配置。由维护者决定是否对最新 main 再执行一次完整发布：新发布生成新的 release_id，排空在途任务、重新创建后端容器（读取新配置），两阶段冒烟通过后标记就绪。它同时会发布最新 main 的代码；当前运行版本与 main 不同时，不会只为了改配置而升级代码。专门的配置重发入口（`reconfigure`）尚未实现。重新触发的方法见上面"追踪、重试与暂停"和 doc 15 §8.4、§8.5。
 
 **注意**：`docker compose restart` 不会加载新配置（沿用创建时的 env）；手动 `--force-recreate` 会使用 deploy.env 中的镜像 tag（可能指向旧版本）且跳过排空与冒烟。**不推荐绕过流水线手动操作**；确需手动时理解上述风险。
 
@@ -139,7 +173,7 @@ CLI JSON 输出单测仍运行真实子进程，但对 doctor 的业务库/平�
 
 Docker 镜像默认 `NL2SQL_LOG_LEVEL=INFO`（覆盖 YAML 的 DEBUG），完整提示词不输出、日志量大幅减少。
 
-**临时排查**：编辑 `/home/iw-runner/insightweave-runtime/config/nl2sql.env`，取消注释 `NL2SQL_LOG_LEVEL=DEBUG`，然后在 Actions 手动 Run workflow（自动排空+重建+冒烟）。恢复时改回 INFO 并重跑。
+**临时排查**：编辑 `/home/iw-runner/insightweave-runtime/config/nl2sql.env`，取消注释 `NL2SQL_LOG_LEVEL=DEBUG`，然后按上面"修改配置"的生效方式对最新 main 再执行一次完整发布（自动排空+重建+冒烟）。恢复时改回 INFO，再执行一次。
 
 **注意**：修改后需**重新创建容器**（`--force-recreate`），`restart` 不加载新 env（见上）。
 

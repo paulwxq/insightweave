@@ -1,0 +1,60 @@
+# 公开源码仓 → 私有部署仓的发布请求（doc 15 §5.3）。
+# 只在本仓 main 的 push 触发的 InsightWeave CI 成功后发出；不检出源码、不运行 PR 产物。
+# 通知为绿色只表示私有仓已受理，不表示已部署；追踪、重试与暂停见 doc 15 §5.4、§8.3、§8.5。
+name: Notify private deployment
+on:
+  workflow_run:
+    workflows: [InsightWeave CI]
+    types: [completed]
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  notify:
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'main' &&
+      github.event.workflow_run.head_repository.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: deployment-dispatch
+    steps:
+      - name: Request deployment of the successful source commit
+        env:
+          GH_TOKEN: ${{ secrets.DEPLOY_TRIGGER_TOKEN }}
+          DEPLOY_REPOSITORY: paulwxq/insightweave-deploy
+          SOURCE_SHA: ${{ github.event.workflow_run.head_sha }}
+          SOURCE_RUN_ID: ${{ github.event.workflow_run.id }}
+          SOURCE_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+        run: |
+          set -euo pipefail
+          # GITHUB_RUN_ID/ATTEMPT 在此属于公开通知，SOURCE_RUN_* 属于来源 CI。
+          notification_id="n${GITHUB_RUN_ID}-a${GITHUB_RUN_ATTEMPT}"
+          request_file="$RUNNER_TEMP/deploy-request-$notification_id.json"
+          receipt_file="$RUNNER_TEMP/deploy-receipt-$notification_id.json"
+          jq -n --arg sha "$SOURCE_SHA" --arg run "$SOURCE_RUN_ID" \
+            --arg attempt "$SOURCE_RUN_ATTEMPT" \
+            '{ref:"main",inputs:{source_sha:$sha,source_run_id:$run,
+              source_run_attempt:$attempt}}' > "$request_file"
+          # 留下无凭据的来源参数，便于人工核实；不建立发送账本。
+          jq -c --arg phase intent '. + {dispatch_phase:$phase}' "$request_file" \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+          if ! gh api --method POST \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/$DEPLOY_REPOSITORY/actions/workflows/deploy.yml/dispatches" \
+            --input "$request_file" > "$receipt_file"; then
+            printf '%s\n' '发送出错，先查看本次通知及私有运行，核实受理结果，不自动重发。' >&2
+            exit 1
+          fi
+          # 不接受空响应、缺字段或指向其他仓库的 URL 作为完整回执。
+          jq -e -s --arg repo "$DEPLOY_REPOSITORY" '
+            (length == 1) and (.[0] | .workflow_run_id as $id |
+              (($id|type) == "number") and ($id > 0) and (($id|floor) == $id) and
+              (.run_url == ("https://api.github.com/repos/"+$repo+"/actions/runs/"+($id|tostring))) and
+              (.html_url == ("https://github.com/"+$repo+"/actions/runs/"+($id|tostring))))
+          ' "$receipt_file" > /dev/null
+          jq -c --arg notification "$notification_id" \
+            '. + {notification_id:$notification,dispatch_phase:"accepted"}' "$receipt_file" \
+            | tee -a "$GITHUB_STEP_SUMMARY"

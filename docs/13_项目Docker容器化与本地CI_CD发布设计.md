@@ -381,6 +381,8 @@ PG 官方镜像的入口初始化脚本只在空数据目录运行，后续表�
 
 ### 7.1 GitHub 触发与本地执行
 
+> **2026-11-24 更新（doc 15 取代本节的触发方式）**：`local-release.yml` 已停用并删除，公开仓不再注册本机 Runner，也没有手动触发入口。现行链路是：PR 合并到公开仓 main → 云端 CI（五个套件加 `ci-required`）成功 → `notify-deploy.yml` 请求私有部署仓 → 私有 `deploy.yml` 的 verify（托管）→ release（本机 Runner，先复核再检出该源码提交）→ finalize。重新发布只按 doc 15 §8.3 的完整重跑命令。下面流程图中“独立 checkout”及其后的步骤仍是 release 阶段的实际内容；操作说明以[部署手册](../deploy/README.md)为准。
+
 首版使用发布分支 `main`，提供 `workflow_dispatch` 手动重发。现有开发分支不会未经用户安排就被改名或合并。
 
 ```text
@@ -488,6 +490,7 @@ INSIGHTWEAVE_DEPLOY_ROOT/
 - 初次部署没有旧版本可退时如实失败；回退失败时保留诊断，不能把流水线标绿。
 - 不自动回滚数据库结构，也不承诺单机 Compose 零停机。停止旧应用前先完成 §7.5 的排空，再利用 §5.4 的优雅退出余量；排空超时不发送停止命令。
 - leave 或开放后的普通冒烟失败时，保持 deploying，重新写维护标记并 enter，再按同一排空规则尝试恢复；无法安全恢复则写 recovery_required。开放后可能已有新业务请求，不能假定候选容器没有任务而直接停止。
+- 手动回退（doc 15 §8.4）：先暂停自动发布，在独立运维检出 `/home/iw-runner/insightweave-ops/source/` 里执行；工具版本取操作开始时 current 对应的源码提交，脚本写绝对路径。见[部署手册](../deploy/README.md)。
 
 本次不引入数据库版本升级或迁移框架。今后新增表字段或升级数据库引擎时，随实际需求提供升级步骤和回退边界，不简单执行“换个数据库镜像标签”。
 
@@ -556,7 +559,7 @@ docker compose --project-name "$compose_project" --env-file "$deploy_env" \
 | `metaweave/backend/api/main.py` | 修改 | create_app 在部署开关启用时装配门闩；保留已有任务执行链路 |
 | `nl2sql/src/api/main.py` | 修改 | Web API 在部署开关启用时装配同一门闩，不改 Agent 接线 |
 | `nl2sql/src/api/v2/runtime.py` | 修改 | submit_run/submit_read 通过提交前登记、完成后释放的 future 计数接入排空；保留 shutdown |
-| `.github/workflows/local-release.yml` | 新增 | main/手动触发，self-hosted Runner，串行发布，调用同一套脚本 |
+| `.github/workflows/local-release.yml` | 新增（2026-11-24 已停用并删除） | main/手动触发，self-hosted Runner，串行发布，调用同一套脚本；现行入口见 doc 15 |
 | `deploy/tests/test_deployment_contract.py` | 新增 | 七服务、初始化及 bootstrap 重试排空、两版本回退范围、同版本恢复、reload 失败、原子状态与两阶段冒烟 |
 | `deploy/tests/test_lifecycle.py` | 新增 | BackgroundTasks、断连 future、超时不停止、空闲控制/健康轮询计数为零、控制鉴权回归 |
 | `deploy/README.md` | 新增 | 本机配置、受维护测试清单、Runner 信任边界、安装/发布/回退、手动备份恢复/清理及浏览器验收 |
@@ -588,6 +591,8 @@ docker compose --project-name "$compose_project" --env-file "$deploy_env" \
 
 ### 8.2 GitHub Actions 最小流程示意
 
+> 本示意对应已删除的 `local-release.yml`，仅作历史记录。现行任务图见 doc 15 §5.3（公开通知 `notify-deploy.yml`）和私有部署仓的 `deploy.yml`（verify → release → finalize）。
+
 ```yaml
 name: InsightWeave local release
 on:
@@ -618,9 +623,11 @@ jobs:
 
 示意中的占位 action SHA 在实施时必须替换。只允许可信发布分支使用这个本机 Runner，不注册外部 PR 或 `pull_request_target` 触发，不把个人开发目录作为 checkout。
 
-Runner 注册、标签和 GitHub 仓库设置由接入步骤完成；不能把注册令牌提交到仓库。Runner 启动环境需显式包含 Python、uv、Node 和 Docker 路径，不能依赖交互 shell 的 nvm 自动加载。访问 GitHub 失败时按 §4.2 设置本机代理，并在 Runner 启动前落实；已有网络测试结果不能替代实际运行账号的环境验证。
+Runner 注册、标签和 GitHub 仓库设置由接入步骤完成；不能把注册令牌提交到仓库。2026-11-24 起本机 Runner 只注册到私有部署仓 `paulwxq/insightweave-deploy`（doc 15 §8.1）。Runner 启动环境需显式包含 Python、uv、Node 和 Docker 路径，不能依赖交互 shell 的 nvm 自动加载。访问 GitHub 失败时按 §4.2 设置本机代理，并在 Runner 启动前落实；已有网络测试结果不能替代实际运行账号的环境验证。
 
 ### 8.3 Runner 的信任边界
+
+> **2026-11-24 更新**：源码仓已公开（doc 15 §10 步骤 7），隔离方式相应改为：公开仓只运行托管 CI，本机 Runner 只注册在私有部署仓；公开仓 main 已配置分支保护（要求 PR 和 `ci-required` 成功，对管理员同样生效），单人阶段不要求人工批准（doc 15 §4.2）。下面各条是首版按私有仓设计时的判断，保留作对照。
 
 - 接入时先记录总仓库是否私有、维护者名单、谁能修改工作流和发布分支。首版推荐本人维护的私有仓库；不把当前尚未配置的仓库说成已经私有。公开仓库、外部贡献者或多团队共享 Runner 不直接套用本方案，需要重新确认隔离方式。
 - Runner 仅注册到本项目仓库，不用于其他项目；不运行外部 PR、fork、任意 ref 或用户输入拼接出的脚本。`contents: read` 只限制 GitHub token，不能限制 checkout 中脚本访问本机。
@@ -722,7 +729,7 @@ Windows 浏览器分别从 `http://localhost:18080` 和 `http://127.0.0.1:18080`
 - [ ] **任务 2B：完整应用镜像和 Compose。** 以前项真实文件和通过的离线测试为输入，编写三个 Dockerfile、ignore、Nginx、环境模板及重启/资源/日志配置；补并通过严格七服务检查。按 §5.1 的明确路径复制全部运行依赖，再构建和预检三个应用镜像：后端启用 `DEPLOY_CONTROL_ENABLED=1`，使用隔离的预检配置/控制目录，核对控制状态、契约及维护门闩；初始化和冒烟脚本在镜像中可导入并解析参数；前端按 §7.2 的 hosts 映射完成独立预检。此时直接使用 Docker/Compose 命令，不调用任务 4 才提供的 ci/deploy 脚本；不能靠关闭门闩、空文件、stub 或宿主源码挂载绕过最终运行方式。
 - [ ] **任务 3：真实初始化和持久化联调。** 使用任务 2B 的完整镜像与 Compose，在独立新卷中通过 `exec` 执行任务 2A 已实现的初始化和基础设施冒烟。验证 MetaWeave DDL 实际事务回滚、NL2SQL 初始化中断后的幂等重入、未知结构拒绝、重复初始化和重启保留；不重新实现初始化封装，不重置当前真实数据。
 - [ ] **任务 4：本地 CI/CD 编排与发布故障验收。** 扩展部署脚本测试，开发仅在本机执行的 `ci.sh`、`deploy.sh`，将任务 2B 的构建/预检、任务 3 的初始化验证及已实现的 `smoke.py` 接入统一流程。验证两版本回退、bootstrap 重试、非 ready 恢复、维护前记录 deploying、契约/密钥边界、排空超时和断连 future、两阶段冒烟与并发锁；实际验证前端保留/后端 IP 改变后的 reload 和失败分支。此阶段完成完整发布验收，不再首次创建门闩或容器内必需脚本。
-- [ ] **任务 5：GitHub 接入。** 确认 §8.3 的仓库/账号信任边界，绑定远端与可信分支，注册专用 Runner；先验证手动触发，再验证 main 推送触发，均回报明确结果。
+- [ ] **任务 5：GitHub 接入。** 确认 §8.3 的仓库/账号信任边界，绑定远端与可信分支，注册专用 Runner；先验证手动触发，再验证 main 推送触发，均回报明确结果。（2026-11-24：发布入口与 Runner 归属已按 doc 15 §10 步骤 3—8 迁移，这里的手动触发与 main 推送触发不再适用。）
 - [ ] **任务 6：交付记录。** 更新 README、启动指南、Windows 浏览器验收和实际结果；记录备份/业务链路未验证边界，提供手动恢复/精确清理步骤；提交配置与脚本，不提交密钥、数据卷或日志。
 
 任务 3 包含上述建库中断重试的实际验证；任务 4 的 `ci.sh` 必须显式执行 `deploy/tests/`，不能仅复用原有两个后端的测试目录。
