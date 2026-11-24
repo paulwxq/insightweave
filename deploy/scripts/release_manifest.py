@@ -97,6 +97,10 @@ def windows_listeners(ports: list[int]) -> set[int]:
                 "-Command",
                 script,
             ],
+            # 查询不读取项目文件。WSL 只在当前目录的每一级都能被默认用户穿过时才能启动
+            # Windows 程序；从 iw-runner 的目录（如 Runner 的 _work）里启动会报
+            # Invalid argument，所以不继承调用者的工作目录，固定从 /tmp 启动。
+            cwd="/tmp",
             capture_output=True,
             text=True,
             encoding="utf-8",

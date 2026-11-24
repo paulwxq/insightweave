@@ -679,3 +679,54 @@ def test_windows_listener_query_is_bounded_and_checks_exit_code(monkeypatch, fai
             module.windows_listeners([port])
     else:
         assert module.windows_listeners([port]) == {port}
+
+
+def _windows_query_module(monkeypatch):
+    spec = importlib.util.spec_from_file_location("m01_windows_query", SCRIPT)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    monkeypatch.setattr(module.platform, "release", lambda: "microsoft-standard-WSL2")
+    monkeypatch.setattr(module.shutil, "which", lambda name: "/windows/powershell.exe")
+    return module
+
+
+def test_windows_listener_query_starts_from_tmp_not_the_callers_directory(monkeypatch):
+    """以 iw-runner 身份在 /home/iw-runner 下执行时，WSL 无法从调用者的目录启动 Windows
+    程序（Invalid argument）。查询不读取项目文件，子进程固定从 WSL 默认用户可访问的
+    /tmp 启动，而不是继承部署脚本所在目录。"""
+    module = _windows_query_module(monkeypatch)
+    seen = {}
+
+    def run(command, **kwargs):
+        seen["command"] = command
+        seen.update(kwargs)
+        return subprocess.CompletedProcess(command, 0, json.dumps([]), "")
+
+    monkeypatch.setattr(module.subprocess, "run", run)
+    monkeypatch.chdir("/")
+    assert module.windows_listeners([43211]) == set()
+    assert seen.get("cwd") == "/tmp"
+    # 查询内容不随工作目录改变：仍由 -Command 传入并包含所问端口，不在 /tmp 落任何脚本。
+    assert seen["command"][-2] == "-Command" and "43211" in seen["command"][-1]
+
+
+@pytest.mark.parametrize(
+    "outcome", ["timeout", "invalid-json", "not-a-list", "port-not-requested"]
+)
+def test_windows_listener_query_rejects_unusable_answers(monkeypatch, outcome):
+    """查询失败不能解释为端口空闲：超时或响应无效一律拒绝。"""
+    module = _windows_query_module(monkeypatch)
+    answers = {
+        "invalid-json": "not json",
+        "not-a-list": json.dumps({"port": 43212}),
+        "port-not-requested": json.dumps([43299]),
+    }
+
+    def run(command, **kwargs):
+        if outcome == "timeout":
+            raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+        return subprocess.CompletedProcess(command, 0, answers[outcome], "")
+
+    monkeypatch.setattr(module.subprocess, "run", run)
+    with pytest.raises(ValueError, match="Windows TCP 监听查询"):
+        module.windows_listeners([43212])
