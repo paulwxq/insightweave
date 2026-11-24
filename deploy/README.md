@@ -19,6 +19,22 @@ PR 合并到公开仓 paulwxq/insightweave 的 main
 
 七服务：frontend（Nginx 静态+代理）、metaweave、nl2sql、postgres、neo4j、milvus、attu。
 
+## 日常自动发布前置条件
+
+当前宿主环境使用 Windows Docker Desktop 的 Linux 容器引擎。合并 PR 前，确认 Docker Desktop 已启动、引擎就绪，且 WSL 中实际执行发布的 `iw-runner` 账号能够通过既定 Docker context 访问它；仅打开 Docker Desktop 窗口不代表引擎已经可用。本机 Runner 也须在线。
+
+普通 `deploy.sh release` 更新已有部署，要求：
+
+- `deployment.json` 的 `phase` 为 `ready`，无维护标记，当前版本的可信快照可用。
+- 四个基础服务 `postgres`、`neo4j`、`milvus`、`attu` 已运行，实际镜像 ID 与目标快照的上游镜像一致，数据库及必要对象等依赖检查通过。
+- 两个现有后端 `metaweave`、`nl2sql` 已运行，部署控制接口可达且状态、契约合法，随后能够完成排空。
+
+这里要求运行的是**容器**；镜像是构建产物，没有“启动状态”。日常使用建议保持七个项目服务正常，但前端 `frontend` 提前运行并非普通新版本发布的硬性条件，发布过程会按目标版本保留或启动它。Docker Desktop 中其他项目的容器不需要启动。
+
+若只启动 Docker Desktop，而上述基础服务或后端仍停止，普通自动发布会在依赖预检阶段停止，不会代替宿主重启后的整套服务恢复。应先核实并恢复现有部署，再发布；首次安装走 bootstrap，异常现场按下文恢复程序处理，不绕过预检直接 `compose up`。是否配置自动启动是运维选择，手动启动并确认就绪也可以；这不是必须额外开启的自动发布功能。
+
+以上是运行环境前提，不能保证整个发布必然成功；来源核验、测试、构建、端口检查和冒烟等仍须通过。
+
 ## 部署目录
 
 ```

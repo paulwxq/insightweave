@@ -461,6 +461,8 @@ ci.sh/deploy.sh 继续从源码 checkout 计算 SHA；APP_GIT_SHA、候选和快
 
 沿用 deploy.sh、release_manifest.py、init_platform.py、smoke.py 和运行时门闩，保留候选/镜像身份/配置哈希核验、上游与端口预检、配置检查、排空、两阶段冒烟、current/previous、recovery_required 及可信快照回退。
 
+日常自动发布前，Docker Desktop 的 Linux 引擎须就绪且 iw-runner 可访问，本机 Runner 在线；已有部署须为 ready、无维护标记，四个基础服务和两个后端须运行并通过既有预检。镜像没有“启动状态”，前端提前运行也不是普通新版本发布的硬性条件。仅启动 Docker Desktop 不会使发布脚本自动恢复整套已停止的服务；自动启动设置并非强制要求，完整前置条件见 [部署手册](../deploy/README.md#日常自动发布前置条件)。
+
 本地 state/.lock 继续由 deploy.sh 获取；外层入口不能持有同一非重入锁再调用脚本。WSL 继续要求 iw-runner 能执行 Windows PowerShell 端口检查。不得绕过预检直接 compose up，不删除数据库卷或恢复未知现场。
 
 **端口预检的 Windows 查询目录限制（2026-11-24 实测并修复）：**`check_ports` 只在五个宿主端口中存在未被本项目运行中容器持有的端口时，才通过 PowerShell `Get-NetTCPConnection` 只读查询 Windows 侧监听（doc 13 §M01）；应用正常运行时不调用它，正常的发布不受本问题影响。WSL 2.6.3 下，只有当前目录的每一级都能被默认用户穿过时才能启动 PowerShell，而 `/home/iw-runner` 为 700。修复前，以 iw-runner 身份从 Runner 的 `_work` 或 iw-runner 的其他目录里做这项查询，会以“Windows TCP 监听查询失败”中止，影响的是应用停止或部分停止时的预检。修复：`windows_listeners()` 只为该查询子进程指定 `cwd="/tmp"`（WSL 内的普通临时目录），不继承调用者的工作目录；查询内容、十秒超时和“失败即拒绝”的规则不变，不放开 iw-runner 家目录权限，也不使用 Windows 系统目录。验证（以 iw-runner 身份直接调用 `windows_listeners()`，在 sudo 会话和 systemd 临时单元中、工作目录设为 Runner 的 `_work`）：修复前查询失败，修复后对 18080 返回 `[18080]`、对未监听端口返回 `[]`；从 `/tmp` 启动则修复前后一致。验证必须直接调用该函数：只跑整个端口预检时，五个端口都由运行中的本项目容器持有，PowerShell 会被跳过。手动运维检出固定在 current 的来源提交，其工具是否带有此修复取决于该提交；在此之前手动操作仍须在 paul 可访问的目录执行（见运维说明）。
