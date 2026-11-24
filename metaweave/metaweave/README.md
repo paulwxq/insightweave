@@ -325,7 +325,9 @@ pytest --cov=src/metaweave tests/metaweave/
 
 ## 许可证
 
-MIT License
+`Copyright (C) 2026 paulwxq <paul_wang77@hotmail.com>`
+
+本项目采用 [GNU Affero General Public License v3.0 only](../../LICENSE)（`AGPL-3.0-only`）。关于商业使用、网络服务的对应源码义务、第三方许可及历史授权，请参阅[许可证说明](../../docs/许可证说明.md)。
 
 ## 联系方式
 
