@@ -1,7 +1,7 @@
 # InsightWeave 公开项目与私有部署仓库联动及 CI/CD 改造方案
 
 > 编写日期：2026-11-23；最近修订：2026-11-24。
-> 状态：待实施设计。本轮只修改文档，不表示仓库、权限、Runner 或工作流已经配置完成。
+> 状态：已实施（2026-11-24）。§10 步骤 1—9 已执行，首次自动部署成功；执行结果、验证范围和已知偏差见[上线验收记录](reviews/doc15_release_pipeline_acceptance.md)。下文保留实施前的设计文本。
 > 当前实现依据：[doc 13](13_项目Docker容器化与本地CI_CD发布设计.md)、[doc 13.1](13.1_镜像与依赖安装明细.md)、[部署手册](../deploy/README.md)。旧发布工作流 `.github/workflows/local-release.yml` 已在 §10 步骤 3 停用、随步骤 4 的首个 PR 删除；下文提到它时均指迁移前的实现。
 > 本轮决定：采用方案 1，维护者合并 PR 即授权发布，main CI 成功后自动部署。按单人开发、单人发布的实际规模收敛首期范围；异常由维护者核实处理。
 
@@ -460,6 +460,8 @@ ci.sh/deploy.sh 继续从源码 checkout 计算 SHA；APP_GIT_SHA、候选和快
 ### 7.3 保留现有部署行为
 
 沿用 deploy.sh、release_manifest.py、init_platform.py、smoke.py 和运行时门闩，保留候选/镜像身份/配置哈希核验、上游与端口预检、配置检查、排空、两阶段冒烟、current/previous、recovery_required 及可信快照回退。
+
+日常自动发布前，Docker Desktop 的 Linux 引擎须就绪且 iw-runner 可访问，本机 Runner 在线；已有部署须为 ready、无维护标记，四个基础服务和两个后端须运行并通过既有预检。镜像没有“启动状态”，前端提前运行也不是普通新版本发布的硬性条件。仅启动 Docker Desktop 不会使发布脚本自动恢复整套已停止的服务；自动启动设置并非强制要求，完整前置条件见 [部署手册](../deploy/README.md#日常自动发布前置条件)。
 
 本地 state/.lock 继续由 deploy.sh 获取；外层入口不能持有同一非重入锁再调用脚本。WSL 继续要求 iw-runner 能执行 Windows PowerShell 端口检查。不得绕过预检直接 compose up，不删除数据库卷或恢复未知现场。
 
