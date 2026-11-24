@@ -2,7 +2,7 @@
 
 > 编写日期：2026-11-23；最近修订：2026-11-24。
 > 状态：待实施设计。本轮只修改文档，不表示仓库、权限、Runner 或工作流已经配置完成。
-> 当前实现依据：[doc 13](13_项目Docker容器化与本地CI_CD发布设计.md)、[doc 13.1](13.1_镜像与依赖安装明细.md)、[部署手册](../deploy/README.md)、[现有发布工作流](../.github/workflows/local-release.yml)。
+> 当前实现依据：[doc 13](13_项目Docker容器化与本地CI_CD发布设计.md)、[doc 13.1](13.1_镜像与依赖安装明细.md)、[部署手册](../deploy/README.md)。旧发布工作流 `.github/workflows/local-release.yml` 已在 §10 步骤 3 停用、随步骤 4 的首个 PR 删除；下文提到它时均指迁移前的实现。
 > 本轮决定：采用方案 1，维护者合并 PR 即授权发布，main CI 成功后自动部署。按单人开发、单人发布的实际规模收敛首期范围；异常由维护者核实处理。
 
 ## 1. 目标与关键决定
@@ -71,7 +71,7 @@ push main / 手动运行
 .github/pull_request_template.md     # 可选：变更及验证说明
 ```
 
-原 local-release 先停用，再在 §10 步骤 9 的切换 PR 中删除，不能保留公开仓库调度本地 Runner 的路径。公开展示源码 CI、PR 和设计；真实部署详细日志默认留在私有仓库。
+原 local-release 先在 §10 步骤 3 停用，其工作流文件随步骤 4 合入的首个 PR 删除，不能保留公开仓库调度本地 Runner 的路径。公开展示源码 CI、PR 和设计；真实部署详细日志默认留在私有仓库。
 
 ### 3.2 私有仓库 insightweave-deploy
 
@@ -463,6 +463,8 @@ ci.sh/deploy.sh 继续从源码 checkout 计算 SHA；APP_GIT_SHA、候选和快
 
 本地 state/.lock 继续由 deploy.sh 获取；外层入口不能持有同一非重入锁再调用脚本。WSL 继续要求 iw-runner 能执行 Windows PowerShell 端口检查。不得绕过预检直接 compose up，不删除数据库卷或恢复未知现场。
 
+**已确认的端口预检目录限制（2026-11-24 实测，待修复）：**WSL 2.6.3 下，只有当前目录的每一级都能被 WSL 默认用户穿过时才能启动 PowerShell，而 `/home/iw-runner` 为 700。因此以 iw-runner 身份从 Runner 的 `_work` 或 iw-runner 的其他目录里运行时，端口预检以“Windows TCP 监听查询失败”中止（sudo 会话与 systemd 临时单元中相同）；从 paul 可访问的目录以脚本绝对路径运行则通过。影响：手动路径须在可访问的目录执行（已写入运维说明）；自动发布的 release job 在 `_work` 内运行，须在步骤 9 之前修复，例如让该查询子进程使用 Windows 可访问的工作目录，而不是放开 iw-runner 家目录的权限。修复方式待维护者确认。它不影响只到候选清单的 ci.sh，§7.5 的演练因此没有暴露此问题。
+
 首期不改变 manifest 格式、不接入请求账本，也不把云端失败颜色当作容器未变更的证明。
 
 ### 7.4 已确认的 contract.json 类型问题
@@ -633,7 +635,7 @@ gh api repos/OWNER/insightweave/actions/workflows/notify-deploy.yml --jq '{id,pa
 
 | 位置 | 改动及约束 |
 | --- | --- |
-| 公开 local-release.yml | 任何准备性改动合入 main 前先停用并核实旧发布结束；在 §10 步骤 9 的切换 PR 中删除，不恢复公开 self-hosted 路径 |
+| 公开 local-release.yml | 步骤 3 先停用并核实旧发布结束；文件随步骤 4 的首个 PR 删除，不恢复公开 self-hosted 路径 |
 | 公开 ci.yml、check.sh、ci.sh | 提取共享五套件检查；PR/main 云端汇总；本地 all 后继续原构建/候选预检 |
 | 公开 notify-deploy.yml | 三来源参数、固定 dispatch API、日志/摘要保存明确私有 run ID，DEPLOY_REPOSITORY 按目标 API 的 full_name 原样配置；无自动重试或回执恢复程序 |
 | 私有 deploy.yml、verify_source_request.py、release_local.sh | 单维护者稳定 ID、固定来源/当前 main/最新 attempt、job 级授权绑定、双 checkout、本地复核及 finalize；明确过期时输出统一日志标记，技术故障及未授权拒绝不用该标记 |
@@ -666,14 +668,14 @@ gh api repos/OWNER/insightweave/actions/workflows/notify-deploy.yml --jq '{id,pa
 
 1. **公开准备及额度核验。**初步核查当时版本及已有 Git 历史的凭据/业务数据，.gitignore 不清历史。公开前的最终扫描在步骤 7 完成。既有 gitleaks v8.30.1 扫描 310 个提交/141.75 MB 零发现和两幅 chinook 样例截图抽查保留为历史证据，不代替最终复核。维护者已决定全部既有 docs 随仓公开，doc 13/13.1 的 WSL 网关代理实值保留，不为此剔除文档/重写历史；当前版本可清理六个已跟踪 Zone.Identifier 并补忽略，真实凭据泄露才先轮换再处理历史。核实当时 Actions 用量及零付费阻断。本步只做核查和准备：清理及忽略规则等所有准备性代码/文档改动均放入步骤 2 的功能分支，步骤 3 停用并确认旧发布结束前，不得直接推送或合入 main，以免触发旧发布。
 2. **功能分支验证 PR CI。**按 §9.1 明确授权后，实现共享检查及 ci.yml，纳入步骤 1 的清理改动及已裁定随首个 PR 提交的文档/审核产物，推送功能分支并开 PR 验证，尚不合并 main。新脚本提交后，取得生产演练明确授权，再按 §7.5 从该提交的新克隆完成一次只到候选清单的完整本地 ci.sh，记录结果及本次资源收尾，不能等步骤 9 才首次完整验证。Free 私有阶段的 PR CI 消耗包含额度，保护和 environment 公开后配置。contract.json 类型修复可在此阶段纳入并做本地回归，不混入自动维护框架；步骤 3 起的切换动作不包含在本阶段授权中。
-3. **首次 main 更新前停旧入口并准备手动路径。**gh workflow disable local-release.yml，读回 disabled_manually，核对全部排队/等待/执行中的旧发布，等完成并核验现场。此要求也覆盖清理、忽略规则和文档等准备性提交，不能在停用前先将它们落入 main。不在同次 main 提交中删文件来代替前置停用。完成旧任务核验后，按 §8.4 以 iw-runner 身份准备独立运维目录、固定可信 current 的完整 source_sha，核对 HEAD/干净状态和 Python/Docker/端口检查环境；最小操作说明当场可用，无需等步骤 10 交付。准备不完整时不进入步骤 4；本步不通过真实回退来试探路径是否可用。
-4. **合并并验证 main CI。**合入前按 §7.5 核对演练之后的实际差异（含 main 更新引入的内容）；若实质影响测试/构建链路，先另行取得追加演练授权，对最终功能分支提交重演通过，不能沿用旧结果直接合入；纯文档/审核记录或仅合并造成的 SHA 差异不机械重演。确认后合入已通过 PR 检查的共享检查、ci.yml 及准备性清理改动。此时旧入口停用、新通知尚未合入，只有云端检查，不构建部署镜像、不替换现有应用。期间有需要使用已核验的受控本机手动路径。
+3. **首次 main 更新前停旧入口并准备手动路径。**gh workflow disable local-release.yml，读回 disabled_manually，核对全部排队/等待/执行中的旧发布，等完成并核验现场。此要求也覆盖清理、忽略规则和文档等准备性提交，不能在停用前先将它们落入 main。不在同次 main 提交中删文件来代替前置停用；旧工作流文件的删除随步骤 4 合入的 PR 落到 main。完成旧任务核验后，按 §8.4 以 iw-runner 身份准备独立运维目录、固定可信 current 的完整 source_sha，核对 HEAD/干净状态和 Python/Docker/端口检查环境；最小操作说明当场可用，无需等步骤 10 交付。准备不完整时不进入步骤 4；本步不通过真实回退来试探路径是否可用。
+4. **合并并验证 main CI。**合入前按 §7.5 核对演练之后的实际差异（含 main 更新引入的内容）；若实质影响测试/构建链路，先另行取得追加演练授权，对最终功能分支提交重演通过，不能沿用旧结果直接合入；纯文档/审核记录或仅合并造成的 SHA 差异不机械重演。确认后合入已通过 PR 检查的共享检查、ci.yml、准备性清理改动及旧 local-release.yml 的删除（推送的合并提交里已没有该文件，入口也已停用）。此时旧入口已停用且文件已删除、新通知尚未合入，只有云端检查，不构建部署镜像、不替换现有应用。期间有需要使用已核验的受控本机手动路径。
 5. **准备私有仓库及隔离诊断入口。**准备最小 verify/release/finalize 和日志字段，但本步不 dispatch 或重跑正式 deploy.yml。先在本地做响应替身测试，再只通过 §3.2 的 verify-diagnostics.yml（mode=fixtures）运行托管 Runner 拒绝用例，结构上无 release；不以“尚无 Runner 接单”代替隔离。固定维护者 ID、公开 CI ID/path 和私有控制提交。正式 deploy.yml 的首次真实执行留到步骤 9；步骤 5、8 的用例均不得经其正向或负向 dispatch 发出。复用既有 C1—C6，不重跑整套实验。
-6. **迁移 Runner。**按 §8.1 复核旧入口仍停用、无未决任务。注册到私有仓前，还须完整核对正式 deploy.yml 的全部非终态 run/job，包括 queued、waiting、pending、in_progress 的 release 和仍可能产生 release 的 verify；误触发且尚未开始的部署任务须处理并读回终态，有已开始或状态不明的任务先核实，不强杀。不能仅凭 Runner 空闲、暂未注册或一次 release 队列为空继续；旧执行均已明确结束且没有新正式 dispatch 后，才迁移账号/服务并验证运行环境。保留步骤 3 准备的 `/home/iw-runner/insightweave-ops/source/` 及所需提交，确认 iw-runner 权限、手动工具与环境仍可用，不随 `_work` 清理或注册迁移删除。沿用获准的管理身份取得 Runner 注册/移除所需的短期令牌，不为迁移提前生成跨仓部署 PAT（DEPLOY_TRIGGER_TOKEN）；该 PAT 留到步骤 8 即时生成并写入 Secret。不打印令牌或自动加权限，不同时运行两个 Runner 控制现场。
+6. **迁移 Runner。**按 §8.1 复核旧入口已停用且其工作流文件已不在 main、无未决任务。注册到私有仓前，还须完整核对正式 deploy.yml 的全部非终态 run/job，包括 queued、waiting、pending、in_progress 的 release 和仍可能产生 release 的 verify；误触发且尚未开始的部署任务须处理并读回终态，有已开始或状态不明的任务先核实，不强杀。不能仅凭 Runner 空闲、暂未注册或一次 release 队列为空继续；旧执行均已明确结束且没有新正式 dispatch 后，才迁移账号/服务并验证运行环境。保留步骤 3 准备的 `/home/iw-runner/insightweave-ops/source/` 及所需提交，确认 iw-runner 权限、手动工具与环境仍可用，不随 `_work` 清理或注册迁移删除。沿用获准的管理身份取得 Runner 注册/移除所需的短期令牌，不为迁移提前生成跨仓部署 PAT（DEPLOY_TRIGGER_TOKEN）；该 PAT 留到步骤 8 即时生成并写入 Secret。不打印令牌或自动加权限，不同时运行两个 Runner 控制现场。
 7. **最终扫描、确认旧关联已移除后公开。**公开前，以当时 main 的完整当前 HEAD 为扫描终点，重跑 gitleaks，覆盖该版本的可达提交历史及当前跟踪内容，包含步骤 2—4 新增提交；记录 HEAD、工具版本和脱敏扫描结果，不能用步骤 1 的初查或旧零发现报告替代。扫描后若 main 在公开前又更新，须按新 HEAD 重新核验；发现真实凭据时先轮换并处理，未完成核验不公开。确认没有本地 Runner 暴露给源码仓、公开准备完成，并经维护者授权后再公开。公开传播不可保证收回，沿用已确认公开范围；本次文档不执行扫描或可见性操作。
 8. **配置单人保护及 environment。**要求 PR/ci-required、不要求他人批准、保护应用于维护者；先在已公开源码仓配置环境并只允许 main。核实私有额度、gh/jq、Runner 和身份控制，按 §3.2 手动填写三个来源参数，指向当前 main 对应合法 run 的当前最新 attempt（须 completed/success），仅通过 verify-diagnostics.yml（mode=source-readonly）在实际 GitHub 托管 Runner 使用拟上线的公开只读查询方式，低频验证 main、来源 run/attempt 和必需 jobs 的完整分页。不得用正式 deploy.yml 的正向 dispatch 或重跑代替；此时 Runner 已注册，正式 verify 通过就可能部署。记录时间、是否认证、响应状态及 §6.1 的必要限流响应头；不以开发机已登录 gh 的查询结果替代，诊断任务图不包含本地 release。若限流或无法完整取得证据，先排查或配置获准只读身份并复核，未完成核验不进入步骤 9；限流拒绝分支用响应替身验证，不通过大量真实请求触发。诊断通过、准备启用前，再由维护者按 §6.1 完成必要认证/MFA，生成仅限私有部署仓 Actions: write 的跨仓部署 PAT，并立即经受限输入写入公开 deployment-dispatch 环境的 DEPLOY_TRIGGER_TOKEN Secret，不提前在步骤 6 生成或在迁移步骤间暂存，也不打印令牌值。准备好切换 PR 及操作说明；本步骤不合入新通知，通知入口的合并统一留到步骤 9，避免提前触发真实部署。
-9. **合并切换 PR 并首次真实部署。**维护者确认上线条件就绪后，合并同一个受控 PR：新增 notify-deploy.yml、删除旧 local-release.yml，并同步更新 deploy/README 和 doc 13/13.1 中的旧发布指引，特别是 README 配置生效及日志级别两处 Run workflow 说明。该合并提交自己的 main CI 成功后，新通知即会请求首次真实部署，不需要另点部署按钮。核验 main CI → 通知回执 → 私有核验 → 本地构建部署 → finalize；如出现等待，按 §8.2 记录单台 Runner 的实际 run/job 状态和可确认的等待原因，不要求专门制造排队竞争。从本次合并起到验证完成，暂停其他 main 合并/推送及无关发布重跑。此阶段预期真实变更容器，与步骤 4 明确区分；旧文件删除不替代步骤 3 的前置停用，Runner 迁走也不能代替删除，否则旧入口若被重新启用仍可能产生无人接单的排队任务。不要求先实现 reconfigure/capabilities/自动回退或维护程序。
-10. **核对并交付操作说明。**核对步骤 9 已删除旧文件、操作文档不再指向旧入口，记录源码/镜像身份及验证范围，交付失败重试、人工回退/通知暂停说明，按已验收结果更新求职展示；不把旧入口说明的替换拖到切换完成后。后续确需修改仓库文档时，仍走正常 PR/main CI，并明确启用后的 main 合并也会触发自动发布。切换失败保持旧应用或受控手动恢复，不重新挂接公开 Runner、不 down -v、不删卷。
+9. **合并切换 PR 并首次真实部署。**维护者确认上线条件就绪后（含 §7.3 的端口预检目录限制已修复），合并同一个受控 PR：新增 notify-deploy.yml，并同步更新 deploy/README 和 doc 13/13.1 中残留的旧发布指引，特别是 README 配置生效及日志级别两处 Run workflow 说明。该合并提交自己的 main CI 成功后，新通知即会请求首次真实部署，不需要另点部署按钮。核验 main CI → 通知回执 → 私有核验 → 本地构建部署 → finalize；如出现等待，按 §8.2 记录单台 Runner 的实际 run/job 状态和可确认的等待原因，不要求专门制造排队竞争。从本次合并起到验证完成，暂停其他 main 合并/推送及无关发布重跑。此阶段预期真实变更容器，与步骤 4 明确区分；旧 local-release.yml 已在步骤 4 删除；Runner 迁走不能代替这一点，否则旧入口若被重新启用仍可能产生无人接单的排队任务。不要求先实现 reconfigure/capabilities/自动回退或维护程序。
+10. **核对并交付操作说明。**核对旧工作流文件已不在 main（步骤 4）、操作文档不再指向旧入口，记录源码/镜像身份及验证范围，交付失败重试、人工回退/通知暂停说明，按已验收结果更新求职展示；不把旧入口说明的替换拖到切换完成后。后续确需修改仓库文档时，仍走正常 PR/main CI，并明确启用后的 main 合并也会触发自动发布。切换失败保持旧应用或受控手动恢复，不重新挂接公开 Runner、不 down -v、不删卷。
 
 上述 GitHub 设置、Secret 写入、Runner 管理及日志查询优先 CLI/API；PAT 网页生成、认证及缺少 sudo/管理权限时维护者介入。所有示例须替换 OWNER；本次无远端写入、部署或服务变更。
 ## 11. 首期验收清单
@@ -690,7 +692,7 @@ gh api repos/OWNER/insightweave/actions/workflows/notify-deploy.yml --jq '{id,pa
 | 他人提交、维护者合并 | 来源 CI 原始 actor 对应维护者，通过后可自动发布 |
 | 非维护者 main push/来源重跑/私有触发或重跑 | 身份拒绝，不能仅靠维护者 PAT 通过 |
 | Zone.Identifier、忽略规则和文档等准备性提交 | 只在功能分支准备；旧发布未停用或未确认结束前，不得合入/直接推送 main |
-| 首次 main CI 合并 | 旧入口已停用且无未决发布，新通知未上线，容器及 current/previous 保持 |
+| 首次 main CI 合并 | 旧入口已停用、其工作流文件已随合并删除，无未决发布；新通知未上线，容器及 current/previous 保持 |
 | 步骤 5、8 的托管诊断载体 | 只运行 verify-diagnostics.yml 的对应 mode；全部 job 为托管 Runner，任务图无 release/self-hosted，不间接调用或 dispatch 部署，不使用写令牌；误放行只影响诊断结果，不产生本地任务 |
 | 诊断来源输入 | fixtures 不要求来源参数；source-readonly 三项手填、运行时必填并按生产规则重验；仅接受当前 main 对应 run 的当前最新成功 attempt，不能借旧 main/旧成功 attempt 兜底 |
 | 步骤 6 私有 Runner 注册前 | 正式 deploy.yml 全部非终态 run/job（含在途 verify）已核实并处理至终态，无新正式 dispatch；空闲 Runner 或一次 release 空列表不足以通过 |
@@ -699,7 +701,8 @@ gh api repos/OWNER/insightweave/actions/workflows/notify-deploy.yml --jq '{id,pa
 | 部署 PAT 生成时点 | Runner 迁移仅使用注册/移除令牌，不提前生成跨仓部署 PAT；步骤 8 已具备公开受限 environment、诊断通过后才生成 PAT 并立即写入 Secret，无明文中转或输出 |
 | 步骤 8 托管 Runner 公开只读查询 | 通过 verify-diagnostics.yml 的 source-readonly mode 使用拟上线身份方式低频读取 main、指定来源 attempt 及完整 jobs 分页，记录响应与必要限流头；不用正式 deploy.yml dispatch，本机已登录 gh 的结果不能替代，核验未完成不启用通知、不调度本地 release |
 | 公开 API 返回限流响应 | 以响应替身验证 403/429 限流时不放行、不冒称来源过期或身份永久不合法；人工重试遵守等待提示，不主动打满额度、复用触发写令牌或自动提升权限 |
-| 步骤 9 切换 PR | 同时新增通知、删除旧工作流并更新旧操作指引；该提交 main CI 成功即触发首次真实部署，验证完成前无其他 main 更新或无关重跑 |
+| 步骤 9 切换 PR | 新增通知并更新残留的旧操作指引；该提交 main CI 成功即触发首次真实部署，验证完成前无其他 main 更新或无关重跑 |
+| 端口预检在 Runner 工作目录下可用 | §7.3 的目录限制已修复：release job 的工作目录下端口预检通过；不放开 iw-runner 家目录权限 |
 | main CI 失败，或必需 suite 失败/取消/跳过/缺失 | 不取得发布资格；ci-required 不能靠 skipped/continue-on-error 变绿 |
 | 正常自动发布 | 合并后无需另点部署，明确 SHA 经云端与本地检查并实际部署 |
 | release 结果与自定义部署输出 | finalize 同时检查 needs.release.result 成功及 needs.release.outputs.outcome 为 deployed；发布 step 写入 GITHUB_OUTPUT 并经 job 映射，只有日志、零退出码或内置 step outcome 不足以判定部署完成 |
