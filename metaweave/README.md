@@ -215,4 +215,6 @@ metaweave/
 
 ## License
 
-MIT
+`Copyright (C) 2026 paulwxq <paul_wang77@hotmail.com>`
+
+This project is licensed under the [GNU Affero General Public License v3.0 only](../LICENSE) (`AGPL-3.0-only`). See the [licensing notes](../docs/许可证说明.md) for commercial use, network-service source obligations, third-party licenses, and historical licensing.
