@@ -1,0 +1,16 @@
+2026-11-23T14:01:45Z dispatched concurrency-probe.yml role=F mode=exec-fail hold=15 finalize_hold=0 group=insightweave-concurrency-probe-b11231341r2-c3
+2026-11-23T14:02:25Z snapshot F-attempt1 run=45189814350 status=completed/failure
+2026-11-23T14:02:29Z F attempt1: verify=success release=failure finalize=failure
+2026-11-23T14:02:32Z dispatched concurrency-probe.yml role=A mode=ok hold=120 finalize_hold=0 group=insightweave-concurrency-probe-b11231341r2-c3
+2026-11-23T14:02:46Z snapshot A-exec-inprogress run=45189947122 status=in_progress/-
+2026-11-23T14:02:49Z dispatched concurrency-probe.yml role=B mode=ok hold=30 finalize_hold=0 group=insightweave-concurrency-probe-b11231341r2-c3
+2026-11-23T14:03:02Z snapshot B-waiting run=45189994304 status=pending/-
+2026-11-23T14:03:02Z PRECONDITION-OK: A.release in_progress; B verify=success & release=queued
+2026-11-23T14:03:02Z rerunning F (Re-run failed jobs)
+2026-11-23T14:03:27Z snapshot F-final run=45189814350 status=completed/failure
+2026-11-23T14:05:33Z snapshot A-final run=45189947122 status=completed/success
+2026-11-23T14:05:36Z snapshot B-final run=45189994304 status=completed/success
+2026-11-23T14:05:44Z log saved F-exec-attempt2 (job=137745698064)
+2026-11-23T14:05:49Z F attempt2 jobs=[finalize,verify,release] release=skipped A=success B=success
+INCONCLUSIVE: verify 实际被重跑，未测到目标分支（输出复用场景）
+2026-11-23T14:05:49Z case c3 done

@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
-# ci.sh —— 本地 CI（doc 13 §7.2；任务 4）：干净源码 → 离线测试 → 构建三镜像 → 候选预检
+# ci.sh —— 本地 CI（doc 13 §7.2；任务 4）：干净源码 → 离线检查 → 构建三镜像 → 候选预检
 # 用法：ci.sh <release_id>   与 GitHub Actions 调同一脚本；仅本机执行。
+# 干净源码检查、版本要求、依赖准备和各套件测试由 check.sh all 执行（doc 15 §7.1，
+# 与云端 CI 共用同一入口）；本脚本负责其后的镜像构建与候选预检。
 set -euo pipefail
 
 RELEASE_ID="${1:?用法：ci.sh <release_id>}"
@@ -16,58 +18,14 @@ MANIFEST_OUT="${MANIFEST_OUT:-$REPO_ROOT/deploy/candidate-$RELEASE_ID.json}"
 log() { printf '[ci] %s %s\n' "$(date '+%H:%M:%S')" "$*"; }
 die() { printf '[ci] 错误：%s\n' "$*" >&2; exit 1; }
 
-# ---------------------------------------------------------------- 1) 干净源码（§7.2）
+# ---------------------------------------------------------------- 1) 干净源码与离线检查（§7.2）
+# 干净源码检查、版本要求和五个套件统一由 check.sh 执行；失败即停止，不进入构建。
 cd "$REPO_ROOT"
-if [ -n "$(git status --porcelain 2>/dev/null)" ]; then
-  die "工作区不干净（tracked 修改/未跟踪文件）：按 §7.2 从固定提交的干净 checkout 构建，无跳过开关"
-fi
+bash deploy/scripts/check.sh all
 GIT_SHA=$(git rev-parse HEAD)
-log "干净源码：$GIT_SHA"
+log "源码提交：$GIT_SHA"
 
-"$PYTHON_BIN" -c 'import sys; assert sys.version_info[:2] == (3, 12), "需要 Python 3.12"' \
-  || die "INSIGHTWEAVE_CI_PYTHON 不是 Python 3.12"
-node --version | grep -q '^v22\.' || die "需要 Node 22.x（≥22.18，§7.2）"
-
-# ---------------------------------------------------------------- 1.5) 依赖环境（§7.2/13.1 §5.4：独立 checkout 各自锁文件独立 venv）
-NL="$REPO_ROOT/nl2sql"; MW="$REPO_ROOT/metaweave"; FE="$REPO_ROOT/frontend"
-log "准备依赖环境（uv sync --frozen）"
-uv --version >/dev/null 2>&1 || die "需要 uv（Runner 环境准备，13.1 §5.4）"
-(cd "$NL" && uv sync --frozen --python "$INSIGHTWEAVE_CI_PYTHON" --no-python-downloads --extra dev) \
-  || die "NL2SQL 依赖安装失败"
-(cd "$MW" && uv sync --frozen --python "$INSIGHTWEAVE_CI_PYTHON" --no-python-downloads --extra platform --extra dev) \
-  || die "MetaWeave 依赖安装失败"
-
-# ---------------------------------------------------------------- 2) 离线测试（§7.2）
-# 离线哑配置：干净 checkout 无 .env（被忽略，正确）；部分单测要求配置
-# 形状完整（不连库），与开发机 .env 等价的最小集合在此集中注入。
-export DB_NAME=orders DB_USER=orders DB_PASSWORD=ci-dummy
-export LANGGRAPH_DB_NAME=lg_persist LANGGRAPH_DB_USER=postgres LANGGRAPH_DB_PASSWORD=ci-dummy
-export PLATFORM_DB_NAME=metaweave PLATFORM_DB_USER=postgres PLATFORM_DB_PASSWORD=ci-dummy
-export NEO4J_PASSWORD=ci-dummy NEO4J_USER=neo4j NEO4J_URI=bolt://127.0.0.1:1 NEO4J_DATABASE=neo4j
-export MILVUS_HOST=127.0.0.1 MILVUS_PORT=19530 MILVUS_DATABASE=nl2sql
-export DASHSCOPE_API_KEY=ci-dummy DEEPSEEK_API_KEY=ci-dummy MINIMAX_API_KEY=ci-dummy
-export OPENAI_API_KEY=ci-dummy OPENROUTER_API_KEY=ci-dummy LANGSMITH_API_KEY=ci-dummy
-export REDIS_PASSWORD=ci-dummy
-export SOURCE_CREDENTIAL_KEY=ci-dummy-credential-key
-# MetaWeave 形状键（实库 live 用例已由 METAWEAVE_RUN_LIVE_TESTS 显式开关门控跳过）
-export PLATFORM_DB_HOST=127.0.0.1 PLATFORM_DB_PORT=5432
-export PYTHONPATH="$REPO_ROOT:$NL"
-(cd "$NL" && .venv/bin/python -m pytest src/tests/unit/api src/tests/unit/services src/tests/unit/utils \
-   tests/unit/db_deepagent/test_independent_summarizer.py -q) || die "NL2SQL 离线套件失败"
-log "运行 NL2SQL Agent 核心离线测试"
-(cd "$NL" && .venv/bin/python -m pytest src/tests/db_deepagent -q -ra) \
-  || die "NL2SQL Agent 核心离线测试失败"
-(cd "$NL" && .venv/bin/python -m pytest "$REPO_ROOT/deploy/tests" -q) || die "deploy/tests 失败"
-(cd "$MW" && .venv/bin/python -m pytest tests/unit -q    --ignore=tests/unit/metaweave/relationships/test_repository.py)   || die "MetaWeave tests/unit 失败"
-# 排除原因（§7.2 记入 README）：test_repository.py 12 例硬依赖本机历史产物
-# output/json/*.json（开发环境产物，干净 checkout 不存在；实测空目录亦失败）。
-(cd "$FE" && npm ci --include=dev) || die "前端依赖安装失败"
-(cd "$FE" && mapfile_test_count=$(find src -type f \( -name '*.test.cjs' -o -name '*.test.ts' \) | wc -l) \
-   && [ "$mapfile_test_count" -gt 0 ] || die "未发现前端测试文件")
-(cd "$FE" && node --version && mapfile -d '' files < <(find src -type f \( -name '*.test.cjs' -o -name '*.test.ts' \) -print0 | sort -z) \
-   && node --test "${files[@]}" && npm run typecheck) || die "前端测试/类型检查失败"
-
-# ---------------------------------------------------------------- 3) 构建三镜像（§7.2）
+# ---------------------------------------------------------------- 2) 构建三镜像（§7.2）
 build_args=()
 [ -n "$BUILD_PROXY" ] && build_args=(--build-arg HTTP_PROXY="$BUILD_PROXY" --build-arg HTTPS_PROXY="$BUILD_PROXY" --build-arg NO_PROXY="$no_proxy")
 for spec in "metaweave metaweave/Dockerfile" "nl2sql nl2sql/Dockerfile" "frontend frontend/Dockerfile"; do
@@ -80,7 +38,7 @@ for spec in "metaweave metaweave/Dockerfile" "nl2sql nl2sql/Dockerfile" "fronten
     || die "镜像构建失败：$1"
 done
 
-# ---------------------------------------------------------------- 4) 候选预检（§7.2）
+# ---------------------------------------------------------------- 3) 候选预检（§7.2）
 precheck_backend() {  # 无端口/无数据卷/无外网；真实部署开关
   local app="$1"
   local probe="ci-probe-$app-$RELEASE_ID"
@@ -121,7 +79,7 @@ $DOCKER_BIN exec "$FE_PROBE" nginx -t >/dev/null 2>&1 \
   || { $DOCKER_BIN rm -f "$FE_PROBE" >/dev/null 2>&1; die "前端候选预检失败（nginx -t/静态页/SPA 回退）"; }
 $DOCKER_BIN rm -f "$FE_PROBE" >/dev/null
 
-# ---------------------------------------------------------------- 5) 候选清单
+# ---------------------------------------------------------------- 4) 候选清单
 export DOCKER_BIN
 "$PYTHON_BIN" "$REPO_ROOT/deploy/scripts/release_manifest.py" candidate \
   --release-id "$RELEASE_ID" --source-sha "$GIT_SHA" \

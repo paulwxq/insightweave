@@ -1,0 +1,48 @@
+release	Set up job	﻿2026-11-23T13:56:58.4924034Z Current runner version: '2.338.2'
+release	Set up job	2026-11-23T13:56:58.4950509Z ##[group]Runner Image Provisioner
+release	Set up job	2026-11-23T13:56:58.4951463Z Hosted Compute Agent
+release	Set up job	2026-11-23T13:56:58.4952108Z Version: 20261111.635
+release	Set up job	2026-11-23T13:56:58.4953133Z Commit: b8a594ea514ff44cadb5342986c68b1eac6e22ed
+release	Set up job	2026-11-23T13:56:58.4953871Z Build Date: 2026-11-11T01:49:01Z
+release	Set up job	2026-11-23T13:56:58.4954643Z Worker ID: {bd28dc4a-ac30-4dc5-988c-4e227d4cdd96}
+release	Set up job	2026-11-23T13:56:58.4955387Z Region: westcentralus
+release	Set up job	2026-11-23T13:56:58.4955997Z Cloud: Azure
+release	Set up job	2026-11-23T13:56:58.4956541Z ##[endgroup]
+release	Set up job	2026-11-23T13:56:58.4958029Z ##[group]Operating System
+release	Set up job	2026-11-23T13:56:58.4958787Z Ubuntu
+release	Set up job	2026-11-23T13:56:58.4959331Z 26.04.1
+release	Set up job	2026-11-23T13:56:58.4959856Z LTS
+release	Set up job	2026-11-23T13:56:58.4960367Z ##[endgroup]
+release	Set up job	2026-11-23T13:56:58.4960910Z ##[group]Runner Image
+release	Set up job	2026-11-23T13:56:58.4961548Z Image: ubuntu-26.04
+release	Set up job	2026-11-23T13:56:58.4962252Z Version: 20261116.202.1
+release	Set up job	2026-11-23T13:56:58.4963661Z Included Software: https://github.com/actions/runner-images/blob/ubuntu26/20261116.202/images/ubuntu/Ubuntu2604-Readme.md
+release	Set up job	2026-11-23T13:56:58.4965482Z Image Release: https://github.com/actions/runner-images/releases/tag/ubuntu26%2F20261116.202
+release	Set up job	2026-11-23T13:56:58.4966474Z ##[endgroup]
+release	Set up job	2026-11-23T13:56:58.4967504Z ##[group]GITHUB_TOKEN Permissions
+release	Set up job	2026-11-23T13:56:58.4969381Z Metadata: read
+release	Set up job	2026-11-23T13:56:58.4969985Z ##[endgroup]
+release	Set up job	2026-11-23T13:56:58.4972007Z Secret source: Actions
+release	Set up job	2026-11-23T13:56:58.4973347Z Cache mode: write
+release	Set up job	2026-11-23T13:56:58.4974031Z Prepare workflow directory
+release	Set up job	2026-11-23T13:56:58.5511089Z Prepare all required actions
+release	Set up job	2026-11-23T13:56:58.5575702Z Complete job name: release
+release	Simulated deploy operation (markers + bounded hold)	﻿2026-11-23T13:56:58.6575144Z ##[group]Run set -eu
+release	Simulated deploy operation (markers + bounded hold)	2026-11-23T13:56:58.6575946Z ^[[36;1mset -eu^[[0m
+release	Simulated deploy operation (markers + bounded hold)	2026-11-23T13:56:58.6576666Z ^[[36;1mprintf 'EXEC-START %s role=%s run=%s attempt=%s\n' \^[[0m
+release	Simulated deploy operation (markers + bounded hold)	2026-11-23T13:56:58.6577624Z ^[[36;1m  "$(date -u +%FT%TZ)" "$ROLE_TAG" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT"^[[0m
+release	Simulated deploy operation (markers + bounded hold)	2026-11-23T13:56:58.6578708Z ^[[36;1msleep "${HOLD:-120}"^[[0m
+release	Simulated deploy operation (markers + bounded hold)	2026-11-23T13:56:58.6579360Z ^[[36;1mif [ "$MODE" = exec-fail ]; then^[[0m
+release	Simulated deploy operation (markers + bounded hold)	2026-11-23T13:56:58.6580298Z ^[[36;1m  printf 'EXEC-FAIL-MARKER %s role=%s\n' "$(date -u +%FT%TZ)" "$ROLE_TAG"^[[0m
+release	Simulated deploy operation (markers + bounded hold)	2026-11-23T13:56:58.6581189Z ^[[36;1m  exit 1^[[0m
+release	Simulated deploy operation (markers + bounded hold)	2026-11-23T13:56:58.6581715Z ^[[36;1mfi^[[0m
+release	Simulated deploy operation (markers + bounded hold)	2026-11-23T13:56:58.6582832Z ^[[36;1mprintf 'EXEC-END %s role=%s\n' "$(date -u +%FT%TZ)" "$ROLE_TAG"^[[0m
+release	Simulated deploy operation (markers + bounded hold)	2026-11-23T13:56:58.6915654Z shell: /usr/bin/bash -e {0}
+release	Simulated deploy operation (markers + bounded hold)	2026-11-23T13:56:58.6916813Z env:
+release	Simulated deploy operation (markers + bounded hold)	2026-11-23T13:56:58.6917338Z   MODE: ok
+release	Simulated deploy operation (markers + bounded hold)	2026-11-23T13:56:58.6917968Z   ROLE_TAG: b11231341r2-c1-B
+release	Simulated deploy operation (markers + bounded hold)	2026-11-23T13:56:58.6918575Z   HOLD: 30
+release	Simulated deploy operation (markers + bounded hold)	2026-11-23T13:56:58.6919117Z ##[endgroup]
+release	Simulated deploy operation (markers + bounded hold)	2026-11-23T13:56:58.7168098Z EXEC-START 2026-11-23T13:56:58Z role=b11231341r2-c1-B run=45188666900 attempt=1
+release	Simulated deploy operation (markers + bounded hold)	2026-11-23T13:57:28.7224184Z EXEC-END 2026-11-23T13:57:28Z role=b11231341r2-c1-B
+release	Complete job	﻿2026-11-23T13:57:28.7377768Z Cleaning up orphan processes

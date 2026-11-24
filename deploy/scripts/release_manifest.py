@@ -196,6 +196,11 @@ def read_json(path: Path) -> dict:
     return data
 
 
+def contract_version_supported(version: object) -> bool:
+    """契约版本只接受整数 1：bool 是 int 的子类，1.0 与 1 相等，都不能放行。"""
+    return type(version) is int and version == 1
+
+
 def validate_candidate(
     data: dict, release_id: str, source_sha: str | None = None
 ) -> None:
@@ -207,10 +212,7 @@ def validate_candidate(
         raise ValueError("缺少完整源码 SHA")
     if source_sha is not None and data["source_sha"] != source_sha:
         raise ValueError("候选 source_sha 与本次 checkout 不一致")
-    if (
-        type(data.get("deployment_contract_version")) is not int
-        or data["deployment_contract_version"] != 1
-    ):
+    if not contract_version_supported(data.get("deployment_contract_version")):
         raise ValueError("不支持的 deployment_contract_version")
     apps = data.get("applications")
     if not isinstance(apps, dict) or set(apps) != set(APPS):
@@ -276,7 +278,9 @@ def load_snapshot(path: Path, env_file: Path) -> dict:
     for name, expected in hashes.items():
         if file_hash(path / name) != expected:
             raise ValueError(f"快照配置哈希不匹配：{name}")
-    if read_json(path / "contract.json").get("deployment_contract_version") != 1:
+    if not contract_version_supported(
+        read_json(path / "contract.json").get("deployment_contract_version")
+    ):
         raise ValueError("快照契约不支持")
     current = upstream_images(env_file)
     for key in UPSTREAMS:
@@ -292,7 +296,9 @@ def create_snapshot(args: argparse.Namespace) -> None:
     verify_local_images(data)
     compose_file = args.compose_file.resolve()
     source = compose_file.parent
-    if read_json(source / "contract.json").get("deployment_contract_version") != 1:
+    if not contract_version_supported(
+        read_json(source / "contract.json").get("deployment_contract_version")
+    ):
         raise ValueError("当前配置契约不支持")
     sources = {
         name: compose_file if name == "compose.yaml" else source / name

@@ -1,0 +1,14 @@
+2026-11-23T14:05:51Z dispatched concurrency-probe.yml role=A mode=ok hold=120 finalize_hold=0 group=insightweave-concurrency-probe-b11231341r2-c4
+2026-11-23T14:06:04Z snapshot A-exec-inprogress run=45190525273 status=in_progress/-
+2026-11-23T14:06:08Z dispatched concurrency-probe.yml role=B mode=ok hold=30 finalize_hold=0 group=insightweave-concurrency-probe-b11231341r2-c4
+2026-11-23T14:06:29Z snapshot B-waiting run=45190576024 status=pending/-
+2026-11-23T14:06:29Z PRECONDITION-OK: A.release in_progress; B verify=success & release=queued
+2026-11-23T14:06:32Z dispatched concurrency-probe.yml role=C mode=ok hold=30 finalize_hold=0 group=insightweave-concurrency-probe-b11231341r2-c4
+2026-11-23T14:08:53Z snapshot C-final run=45190645968 status=completed/success
+2026-11-23T14:08:56Z snapshot A-final run=45190525273 status=completed/success
+2026-11-23T14:08:59Z snapshot B-final run=45190576024 status=completed/cancelled
+2026-11-23T14:09:06Z log saved C-exec (job=137747812947)
+2026-11-23T14:09:15Z log saved B-exec (job=137747587945)
+2026-11-23T14:09:24Z RESULTS: B.release=cancelled C.release=success A.release=success C.started=2026-11-23T14:08:04Z A.completed=2026-11-23T14:08:02Z
+PASS: 合法 C 替换了等待中的 B（对照成立：C1-C3 的 B 保留不是因 C 未入组）
+2026-11-23T14:09:24Z case c4 done

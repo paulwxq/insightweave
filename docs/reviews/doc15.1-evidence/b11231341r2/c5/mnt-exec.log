@@ -1,0 +1,48 @@
+maintenance	Set up job	﻿2026-11-23T14:11:40.1215523Z Current runner version: '2.338.2'
+maintenance	Set up job	2026-11-23T14:11:40.1237304Z ##[group]Runner Image Provisioner
+maintenance	Set up job	2026-11-23T14:11:40.1237995Z Hosted Compute Agent
+maintenance	Set up job	2026-11-23T14:11:40.1238376Z Version: 20261111.635
+maintenance	Set up job	2026-11-23T14:11:40.1238886Z Commit: b8a594ea514ff44cadb5342986c68b1eac6e22ed
+maintenance	Set up job	2026-11-23T14:11:40.1239352Z Build Date: 2026-11-11T01:49:01Z
+maintenance	Set up job	2026-11-23T14:11:40.1239777Z Worker ID: {8dcd38f7-6bfa-4ff6-a56a-17698fcfe7c5}
+maintenance	Set up job	2026-11-23T14:11:40.1240275Z Region: centralus
+maintenance	Set up job	2026-11-23T14:11:40.1240811Z Cloud: Azure
+maintenance	Set up job	2026-11-23T14:11:40.1241187Z ##[endgroup]
+maintenance	Set up job	2026-11-23T14:11:40.1242077Z ##[group]Operating System
+maintenance	Set up job	2026-11-23T14:11:40.1242459Z Ubuntu
+maintenance	Set up job	2026-11-23T14:11:40.1242836Z 26.04.1
+maintenance	Set up job	2026-11-23T14:11:40.1243166Z LTS
+maintenance	Set up job	2026-11-23T14:11:40.1243599Z ##[endgroup]
+maintenance	Set up job	2026-11-23T14:11:40.1243966Z ##[group]Runner Image
+maintenance	Set up job	2026-11-23T14:11:40.1244353Z Image: ubuntu-26.04
+maintenance	Set up job	2026-11-23T14:11:40.1244750Z Version: 20261116.202.1
+maintenance	Set up job	2026-11-23T14:11:40.1245524Z Included Software: https://github.com/actions/runner-images/blob/ubuntu26/20261116.202/images/ubuntu/Ubuntu2604-Readme.md
+maintenance	Set up job	2026-11-23T14:11:40.1246643Z Image Release: https://github.com/actions/runner-images/releases/tag/ubuntu26%2F20261116.202
+maintenance	Set up job	2026-11-23T14:11:40.1247229Z ##[endgroup]
+maintenance	Set up job	2026-11-23T14:11:40.1247907Z ##[group]GITHUB_TOKEN Permissions
+maintenance	Set up job	2026-11-23T14:11:40.1249235Z Metadata: read
+maintenance	Set up job	2026-11-23T14:11:40.1249658Z ##[endgroup]
+maintenance	Set up job	2026-11-23T14:11:40.1251351Z Secret source: Actions
+maintenance	Set up job	2026-11-23T14:11:40.1252027Z Cache mode: write
+maintenance	Set up job	2026-11-23T14:11:40.1252532Z Prepare workflow directory
+maintenance	Set up job	2026-11-23T14:11:40.1630112Z Prepare all required actions
+maintenance	Set up job	2026-11-23T14:11:40.1676483Z Complete job name: maintenance
+maintenance	Simulated maintenance operation (markers + bounded hold)	﻿2026-11-23T14:11:40.2346801Z ##[group]Run set -eu
+maintenance	Simulated maintenance operation (markers + bounded hold)	2026-11-23T14:11:40.2347542Z ^[[36;1mset -eu^[[0m
+maintenance	Simulated maintenance operation (markers + bounded hold)	2026-11-23T14:11:40.2348199Z ^[[36;1mprintf 'EXEC-START %s role=%s run=%s attempt=%s\n' \^[[0m
+maintenance	Simulated maintenance operation (markers + bounded hold)	2026-11-23T14:11:40.2349234Z ^[[36;1m  "$(date -u +%FT%TZ)" "$ROLE_TAG" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT"^[[0m
+maintenance	Simulated maintenance operation (markers + bounded hold)	2026-11-23T14:11:40.2350154Z ^[[36;1msleep "${HOLD:-120}"^[[0m
+maintenance	Simulated maintenance operation (markers + bounded hold)	2026-11-23T14:11:40.2350896Z ^[[36;1mif [ "$MODE" = exec-fail ]; then^[[0m
+maintenance	Simulated maintenance operation (markers + bounded hold)	2026-11-23T14:11:40.2351757Z ^[[36;1m  printf 'EXEC-FAIL-MARKER %s role=%s\n' "$(date -u +%FT%TZ)" "$ROLE_TAG"^[[0m
+maintenance	Simulated maintenance operation (markers + bounded hold)	2026-11-23T14:11:40.2352589Z ^[[36;1m  exit 1^[[0m
+maintenance	Simulated maintenance operation (markers + bounded hold)	2026-11-23T14:11:40.2353202Z ^[[36;1mfi^[[0m
+maintenance	Simulated maintenance operation (markers + bounded hold)	2026-11-23T14:11:40.2353795Z ^[[36;1mprintf 'EXEC-END %s role=%s\n' "$(date -u +%FT%TZ)" "$ROLE_TAG"^[[0m
+maintenance	Simulated maintenance operation (markers + bounded hold)	2026-11-23T14:11:40.2668468Z shell: /usr/bin/bash -e {0}
+maintenance	Simulated maintenance operation (markers + bounded hold)	2026-11-23T14:11:40.2669210Z env:
+maintenance	Simulated maintenance operation (markers + bounded hold)	2026-11-23T14:11:40.2669684Z   MODE: ok
+maintenance	Simulated maintenance operation (markers + bounded hold)	2026-11-23T14:11:40.2670099Z   ROLE_TAG: b11231341r2-c5-mnt
+maintenance	Simulated maintenance operation (markers + bounded hold)	2026-11-23T14:11:40.2670516Z   HOLD: 30
+maintenance	Simulated maintenance operation (markers + bounded hold)	2026-11-23T14:11:40.2671138Z ##[endgroup]
+maintenance	Simulated maintenance operation (markers + bounded hold)	2026-11-23T14:11:40.2854369Z EXEC-START 2026-11-23T14:11:40Z role=b11231341r2-c5-mnt run=45191211126 attempt=1
+maintenance	Simulated maintenance operation (markers + bounded hold)	2026-11-23T14:12:10.2909107Z EXEC-END 2026-11-23T14:12:10Z role=b11231341r2-c5-mnt
+maintenance	Complete job	﻿2026-11-23T14:12:10.3027531Z Cleaning up orphan processes

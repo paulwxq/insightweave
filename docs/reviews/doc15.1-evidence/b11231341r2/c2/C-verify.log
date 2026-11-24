@@ -1,0 +1,76 @@
+verify	Set up job	﻿2026-11-23T13:58:51.9674661Z Current runner version: '2.338.2'
+verify	Set up job	2026-11-23T13:58:51.9697030Z ##[group]Runner Image Provisioner
+verify	Set up job	2026-11-23T13:58:51.9697786Z Hosted Compute Agent
+verify	Set up job	2026-11-23T13:58:51.9698210Z Version: 20261111.635
+verify	Set up job	2026-11-23T13:58:51.9698734Z Commit: b8a594ea514ff44cadb5342986c68b1eac6e22ed
+verify	Set up job	2026-11-23T13:58:51.9699255Z Build Date: 2026-11-11T01:49:01Z
+verify	Set up job	2026-11-23T13:58:51.9699929Z Worker ID: {f5b2cc5d-3ecc-4bc5-8ad3-37e114587785}
+verify	Set up job	2026-11-23T13:58:51.9700498Z Region: us-east-1
+verify	Set up job	2026-11-23T13:58:51.9700880Z Cloud: AWS
+verify	Set up job	2026-11-23T13:58:51.9701284Z ##[endgroup]
+verify	Set up job	2026-11-23T13:58:51.9702516Z ##[group]Operating System
+verify	Set up job	2026-11-23T13:58:51.9703029Z Ubuntu
+verify	Set up job	2026-11-23T13:58:51.9703416Z 26.04.1
+verify	Set up job	2026-11-23T13:58:51.9703771Z LTS
+verify	Set up job	2026-11-23T13:58:51.9704184Z ##[endgroup]
+verify	Set up job	2026-11-23T13:58:51.9704565Z ##[group]Runner Image
+verify	Set up job	2026-11-23T13:58:51.9705009Z Image: ubuntu-26.04
+verify	Set up job	2026-11-23T13:58:51.9705424Z Version: 20261116.88.1
+verify	Set up job	2026-11-23T13:58:51.9706178Z Included Software: https://github.com/actions/runner-images/blob/ubuntu26/20261116.88/images/ubuntu/Ubuntu2604-Readme.md
+verify	Set up job	2026-11-23T13:58:51.9707689Z Image Release: https://github.com/actions/runner-images/releases/tag/ubuntu26%2F20261116.88
+verify	Set up job	2026-11-23T13:58:51.9708395Z ##[endgroup]
+verify	Set up job	2026-11-23T13:58:51.9709150Z ##[group]GITHUB_TOKEN Permissions
+verify	Set up job	2026-11-23T13:58:51.9710782Z Metadata: read
+verify	Set up job	2026-11-23T13:58:51.9711226Z ##[endgroup]
+verify	Set up job	2026-11-23T13:58:51.9713028Z Secret source: Actions
+verify	Set up job	2026-11-23T13:58:51.9713775Z Cache mode: write
+verify	Set up job	2026-11-23T13:58:51.9714406Z Prepare workflow directory
+verify	Set up job	2026-11-23T13:58:52.0053068Z Prepare all required actions
+verify	Set up job	2026-11-23T13:58:52.0103343Z Complete job name: verify
+verify	Guard group name (never production group)	﻿2026-11-23T13:58:52.0746696Z ##[group]Run printf '[verify] %s group=%s mode=%s\n' "$(date -u +%FT%TZ)" "$G" "$MODE"
+verify	Guard group name (never production group)	2026-11-23T13:58:52.0747644Z ^[[36;1mprintf '[verify] %s group=%s mode=%s\n' "$(date -u +%FT%TZ)" "$G" "$MODE"^[[0m
+verify	Guard group name (never production group)	2026-11-23T13:58:52.0748289Z ^[[36;1mcase "$G" in^[[0m
+verify	Guard group name (never production group)	2026-11-23T13:58:52.0748776Z ^[[36;1m  insightweave-concurrency-probe-*) ;;^[[0m
+verify	Guard group name (never production group)	2026-11-23T13:58:52.0749653Z ^[[36;1m  *) echo "::error::group 必须以 insightweave-concurrency-probe- 开头（got: $G）"; exit 1 ;;^[[0m
+verify	Guard group name (never production group)	2026-11-23T13:58:52.0750338Z ^[[36;1mesac^[[0m
+verify	Guard group name (never production group)	2026-11-23T13:58:52.0750758Z ^[[36;1mcase "$G" in^[[0m
+verify	Guard group name (never production group)	2026-11-23T13:58:52.0751311Z ^[[36;1m  *insightweave-local-release*) echo "::error::拒绝生产组名"; exit 1 ;;^[[0m
+verify	Guard group name (never production group)	2026-11-23T13:58:52.0752276Z ^[[36;1mesac^[[0m
+verify	Guard group name (never production group)	2026-11-23T13:58:53.4292739Z shell: /usr/bin/bash -e {0}
+verify	Guard group name (never production group)	2026-11-23T13:58:53.4293561Z env:
+verify	Guard group name (never production group)	2026-11-23T13:58:53.4293862Z   MODE: bind-mismatch
+verify	Guard group name (never production group)	2026-11-23T13:58:53.4294204Z   ROLE_TAG: b11231341r2-c2-C
+verify	Guard group name (never production group)	2026-11-23T13:58:53.4294571Z   G: insightweave-concurrency-probe-b11231341r2-c2
+verify	Guard group name (never production group)	2026-11-23T13:58:53.4294923Z ##[endgroup]
+verify	Guard group name (never production group)	2026-11-23T13:58:53.4446552Z [verify] 2026-11-23T13:58:53Z group=insightweave-concurrency-probe-b11231341r2-c2 mode=bind-mismatch
+verify	Produce authorization binding from THIS context (test modes may spoof)	﻿2026-11-23T13:58:53.4527265Z ##[group]Run set -eu
+verify	Produce authorization binding from THIS context (test modes may spoof)	2026-11-23T13:58:53.4527663Z ^[[36;1mset -eu^[[0m
+verify	Produce authorization binding from THIS context (test modes may spoof)	2026-11-23T13:58:53.4527998Z ^[[36;1mcase "$MODE" in^[[0m
+verify	Produce authorization binding from THIS context (test modes may spoof)	2026-11-23T13:58:53.4528297Z ^[[36;1m  ok | exec-fail)^[[0m
+verify	Produce authorization binding from THIS context (test modes may spoof)	2026-11-23T13:58:53.4528630Z ^[[36;1m    printf 'run_id=%s\nattempt=%s\nactor=%s\n' \^[[0m
+verify	Produce authorization binding from THIS context (test modes may spoof)	2026-11-23T13:58:53.4529120Z ^[[36;1m      "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$GITHUB_TRIGGERING_ACTOR" >> "$GITHUB_OUTPUT" ;;^[[0m
+verify	Produce authorization binding from THIS context (test modes may spoof)	2026-11-23T13:58:53.4529575Z ^[[36;1m  bind-mismatch)^[[0m
+verify	Produce authorization binding from THIS context (test modes may spoof)	2026-11-23T13:58:53.4529905Z ^[[36;1m    printf 'run_id=%s\nattempt=%s\nactor=%s\n' \^[[0m
+verify	Produce authorization binding from THIS context (test modes may spoof)	2026-11-23T13:58:53.4530415Z ^[[36;1m      "$((GITHUB_RUN_ID-1))" "$GITHUB_RUN_ATTEMPT" "$GITHUB_TRIGGERING_ACTOR" >> "$GITHUB_OUTPUT"^[[0m
+verify	Produce authorization binding from THIS context (test modes may spoof)	2026-11-23T13:58:53.4530930Z ^[[36;1m    echo "::warning::TEST MODE bind-mismatch：故意输出错误 run_id" ;;^[[0m
+verify	Produce authorization binding from THIS context (test modes may spoof)	2026-11-23T13:58:53.4531295Z ^[[36;1m  no-binding)^[[0m
+verify	Produce authorization binding from THIS context (test modes may spoof)	2026-11-23T13:58:53.4531875Z ^[[36;1m    echo "::warning::TEST MODE no-binding：故意不输出绑定" ;;^[[0m
+verify	Produce authorization binding from THIS context (test modes may spoof)	2026-11-23T13:58:53.4532268Z ^[[36;1m  verify-reject)^[[0m
+verify	Produce authorization binding from THIS context (test modes may spoof)	2026-11-23T13:58:53.4532714Z ^[[36;1m    echo "::error::TEST MODE verify-reject：模拟未获授权请求"; exit 1 ;;^[[0m
+verify	Produce authorization binding from THIS context (test modes may spoof)	2026-11-23T13:58:53.4533078Z ^[[36;1m  *)^[[0m
+verify	Produce authorization binding from THIS context (test modes may spoof)	2026-11-23T13:58:53.4533370Z ^[[36;1m    echo "::error::未知 mode：$MODE"; exit 1 ;;^[[0m
+verify	Produce authorization binding from THIS context (test modes may spoof)	2026-11-23T13:58:53.4533841Z ^[[36;1mesac^[[0m
+verify	Produce authorization binding from THIS context (test modes may spoof)	2026-11-23T13:58:53.4549853Z shell: /usr/bin/bash -e {0}
+verify	Produce authorization binding from THIS context (test modes may spoof)	2026-11-23T13:58:53.4550198Z env:
+verify	Produce authorization binding from THIS context (test modes may spoof)	2026-11-23T13:58:53.4550509Z   MODE: bind-mismatch
+verify	Produce authorization binding from THIS context (test modes may spoof)	2026-11-23T13:58:53.4550806Z   ROLE_TAG: b11231341r2-c2-C
+verify	Produce authorization binding from THIS context (test modes may spoof)	2026-11-23T13:58:53.4551085Z   GITHUB_RUN_ID: 45189302285
+verify	Produce authorization binding from THIS context (test modes may spoof)	2026-11-23T13:58:53.4551408Z   GITHUB_RUN_ATTEMPT: 1
+verify	Produce authorization binding from THIS context (test modes may spoof)	2026-11-23T13:58:53.4551923Z   GITHUB_TRIGGERING_ACTOR: paulwxq
+verify	Produce authorization binding from THIS context (test modes may spoof)	2026-11-23T13:58:53.4552249Z ##[endgroup]
+verify	Produce authorization binding from THIS context (test modes may spoof)	2026-11-23T13:58:53.5051857Z ##[warning]TEST MODE bind-mismatch：故意输出错误 run_id
+verify	Complete job	﻿2026-11-23T13:58:53.5145456Z Evaluate and set job outputs
+verify	Complete job	2026-11-23T13:58:53.5152045Z Set output 'authorized_private_run_id'
+verify	Complete job	2026-11-23T13:58:53.5153613Z Set output 'authorized_private_attempt'
+verify	Complete job	2026-11-23T13:58:53.5154289Z Set output 'authorized_triggering_actor'
+verify	Complete job	2026-11-23T13:58:53.5154928Z Cleaning up orphan processes

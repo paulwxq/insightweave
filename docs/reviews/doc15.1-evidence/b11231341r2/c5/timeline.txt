@@ -1,0 +1,10 @@
+2026-11-23T14:09:29Z dispatched concurrency-probe.yml role=rel mode=ok hold=120 finalize_hold=0 group=insightweave-concurrency-probe-b11231341r2-c5
+2026-11-23T14:09:42Z snapshot rel-inprogress run=45191164619 status=in_progress/-
+2026-11-23T14:09:44Z dispatched concurrency-probe-maint.yml role=mnt mode=ok hold=30 finalize_hold=0 group=insightweave-concurrency-probe-b11231341r2-c5
+2026-11-23T14:12:26Z snapshot rel-final run=45191164619 status=completed/success
+2026-11-23T14:12:30Z snapshot mnt-final run=45191211126 status=completed/success
+2026-11-23T14:12:35Z log saved rel-exec (job=137749625025)
+2026-11-23T14:12:42Z log saved mnt-exec (job=137749810718)
+2026-11-23T14:12:46Z INTERVALS: rel=[2026-11-23T14:09:35Z,2026-11-23T14:11:37Z] mnt=[2026-11-23T14:11:39Z,2026-11-23T14:12:11Z]
+PASS: 跨 workflow 互斥（maintenance 起点 > release 终点，执行区间不重叠）
+2026-11-23T14:12:46Z case c5 done

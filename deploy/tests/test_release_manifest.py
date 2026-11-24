@@ -1,6 +1,7 @@
 """版本清单/快照：真实文件与 CLI，只有 Docker 边界使用受控替身。"""
 
 import errno
+import hashlib
 import importlib.util
 import json
 import os
@@ -246,6 +247,80 @@ def test_load_rejects_modified_snapshot_or_retagged_image(release, mutation):
         ).returncode
         != 0
     )
+
+
+# contract.json 的 deployment_contract_version 只接受整数 1（doc 15 §7.4）。
+# bool 是 int 的子类、1.0 与 1 相等，只写 != 1 会把 true 和 1.0 放行。
+_MISSING = object()
+CONTRACT_VERSION_INPUTS = (
+    pytest.param(1, True, id="int-1"),
+    pytest.param(True, False, id="true"),
+    pytest.param(1.0, False, id="float-1"),
+    pytest.param("1", False, id="string-1"),
+    pytest.param(False, False, id="false"),
+    pytest.param(0, False, id="zero"),
+    pytest.param(2, False, id="two"),
+    pytest.param(None, False, id="null"),
+    pytest.param(_MISSING, False, id="missing"),
+)
+
+
+def write_contract(path, value):
+    data = {} if value is _MISSING else {"deployment_contract_version": value}
+    path.write_text(json.dumps(data), encoding="utf-8")
+
+
+@pytest.mark.parametrize("value, accepted", CONTRACT_VERSION_INPUTS)
+def test_candidate_contract_version_accepts_only_integer_one(release, value, accepted):
+    """入口一 validate_candidate：候选清单的版本取自 contract.json。"""
+    contract = release["source"] / "contract.json"
+    write_contract(contract, value)
+    r = release["run"](
+        "candidate",
+        "--release-id",
+        "R1",
+        "--source-sha",
+        SHA,
+        "--contract",
+        contract,
+        "--output",
+        release["candidate"],
+    )
+    assert (r.returncode == 0) is accepted, r.stderr
+    if accepted:
+        version = json.loads(release["candidate"].read_text())[
+            "deployment_contract_version"
+        ]
+        assert version == 1 and type(version) is int
+
+
+@pytest.mark.parametrize("value, accepted", CONTRACT_VERSION_INPUTS)
+def test_snapshot_contract_version_accepts_only_integer_one(release, value, accepted):
+    """入口二 create_snapshot：直接读取源码目录的 contract.json，失败时不得发布快照。"""
+    release["build"]()
+    write_contract(release["source"] / "contract.json", value)
+    r = release["snapshot"]()
+    assert (r.returncode == 0) is accepted, r.stderr
+    assert release["target"].exists() is accepted
+
+
+@pytest.mark.parametrize("value, accepted", CONTRACT_VERSION_INPUTS)
+def test_load_contract_version_accepts_only_integer_one(release, value, accepted):
+    """入口三 load_snapshot：改写快照内的 contract.json 并同步配置哈希，测到的才是版本校验。"""
+    release["build"]()
+    assert release["snapshot"]().returncode == 0
+    contract = release["target"] / "contract.json"
+    write_contract(contract, value)
+    manifest_path = release["target"] / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["config_hashes"]["contract.json"] = hashlib.sha256(
+        contract.read_bytes()
+    ).hexdigest()
+    manifest_path.write_text(json.dumps(manifest))
+    r = release["run"](
+        "load", "--snapshot", release["target"], "--env-file", release["env_file"]
+    )
+    assert (r.returncode == 0) is accepted, r.stderr
 
 
 def test_snapshot_reentry_is_immutable(release):
