@@ -28,7 +28,7 @@ PR 合并到 main → 云端 CI（InsightWeave CI）→ 公开通知（Notify pr
 | 7 最终扫描与公开 | 完成 | gitleaks 8.30.1 在 `eb5da77a` 上扫描四项均无发现（见 §4）；2026-11-24T03:30:33Z 将源码仓设为 public；无凭据的 API、git、网页请求能读源码仓，读不到部署仓 |
 | 8 单人保护、环境与诊断 | 完成 | main 分支保护（必需检查 `ci-required`、要求 PR、必需批准 0、对管理员同样生效）；环境 `deployment-dispatch` 只允许 main；`source-readonly` 诊断 run 45321600612 成功；触发令牌已写入环境 Secret；切换 PR #4 含 `notify-deploy.yml`、13 个测试和文档更新 |
 | 9 合并切换 PR 并首次真实部署 | 完成（第二次尝试） | 见 §3 |
-| 10 核对与交付 | 核对完成 | main 上只有 `ci.yml` 与 `notify-deploy.yml`；部署手册和 doc 13/13.1 不再把旧入口当作现行做法；重试、暂停通知、手动回退的说明已在[部署手册](../../deploy/README.md) |
+| 10 核对与交付 | 完成 | main 上只有 `ci.yml` 与 `notify-deploy.yml`；部署手册和 doc 13/13.1 不再把旧入口当作现行做法；重试、暂停通知、手动回退的说明已在[部署手册](../../deploy/README.md)；回退工具检出已与线上一致（见 §9） |
 
 两个 PR 之间的补充：
 
@@ -122,3 +122,10 @@ PR 合并到 main → 云端 CI（InsightWeave CI）→ 公开通知（Notify pr
 - 发布、追踪、重试、暂停通知、手动回退、配置生效：[部署手册](../../deploy/README.md)。
 - 设计与人工恢复程序：doc 15 §5、§8.3—§8.5。
 - 自动发布启用后，任何合入 main 的改动（包括只改文档）都会触发一次自动部署。
+
+## 9. 收尾（2026-11-24）
+
+- **回退工具**：手动回退用的独立运维检出已按当时的 current 重新固定到 `b750cef7afa4d169055a9efbcb3325ddac613833`，并以 `iw-runner` 身份从该目录只读核验：端口预检通过，Windows 监听查询可以直接调用。没有执行回退。
+- **已合并的分支**：四个功能分支的内容都已在 main 中，已从远端和本地删除。
+- **并发实验的沙盒仓**：`paulwxq/insightweave-ci-sandbox` 的完整内容已另存备份。删除该仓库需要 `delete_repo` 权限，由维护者执行。[doc 15.1 测试报告](doc15_job_concurrency_test_report.md) 里指向它的运行链接，在该仓库删除后不再可用；原始证据已在本目录的 `doc15.1-evidence/` 和 `doc15.1-probe-kit/`。
+- **执行过程的原始记录**：脚本、日志和执行记录由维护者在本机另存，不入库。
