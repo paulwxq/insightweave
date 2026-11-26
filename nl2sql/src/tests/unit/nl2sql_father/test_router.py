@@ -1,7 +1,8 @@
 """Router 节点单元测试"""
 
-import pytest
 from unittest.mock import MagicMock, patch
+
+import pytest
 
 import src.modules.nl2sql_father.nodes.router as router_module
 from src.modules.nl2sql_father.nodes.router import router_node
@@ -45,11 +46,12 @@ class TestRouterNode:
                     "force_complexity": None,
                 },
                 "router": {
-                    "llm_profile": "qwen_turbo",
-                    "temperature": 0,
+                    "provider": "dashscope",
+                    "llm_name": "qwen-turbo",
+                    "params": {"temperature": 0},
                     "default_on_error": "complex",
                     "log_decision": True,
-                }
+                },
             }
             yield mock
 
@@ -138,8 +140,8 @@ class TestRouterNode:
 
             assert isinstance(result["complexity"], str)
             assert result["complexity"] in ["simple", "complex"]
-            assert result["complexity"] != True  # noqa: E712
-            assert result["complexity"] != False  # noqa: E712
+            assert result["complexity"] != True
+            assert result["complexity"] != False
 
     def test_default_on_error_simple(self, base_state):
         """测试配置 default_on_error 为 simple"""
@@ -149,14 +151,17 @@ class TestRouterNode:
                     "force_complexity": None,
                 },
                 "router": {
-                    "llm_profile": "qwen_turbo",
-                    "temperature": 0,
+                    "provider": "dashscope",
+                    "llm_name": "qwen-turbo",
+                    "params": {"temperature": 0},
                     "default_on_error": "simple",
                     "log_decision": True,
-                }
+                },
             }
 
-            with patch("src.modules.nl2sql_father.nodes.router.get_llm") as mock_get_llm:
+            with patch(
+                "src.modules.nl2sql_father.nodes.router.get_llm"
+            ) as mock_get_llm:
                 mock_get_llm.return_value = _mock_get_llm_return(
                     side_effect=Exception("API 失败")
                 )
@@ -166,6 +171,15 @@ class TestRouterNode:
                 assert result["complexity"] == "simple"
                 assert result["path_taken"] == "fast"
 
+    def test_legacy_flat_model_param_is_rejected(self, mock_config, base_state):
+        mock_config.return_value["router"]["top_p"] = 0.9
+        with patch("src.modules.nl2sql_father.nodes.router.get_llm") as mock_get_llm:
+            mock_get_llm.return_value = _mock_get_llm_return("simple")
+            result = router_node(base_state)
+        assert result["complexity"] == "complex"
+        assert "top_p" in result["router_reason"]
+        assert "params" in result["router_reason"]
+
     def test_force_complexity_simple_skips_llm(self, base_state):
         """测试强制 simple 时跳过 LLM 判定"""
         with patch("src.modules.nl2sql_father.nodes.router.load_config") as mock_config:
@@ -174,14 +188,17 @@ class TestRouterNode:
                     "force_complexity": "simple",
                 },
                 "router": {
-                    "llm_profile": "qwen_turbo",
-                    "temperature": 0,
+                    "provider": "dashscope",
+                    "llm_name": "qwen-turbo",
+                    "params": {"temperature": 0},
                     "default_on_error": "complex",
                     "log_decision": True,
-                }
+                },
             }
 
-            with patch("src.modules.nl2sql_father.nodes.router.get_llm") as mock_get_llm:
+            with patch(
+                "src.modules.nl2sql_father.nodes.router.get_llm"
+            ) as mock_get_llm:
                 result = router_node(base_state)
 
                 assert result["complexity"] == "simple"
@@ -198,14 +215,17 @@ class TestRouterNode:
                     "force_complexity": "complex",
                 },
                 "router": {
-                    "llm_profile": "qwen_turbo",
-                    "temperature": 0,
+                    "provider": "dashscope",
+                    "llm_name": "qwen-turbo",
+                    "params": {"temperature": 0},
                     "default_on_error": "complex",
                     "log_decision": True,
-                }
+                },
             }
 
-            with patch("src.modules.nl2sql_father.nodes.router.get_llm") as mock_get_llm:
+            with patch(
+                "src.modules.nl2sql_father.nodes.router.get_llm"
+            ) as mock_get_llm:
                 result = router_node(base_state)
 
                 assert result["complexity"] == "complex"
@@ -222,14 +242,17 @@ class TestRouterNode:
                     "force_complexity": "invalid",
                 },
                 "router": {
-                    "llm_profile": "qwen_turbo",
-                    "temperature": 0,
+                    "provider": "dashscope",
+                    "llm_name": "qwen-turbo",
+                    "params": {"temperature": 0},
                     "default_on_error": "complex",
                     "log_decision": True,
-                }
+                },
             }
 
-            with patch("src.modules.nl2sql_father.nodes.router.get_llm") as mock_get_llm:
+            with patch(
+                "src.modules.nl2sql_father.nodes.router.get_llm"
+            ) as mock_get_llm:
                 mock_get_llm.return_value = _mock_get_llm_return("simple")
 
                 result = router_node(base_state)

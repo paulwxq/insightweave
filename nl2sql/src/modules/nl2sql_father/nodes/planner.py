@@ -10,11 +10,11 @@ Planner 是 Complex Path 的第一个节点，负责：
 import json
 import time
 from collections import defaultdict
-from typing import Any, Dict, List
+from typing import Any
 
 from src.modules.nl2sql_father.state import NL2SQLFatherState, SubQueryInfo
 from src.services.config_loader import load_config
-from src.services.llm_factory import extract_llm_content, extract_overrides, get_llm
+from src.services.llm_factory import extract_llm_content, get_llm
 from src.utils.logger import get_module_logger, with_query_id
 
 logger = get_module_logger("planner")
@@ -23,7 +23,7 @@ logger = get_module_logger("planner")
 _planner_config_cache = None
 
 
-def _get_planner_config() -> Dict[str, Any]:
+def _get_planner_config() -> dict[str, Any]:
     """获取 Planner 配置（带缓存）
 
     Returns:
@@ -100,7 +100,7 @@ def _format_conversation_history(conversation_history: Any) -> str:
     if not conversation_history:
         return ""
 
-    lines: List[str] = ["## 对话历史（旧→新，仅供指代消解）"]
+    lines: list[str] = ["## 对话历史（旧→新，仅供指代消解）"]
     for i, turn in enumerate(conversation_history, start=1):
         if not isinstance(turn, dict):
             continue
@@ -117,7 +117,7 @@ def _format_conversation_history(conversation_history: Any) -> str:
 # ==================== 依赖图构建与环检测 ====================
 
 
-def _build_dependency_graph(sub_queries: List[Dict[str, Any]]) -> Dict[str, Any]:
+def _build_dependency_graph(sub_queries: list[dict[str, Any]]) -> dict[str, Any]:
     """构建依赖图结构
 
     Args:
@@ -147,7 +147,7 @@ def _build_dependency_graph(sub_queries: List[Dict[str, Any]]) -> Dict[str, Any]
     return {"nodes": nodes, "edges": edges}
 
 
-def _has_cycle(dependency_graph: Dict[str, Any]) -> bool:
+def _has_cycle(dependency_graph: dict[str, Any]) -> bool:
     """检测依赖图中是否存在环（使用 DFS）
 
     Args:
@@ -185,9 +185,8 @@ def _has_cycle(dependency_graph: Dict[str, Any]) -> bool:
 
     # 对所有节点执行 DFS
     for node in nodes:
-        if node not in visited:
-            if dfs(node):
-                return True
+        if node not in visited and dfs(node):
+            return True
 
     return False
 
@@ -195,7 +194,7 @@ def _has_cycle(dependency_graph: Dict[str, Any]) -> bool:
 # ==================== Planner 节点 ====================
 
 
-def planner_node(state: NL2SQLFatherState) -> Dict[str, Any]:
+def planner_node(state: NL2SQLFatherState) -> dict[str, Any]:
     """Planner 节点：复杂问题拆分与依赖建立
 
     职责：
@@ -236,10 +235,7 @@ def planner_node(state: NL2SQLFatherState) -> Dict[str, Any]:
 
     # 构造提示词
     history_block = _format_conversation_history(state.get("conversation_history"))
-    prompt = (
-        history_block
-        + PLANNER_PROMPT.format(user_query=user_query)
-    )
+    prompt = history_block + PLANNER_PROMPT.format(user_query=user_query)
 
     # 调用 LLM
     start_time = time.time()
@@ -252,7 +248,29 @@ def planner_node(state: NL2SQLFatherState) -> Dict[str, Any]:
         query_logger.debug(prompt)
         query_logger.debug("=" * 80)
 
-        llm_meta = get_llm(config["llm_profile"], **extract_overrides(config))
+        legacy = {
+            "llm_profile",
+            "overrides",
+            "temperature",
+            "timeout",
+            "max_tokens",
+            "top_p",
+            "enable_thinking",
+            "enable_search",
+            "search_options",
+            "response_format",
+            "stream",
+            "thinking",
+            "max_retries",
+            "reasoning_effort",
+        } & set(config)
+        if legacy:
+            raise ValueError(
+                f"planner: 旧字段 {sorted(legacy)} 已迁移为 provider、llm_name、params"
+            )
+        llm_meta = get_llm(
+            config["provider"], config["llm_name"], params=config.get("params")
+        )
         llm = llm_meta.llm
 
         response = llm.invoke(prompt)
@@ -271,7 +289,9 @@ def planner_node(state: NL2SQLFatherState) -> Dict[str, Any]:
 
         except json.JSONDecodeError as e:
             latency_ms = (time.time() - start_time) * 1000
-            query_logger.error(f"Planner JSON 解析失败: {str(e)}\n原始输出: {content[:500]}")
+            query_logger.error(
+                f"Planner JSON 解析失败: {e!s}\n原始输出: {content[:500]}"
+            )
             return {
                 "error": "Planner 输出格式错误，无法解析 JSON",
                 "error_type": "planning_failed",
@@ -282,7 +302,9 @@ def planner_node(state: NL2SQLFatherState) -> Dict[str, Any]:
         # 验证子查询数量
         if len(sub_queries_raw) < min_sub_queries:
             latency_ms = (time.time() - start_time) * 1000
-            query_logger.error(f"子查询数量不足: {len(sub_queries_raw)} < {min_sub_queries}")
+            query_logger.error(
+                f"子查询数量不足: {len(sub_queries_raw)} < {min_sub_queries}"
+            )
             return {
                 "error": f"复杂问题至少需要 {min_sub_queries} 个子查询",
                 "error_type": "planning_failed",
@@ -291,11 +313,13 @@ def planner_node(state: NL2SQLFatherState) -> Dict[str, Any]:
             }
 
         if len(sub_queries_raw) > max_sub_queries:
-            query_logger.warning(f"子查询数量超过限制: {len(sub_queries_raw)} > {max_sub_queries}，截断到 {max_sub_queries} 个")
+            query_logger.warning(
+                f"子查询数量超过限制: {len(sub_queries_raw)} > {max_sub_queries}，截断到 {max_sub_queries} 个"
+            )
             sub_queries_raw = sub_queries_raw[:max_sub_queries]
 
         # 构建 SubQueryInfo 列表
-        sub_queries: List[SubQueryInfo] = []
+        sub_queries: list[SubQueryInfo] = []
         for idx, sq_raw in enumerate(sub_queries_raw, 1):
             sub_query_id = sq_raw.get("sub_query_id", f"sq{idx}")
             # 规范化 sub_query_id（添加 query_id 前缀，确保全局唯一）
@@ -340,7 +364,9 @@ def planner_node(state: NL2SQLFatherState) -> Dict[str, Any]:
                 f"依赖边数={len(dependency_graph['edges'])}，耗时={latency_ms:.0f}ms"
             )
             for sq in sub_queries:
-                query_logger.debug(f"  - {sq['sub_query_id']}: {sq['query'][:50]}... (deps={sq['dependencies']})")
+                query_logger.debug(
+                    f"  - {sq['sub_query_id']}: {sq['query'][:50]}... (deps={sq['dependencies']})"
+                )
 
         # 返回结果
         return {
@@ -355,10 +381,12 @@ def planner_node(state: NL2SQLFatherState) -> Dict[str, Any]:
     except Exception as e:
         # 兜底：LLM 调用失败
         latency_ms = (time.time() - start_time) * 1000
-        query_logger.error(f"Planner 异常: {str(e)}，耗时={latency_ms:.0f}ms", exc_info=True)
+        query_logger.exception(
+            f"Planner 异常: {type(e).__name__}，耗时={latency_ms:.0f}ms"
+        )
 
         return {
-            "error": f"Planner 执行失败: {str(e)}",
+            "error": f"Planner 执行失败: {e!s}",
             "error_type": "planning_failed",
             "path_taken": "complex",
             "planner_latency_ms": latency_ms,  # Phase 2 监控指标（失败时也记录）

@@ -1,13 +1,13 @@
 """SQL 生成节点 - 子图的第二个节点"""
 
-from typing import Any, Dict, List, Optional
+import time
+from typing import Any
 
 from langchain_core.messages import HumanMessage, SystemMessage
-import time
 
 from src.modules.sql_generation.subgraph.state import SQLGenerationState
 from src.services.config_loader import load_subgraph_config
-from src.services.llm_factory import extract_llm_content, extract_overrides, get_llm
+from src.services.llm_factory import extract_llm_content, get_llm
 from src.tools.schema_retrieval.join_planner import format_join_plan_for_prompt
 from src.tools.schema_retrieval.table_names import to_display_name
 from src.tools.schema_retrieval.value_matcher import (
@@ -22,7 +22,7 @@ logger = get_module_logger("sql_generation")
 class SQLGenerationAgent:
     """SQL 生成 Agent"""
 
-    def __init__(self, config: Dict[str, Any]):
+    def __init__(self, config: dict[str, Any]):
         """
         初始化 Agent
 
@@ -31,25 +31,49 @@ class SQLGenerationAgent:
         """
         self.config = config
 
-        llm_meta = get_llm(config["llm_profile"], **extract_overrides(config))
+        legacy = {
+            "llm_profile",
+            "overrides",
+            "temperature",
+            "timeout",
+            "max_tokens",
+            "top_p",
+            "enable_thinking",
+            "enable_search",
+            "search_options",
+            "response_format",
+            "stream",
+            "thinking",
+            "max_retries",
+            "reasoning_effort",
+        } & set(config)
+        if legacy:
+            raise ValueError(
+                f"sql_generation: 旧字段 {sorted(legacy)} 已迁移为 provider、llm_name、params"
+            )
+        llm_meta = get_llm(
+            config["provider"], config["llm_name"], params=config.get("params")
+        )
         self.llm = llm_meta.llm
         self._provider = llm_meta.provider
         self._model_name = llm_meta.model
 
         # 维度过滤配置
         dim_filter_cfg = (config or {}).get("dimension_filter", {})
-        self.dimension_filter_min_score = float(dim_filter_cfg.get("optimize_min_score", 0.5))
+        self.dimension_filter_min_score = float(
+            dim_filter_cfg.get("optimize_min_score", 0.5)
+        )
 
     def generate(
         self,
         query: str,
-        schema_context: Dict[str, Any],
-        similar_sqls: Optional[List[Dict[str, Any]]] = None,
-        parse_result: Optional[Dict[str, Any]] = None,
-        dependencies_results: Optional[Dict[str, Any]] = None,
-        validation_errors: Optional[List[str]] = None,
-        query_id: Optional[str] = None,
-        conversation_history: Optional[List[Dict[str, str]]] = None,
+        schema_context: dict[str, Any],
+        similar_sqls: list[dict[str, Any]] | None = None,
+        parse_result: dict[str, Any] | None = None,
+        dependencies_results: dict[str, Any] | None = None,
+        validation_errors: list[str] | None = None,
+        query_id: str | None = None,
+        conversation_history: list[dict[str, str]] | None = None,
     ) -> str:
         """
         生成 SQL
@@ -85,7 +109,9 @@ class SQLGenerationAgent:
             validation_errors=validation_errors,
             conversation_history=conversation_history,
         )
-        prompt_build_elapsed_ms = (time.perf_counter() - prompt_build_started_at) * 1000.0
+        prompt_build_elapsed_ms = (
+            time.perf_counter() - prompt_build_started_at
+        ) * 1000.0
         qlog.debug(
             "SQL Generation prompt 构造完成: chars=%d, elapsed_ms=%.1f",
             len(prompt),
@@ -93,15 +119,19 @@ class SQLGenerationAgent:
         )
 
         # 调用 LLM（带固定次数重试与空结果自检）
-        last_error_text: Optional[str] = None
+        last_error_text: str | None = None
         for attempt in range(1, max_attempts + 1):
             # 准备消息
             message_build_started_at = time.perf_counter()
             messages = [
-                SystemMessage(content="You are an expert PostgreSQL SQL writer. Return valid SQL only."),
+                SystemMessage(
+                    content="You are an expert PostgreSQL SQL writer. Return valid SQL only."
+                ),
                 HumanMessage(content=prompt),
             ]
-            message_build_elapsed_ms = (time.perf_counter() - message_build_started_at) * 1000.0
+            message_build_elapsed_ms = (
+                time.perf_counter() - message_build_started_at
+            ) * 1000.0
             qlog.debug(
                 "SQL Generation messages 构造完成: attempt=%d/%d, message_count=%d, elapsed_ms=%.1f",
                 attempt,
@@ -120,7 +150,9 @@ class SQLGenerationAgent:
                 )
                 llm_invoke_started_at = time.perf_counter()
                 response = self.llm.invoke(messages)
-                llm_invoke_elapsed_ms = (time.perf_counter() - llm_invoke_started_at) * 1000.0
+                llm_invoke_elapsed_ms = (
+                    time.perf_counter() - llm_invoke_started_at
+                ) * 1000.0
                 qlog.debug(
                     "SQL Generation LLM 调用返回: attempt=%d/%d, elapsed_ms=%.1f",
                     attempt,
@@ -154,7 +186,7 @@ class SQLGenerationAgent:
                 else:
                     return sql
 
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001 - 节点保留统一重试与回退行为
                 # 最小实现：将常见连接/超时错误统一记录为 WARNING
                 last_error_text = str(e)
                 qlog.warning(
@@ -178,12 +210,12 @@ class SQLGenerationAgent:
     def _build_prompt(
         self,
         query: str,
-        schema_context: Dict[str, Any],
-        similar_sqls: List[Dict[str, Any]],
-        parse_result: Optional[Dict[str, Any]],
-        dependencies_results: Optional[Dict[str, Any]],
-        validation_errors: Optional[List[str]],
-        conversation_history: Optional[List[Dict[str, str]]],
+        schema_context: dict[str, Any],
+        similar_sqls: list[dict[str, Any]],
+        parse_result: dict[str, Any] | None,
+        dependencies_results: dict[str, Any] | None,
+        validation_errors: list[str] | None,
+        conversation_history: list[dict[str, str]] | None,
     ) -> str:
         """构建 SQL 生成提示词"""
 
@@ -193,10 +225,18 @@ class SQLGenerationAgent:
         metric_info = self._format_metric_hints(parse_result)
 
         # 格式化 Schema 上下文
-        table_categories_text = self._format_table_categories(schema_context)  # 表类型分组
-        table_cards_text = self._format_table_cards(schema_context.get("table_cards", {}))
-        join_plans_text = format_join_plan_for_prompt(schema_context.get("join_plans", []))
-        time_columns_text = self._format_time_columns(schema_context.get("table_cards", {}))
+        table_categories_text = self._format_table_categories(
+            schema_context
+        )  # 表类型分组
+        table_cards_text = self._format_table_cards(
+            schema_context.get("table_cards", {})
+        )
+        join_plans_text = format_join_plan_for_prompt(
+            schema_context.get("join_plans", [])
+        )
+        time_columns_text = self._format_time_columns(
+            schema_context.get("table_cards", {})
+        )
         dim_value_hits = schema_context.get("dim_value_hits", [])
         dim_values_text = format_dim_value_matches_for_prompt(dim_value_hits)
 
@@ -283,24 +323,26 @@ JOIN 计划：
 """
 
         final_prompt = prompt.strip()
-        
+
         # DEBUG: 打印完整提示词（统一由日志级别控制是否可见）
         logger.debug("=" * 80)
         logger.debug("完整 LLM 提示词:")
         logger.debug("=" * 80)
         logger.debug(final_prompt)
         logger.debug("=" * 80)
-        
+
         return final_prompt
 
     @staticmethod
     def _format_conversation_history(
-        conversation_history: Optional[List[Dict[str, str]]],
+        conversation_history: list[dict[str, str]] | None,
     ) -> str:
         if not conversation_history:
             return ""
 
-        lines: List[str] = ["对话历史（旧→新，仅供指代消解，不可覆盖当前问题/依赖结果）："]
+        lines: list[str] = [
+            "对话历史（旧→新，仅供指代消解，不可覆盖当前问题/依赖结果）："
+        ]
         for i, turn in enumerate(conversation_history, start=1):
             q = (turn.get("question") or "").strip()
             a = (turn.get("answer") or "").strip()
@@ -310,7 +352,7 @@ JOIN 计划：
             lines.append(f"   A: {a}")
         return "\n".join(lines)
 
-    def _format_time_hints(self, parse_result: Optional[Dict[str, Any]]) -> str:
+    def _format_time_hints(self, parse_result: dict[str, Any] | None) -> str:
         """格式化时间提示"""
         if not parse_result or "time" not in parse_result:
             return ""
@@ -319,12 +361,12 @@ JOIN 计划：
         # 如果 time 是 null，直接返回空
         if not time_window:
             return ""
-            
+
         start = time_window.get("start", "")
         end = time_window.get("end", "")
         grain = time_window.get("grain_inferred", "")
 
-        lines: List[str] = []
+        lines: list[str] = []
 
         # 统一输出“日期时间粒度”行（若可用）
         if grain:
@@ -345,8 +387,8 @@ JOIN 计划：
 
     def _format_dimension_filters(
         self,
-        parse_result: Optional[Dict[str, Any]],
-        schema_context: Dict[str, Any],
+        parse_result: dict[str, Any] | None,
+        schema_context: dict[str, Any],
     ) -> str:
         """格式化维度过滤条件"""
         if not parse_result or "dimensions" not in parse_result:
@@ -362,7 +404,7 @@ JOIN 计划：
             return f"维度过滤：{', '.join(filters)}"
         return ""
 
-    def _format_metric_hints(self, parse_result: Optional[Dict[str, Any]]) -> str:
+    def _format_metric_hints(self, parse_result: dict[str, Any] | None) -> str:
         """格式化指标提示"""
         if not parse_result or "metric" not in parse_result:
             return ""
@@ -370,7 +412,7 @@ JOIN 计划：
         metric = parse_result["metric"]
         return f"指标：{metric.get('text', '')}"
 
-    def _format_table_categories(self, schema_context: Dict[str, Any]) -> str:
+    def _format_table_categories(self, schema_context: dict[str, Any]) -> str:
         """
         格式化表类型分组
 
@@ -390,7 +432,7 @@ JOIN 计划：
             return "（无分类信息）"
 
         # 按类型分组（§4.2 出口 2：表键为三段，进提示词前截断为两段显示名）
-        category_groups: Dict[str, List[str]] = {}
+        category_groups: dict[str, list[str]] = {}
         for table_id, category in table_categories.items():
             if category not in category_groups:
                 category_groups[category] = []
@@ -405,7 +447,7 @@ JOIN 计划：
 
         return "\n".join(lines) if lines else "（无分类信息）"
 
-    def _format_table_cards(self, table_cards: Dict[str, Dict]) -> str:
+    def _format_table_cards(self, table_cards: dict[str, dict]) -> str:
         """格式化表卡片（§4.2 出口 1：卡片 key 为三段表键，进提示词前截断）"""
         lines = []
         for table_id, card in table_cards.items():
@@ -413,7 +455,7 @@ JOIN 计划：
             lines.append(f"- **{to_display_name(table_id)}**  {text_raw}")
         return "\n".join(lines) if lines else "（无）"
 
-    def _format_time_columns(self, table_cards: Dict[str, Dict]) -> str:
+    def _format_time_columns(self, table_cards: dict[str, dict]) -> str:
         """格式化时间列（§4.2 出口 3：行首表名为三段表键，进提示词前截断）"""
         lines = []
         for table_id, card in table_cards.items():
@@ -422,7 +464,7 @@ JOIN 计划：
                 lines.append(f"- {to_display_name(table_id)}.{time_col}")
         return "\n".join(lines) if lines else "（无明确时间列）"
 
-    def _format_similar_sqls(self, similar_sqls: List[Dict]) -> str:
+    def _format_similar_sqls(self, similar_sqls: list[dict]) -> str:
         """格式化历史 SQL 相似案例"""
         if not similar_sqls:
             return "（无相似案例）"
@@ -442,9 +484,9 @@ JOIN 计划：
 
         return "\n".join(lines)
 
-    def _format_dependencies(self, dependencies: Optional[Dict[str, Any]]) -> str:
+    def _format_dependencies(self, dependencies: dict[str, Any] | None) -> str:
         """格式化依赖结果
-        
+
         Args:
             dependencies: 依赖结果字典，格式：
                 {
@@ -453,63 +495,66 @@ JOIN 计划：
                         "execution_result": {...}
                     }
                 }
-        
+
         Returns:
             格式化后的依赖信息字符串
         """
         if not dependencies:
             return ""
-        
-        max_rows = self.config.get("dependencies_formatting", {}).get("max_display_rows", 5)
-        include_columns = self.config.get("dependencies_formatting", {}).get("include_columns", True)
-        
+
+        max_rows = self.config.get("dependencies_formatting", {}).get(
+            "max_display_rows", 5
+        )
+        include_columns = self.config.get("dependencies_formatting", {}).get(
+            "include_columns", True
+        )
+
         deps = []
         for query_id, dep_data in dependencies.items():
             # 处理旧格式或空数据
             if not dep_data or not isinstance(dep_data, dict):
                 continue
-                
+
             # 提取关键信息
             question = dep_data.get("question", f"子查询 {query_id}")
             exec_result = dep_data.get("execution_result")
-            
+
             # 如果没有 execution_result，跳过
             if not exec_result or not isinstance(exec_result, dict):
                 continue
-            
+
             rows = exec_result.get("rows", [])
             columns = exec_result.get("columns", [])
-            
+
             # 构建格式化输出
             deps.append(f"  - {query_id}:")
             deps.append(f"    question: {question}")
-            
+
             if rows:
                 deps.append("    result:")
                 display_rows = rows[:max_rows]
                 for row in display_rows:
                     deps.append(f"      - {row}")
-                
+
                 if len(rows) > max_rows:
                     deps.append(f"    ... 共 {len(rows)} 行，仅显示前 {max_rows} 行")
-            
+
             if include_columns and columns:
                 deps.append(f"    columns: {columns}")
-        
+
         return "\n\n可能依赖的查询结果：\n" + "\n".join(deps)
 
-    def _format_errors(self, errors: Optional[List[str]]) -> str:
+    def _format_errors(self, errors: list[str] | None) -> str:
         """格式化验证错误"""
         if not errors:
             return ""
 
-        return (
-            "\n\n⚠️ 上一次生成的SQL验证失败，请修正以下错误：\n"
-            + "\n".join(f"- {err}" for err in errors)
+        return "\n\n⚠️ 上一次生成的SQL验证失败，请修正以下错误：\n" + "\n".join(
+            f"- {err}" for err in errors
         )
 
 
-def sql_generation_node(state: SQLGenerationState) -> Dict[str, Any]:
+def sql_generation_node(state: SQLGenerationState) -> dict[str, Any]:
     """
     SQL 生成节点
 
@@ -530,9 +575,8 @@ def sql_generation_node(state: SQLGenerationState) -> Dict[str, Any]:
 
     # 获取上一次的验证错误（如果有）
     validation_errors = None
-    if state.get("validation_result"):
-        if not state["validation_result"].get("valid"):
-            validation_errors = state["validation_result"].get("errors", [])
+    if state.get("validation_result") and not state["validation_result"].get("valid"):
+        validation_errors = state["validation_result"].get("errors", [])
 
     schema_context = state.get("schema_context")
     if not schema_context:
@@ -574,12 +618,12 @@ def sql_generation_node(state: SQLGenerationState) -> Dict[str, Any]:
             "failed_step": None,
         }
 
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - 节点保留统一失败返回结构
         qlog.error(f"SQL生成失败: {e}")
 
         return {
             "generated_sql": None,
-            "error": f"SQL生成失败: {str(e)}",
+            "error": f"SQL生成失败: {e!s}",
             "error_type": "generation_failed",
             "failed_step": "sql_generation",
         }

@@ -161,31 +161,28 @@ uv sync --python 3.12 --locked --extra dev --extra monitoring
 
 ## 配置
 
-所有配置集中在 `src/configs/config.yaml`，最小配置示例如下：
+全局连接及旧链路配置位于 `src/configs/config.yaml`，`db_deepagent` 角色配置位于 `src/modules/db_deepagent/config/db_deepagent.yaml`。以下按文件给出最小配置示例。
+
+`src/configs/config.yaml`：
 
 ```yaml
-# LLM 提供商（填写 API Key）
+# 连接及模型默认参数
 llm_providers:
   dashscope:
+    adapter: dashscope_native
     api_key: "sk-..."
-  openai:
+    models:
+      qwen-turbo: {}
+      qwen-plus: {}
+  dashscope_openai:
+    adapter: openai_chat_completions
     api_key: "sk-..."
-    base_url: "https://api.openai.com/v1"
-
-# 各节点使用的 LLM 画像
-llm_profiles:
-  router_llm:
-    provider: dashscope
-    model: qwen-turbo       # 路由分类，使用轻量模型
-    temperature: 0
-  generation_llm:
-    provider: dashscope
-    model: qwen-max         # SQL 生成，使用高能力模型
-    temperature: 0
-  summarizer_llm:
-    provider: dashscope
-    model: qwen-plus        # 结果总结
-    temperature: 0.3
+    base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+    models:
+      qwen3.8-max:
+        params: {enable_thinking: false}
+      qwen3.8-flash:
+        params: {temperature: 0, max_tokens: 8192, enable_thinking: false}
 
 # 向量数据库（二选一）
 vector_database:
@@ -222,6 +219,37 @@ langgraph_persistence:
     father_enabled: true
     subgraph_enabled: false
 ```
+
+`src/modules/db_deepagent/config/db_deepagent.yaml`：
+
+```yaml
+# db_deepagent 各角色在自身业务段选择模型
+model:
+  provider: dashscope_openai
+  llm_name: qwen3.8-max
+  params: {temperature: 0}
+  request_timeout_seconds: 120
+summarization:
+  provider: dashscope_openai
+  llm_name: qwen3.8-flash
+  params: {}
+  request_timeout_seconds: 120
+time_resolution:
+  provider: dashscope_openai
+  llm_name: qwen3.8-flash
+  params:
+    response_format: {type: json_object}
+    max_retries: 2
+  request_timeout_seconds: 15
+```
+
+`params` 按键覆盖模型默认值，嵌套对象整项替换；`0` 和 `false` 是显式值。切换角色模型时应同时检查该角色的采样、思考、输出格式、超时和重试参数，不继承旧角色参数。参数校验错误会指出实际来源配置路径。只有 `deepseek + deepseek-flash` 及 `glm_coding` 下的三款 GLM 这四个组合才把显式 `max_tokens` 通过 `extra_body` 发送；其他 provider 的同名模型沿用普通构造映射。DeepSeek 的显式 `thinking.type` 只接受 `enabled` 或 `disabled`。Kimi 默认省略思考开关和 Qwen 的 `temperature: 0`，思考模式下显式温度只接受 `1`。GLM 的显式 `thinking` 只接受 `{"type": "enabled"}`；`disabled` 实测仍产生推理，工厂会在构造客户端前拒绝。
+
+OpenAI 兼容调用必须通过 `request_timeout_seconds`、业务 `params.timeout` 或注册表默认 `params.timeout` 之一显式设置请求超时，三者都缺失时会在构造客户端前报错。实际生效的值必须是有限且大于 0 的数，布尔值不合法。`db_deepagent` 三个角色使用各自的 `request_timeout_seconds`，YAML 中的布尔值和引号数字字符串会在配置解析时拒绝，单独的 `${VAR}` 引用可在替换后提供数字；旧链路五个节点没有该字段，切换为兼容接口时必须在节点或注册表的 `params.timeout` 中配置。
+
+上线前必须检查部署环境中的自定义 YAML，将旧 `llm_profile`、`overrides` 和平铺模型参数迁移为 `provider`、`llm_name`、`params`。Router 对旧配置按原有异常策略回退到默认复杂度（默认 `complex`），其他节点也保留各自异常处理；这不表示旧字段仍然生效。
+
+常用密钥为 `DASHSCOPE_API_KEY`、`DEEPSEEK_API_KEY`、`GLM_API_KEY`、`KIMI_CODE_API_KEY`。DeepSeek 未设置 `DEEPSEEK_BASE_URI` 时使用 `https://api.deepseek.com`，显式空字符串会拒绝构造；GLM Coding 使用 `https://open.bigmodel.cn/api/coding/paas/v4`，Kimi Code 使用 `https://api.kimi.com/coding/v1`。GLM/Kimi 编程套餐的生产适用范围按 Doc 23 单独确认。
 
 各节点的详细配置（模型选择、重试次数、超时时间等）位于：
 

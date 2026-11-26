@@ -14,7 +14,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import re
+import time
+from contextlib import contextmanager
 from datetime import date
 from types import SimpleNamespace
 
@@ -22,7 +25,6 @@ import pytest
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.types import Command
-
 from src.modules.db_deepagent.agent import (
     build_backend,
     build_db_agent,
@@ -30,7 +32,9 @@ from src.modules.db_deepagent.agent import (
     build_permissions,
     build_session_dir,
 )
+from src.modules.db_deepagent.middleware.run_budget import RunBudgetMiddleware
 from src.modules.db_deepagent.services import DbAgentServices
+from src.modules.db_deepagent.services.run_budget import BudgetLimits
 from src.modules.db_deepagent.services.table_catalog import TableCatalog
 from src.modules.db_deepagent.tools import build_business_tools
 from src.tests.db_deepagent.conftest import (
@@ -144,6 +148,26 @@ def _offloaded_files(stack) -> list:
     return sorted(stack.offload_dir.glob("*")) if stack.offload_dir.exists() else []
 
 
+@contextmanager
+def _audit_records(level=logging.DEBUG):
+    logger = logging.getLogger("nl2sql.nl2sql.db_deepagent.audit")
+    old_level = logger.level
+    records = []
+
+    class Capture(logging.Handler):
+        def emit(self, record):
+            records.append(record)
+
+    handler = Capture(level=logging.DEBUG)
+    logger.addHandler(handler)
+    logger.setLevel(level)
+    try:
+        yield records
+    finally:
+        logger.removeHandler(handler)
+        logger.setLevel(old_level)
+
+
 # ============================================================================
 # doc 9 步骤 4：结果类工具（read_result / execute_sql）大输出转存
 # ============================================================================
@@ -203,12 +227,13 @@ def result_services(db_agent_config, tmp_path):
     )
 
 
-def _tools_node_with_file_mw(prod_stack, tools, captured_raw=None):
+def _tools_node_with_file_mw(prod_stack, tools, captured_raw=None, extra_middleware=()):
     """生产 filesystem 中间件包住业务工具的 ToolNode（含 read_file 注册）。
 
     captured_raw（可选）：dict[str, list[str]]。提供时在 SDK 转存前截获
     每次工具调用的原始 ToolMessage.content（Kimi R1 K1-2：供转存文件与
     同一次调用原正文做逐字比较；不引入第二次执行）。
+    extra_middleware（可选）：装配在 FilesystemMiddleware 内层的中间件。
     """
     from deepagents import create_deep_agent
     from langgraph.checkpoint.memory import InMemorySaver
@@ -237,7 +262,7 @@ def _tools_node_with_file_mw(prod_stack, tools, captured_raw=None):
     agent = create_deep_agent(
         model=ScriptedChatModel(responses=["ok"]),
         tools=list(tools),
-        middleware=[prod_stack.file_mw],
+        middleware=[prod_stack.file_mw, *extra_middleware],
         backend=prod_stack.backend,
         checkpointer=InMemorySaver(),
     )
@@ -339,7 +364,8 @@ class TestResultToolOffload:
 
         Kimi R1 K1-2：在 SDK 转存前截获同一次 execute_sql 调用的原始
         ToolMessage.content，断言转存文件与其逐字相等（不引入第二次执行
-        生成另一个随机 result_ref）；账本与 ResultStore 断言保留。
+        生成另一个随机 result_ref）；账本与 ResultStore 断言保留，并核对
+        RunBudget DEBUG 原文及 output_chars。
         """
         from src.modules.db_deepagent.tools.sql_tools import (
             make_execute_sql_tool,
@@ -358,6 +384,11 @@ class TestResultToolOffload:
             for i in range(1, 21)
         ]
         captured_raw: dict[str, list[str]] = {}
+        result_services.budget.open_run(
+            "run-test",
+            BudgetLimits(50, 50, 50),
+            deadline_monotonic=time.monotonic() + 600,
+        )
         node = _tools_node_with_file_mw(
             prod_stack,
             [
@@ -365,6 +396,9 @@ class TestResultToolOffload:
                 make_execute_sql_tool(result_services.services),
             ],
             captured_raw=captured_raw,
+            extra_middleware=[
+                RunBudgetMiddleware(result_services.budget, result_services.cfg.budget)
+            ],
         )
         from src.tests.db_deepagent.conftest import make_task_record, make_task_state
 
@@ -387,25 +421,26 @@ class TestResultToolOffload:
             db_agent_context,
             extra_state=dict(task_state),
         )
-        updates, msg = invoke_tool_node(
-            node,
-            [
-                (
-                    "execute_sql",
-                    {
-                        "sql": _WIDE_SQL,
-                        "sub_task_id": "T1",
-                        "sub_task_revision": 1,
-                    },
-                    "e2e-x",
-                )
-            ],
-            db_agent_context,
-            extra_state={
-                "db_validations": u1["db_validations"],
-                **task_state,
-            },
-        )
+        with _audit_records() as audit_records:
+            updates, msg = invoke_tool_node(
+                node,
+                [
+                    (
+                        "execute_sql",
+                        {
+                            "sql": _WIDE_SQL,
+                            "sub_task_id": "T1",
+                            "sub_task_revision": 1,
+                        },
+                        "e2e-x",
+                    )
+                ],
+                db_agent_context,
+                extra_state={
+                    "db_validations": u1["db_validations"],
+                    **task_state,
+                },
+            )
         assert "large_tool_results" in msg.content  # >80000 已转存替换
         assert msg.tool_call_id == "e2e-x"
         assert msg.status == "success"
@@ -417,6 +452,26 @@ class TestResultToolOffload:
         # 同一次调用的原正文（转存前截获）与转存文件逐字相等
         (raw_content,) = captured_raw["e2e-x"]
         assert len(raw_content) > 80000
+        output_log = next(
+            record.getMessage()
+            for record in audit_records
+            if "TOOL_OUTPUT_BEGIN" in record.getMessage()
+            and "id=e2e-x" in record.getMessage()
+        )
+        assert output_log == (
+            "===== TOOL_OUTPUT_BEGIN request_id=req-test run_id=run-test "
+            "tool=execute_sql id=e2e-x =====\n"
+            f"{raw_content}\n"
+            "===== TOOL_OUTPUT_END request_id=req-test run_id=run-test "
+            "tool=execute_sql id=e2e-x ====="
+        )
+        finished_log = next(
+            record.getMessage()
+            for record in audit_records
+            if "event=finished" in record.getMessage()
+            and "id=e2e-x" in record.getMessage()
+        )
+        assert f"output_chars={len(raw_content)}" in finished_log
         files = _offloaded_files(prod_stack)
         assert len(files) == 1
         assert files[0].read_text(encoding="utf-8") == raw_content
@@ -942,9 +997,8 @@ class TestProductionGraphOffload:
         self, assembly_services, monkeypatch
     ):
         """完整生产图：大输出被替换为预览/路径，动态假模型回读到末列标记。"""
-        from langgraph.checkpoint.memory import InMemorySaver
-
         import src.modules.db_deepagent.agent as agent_mod
+        from langgraph.checkpoint.memory import InMemorySaver
 
         # 完整图需要 budget/pipeline 等步骤 3 服务：仅替换检索/业务库三类假件
         big = _big_services(assembly_services.config)
@@ -1079,10 +1133,9 @@ class TestProductionGraphResultChain:
         模型请求证明完整原文从未直接进入模型上下文。该用例证明"读回
         后部数据并用合法引用提交"，不证明从文件恢复了引用。
         """
+        import src.modules.db_deepagent.agent as agent_mod
         from langgraph.checkpoint.memory import InMemorySaver
         from langgraph.prebuilt import ToolNode
-
-        import src.modules.db_deepagent.agent as agent_mod
         from src.modules.db_deepagent.tools.sql_tools import (
             make_execute_sql_tool,
             make_validate_sql_tool,

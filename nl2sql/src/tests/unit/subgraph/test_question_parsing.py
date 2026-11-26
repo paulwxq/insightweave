@@ -1,7 +1,8 @@
 """问题解析节点单元测试"""
 
-import pytest
 from unittest.mock import MagicMock, patch
+
+import pytest
 
 from src.modules.sql_generation.subgraph.nodes.question_parsing import (
     QuestionParsingAgent,
@@ -34,9 +35,9 @@ class TestQuestionParsingAgent:
     def mock_config(self):
         """Mock 配置"""
         return {
-            "llm_profile": "qwen_plus",
-            "temperature": 0,
-            "max_tokens": 1500,
+            "provider": "dashscope",
+            "llm_name": "qwen-plus",
+            "params": {"temperature": 0, "max_tokens": 1500},
         }
 
     @pytest.fixture
@@ -47,6 +48,21 @@ class TestQuestionParsingAgent:
         ) as mock_get_llm:
             mock_get_llm.return_value = _mock_get_llm_return()
             return QuestionParsingAgent(mock_config)
+
+    def test_invalid_params_are_not_silently_defaulted(self, mock_config):
+        mock_config["params"] = False
+        with patch(
+            "src.modules.sql_generation.subgraph.nodes.question_parsing.get_llm"
+        ) as mock_get_llm:
+            mock_get_llm.side_effect = ValueError("params: 必须是映射")
+            with pytest.raises(ValueError, match="params"):
+                QuestionParsingAgent(mock_config)
+        assert mock_get_llm.call_args.kwargs["params"] is False
+
+    def test_legacy_flat_model_param_is_rejected(self, mock_config):
+        mock_config["top_p"] = 0.9
+        with pytest.raises(ValueError, match="question_parsing.*top_p.*params"):
+            QuestionParsingAgent(mock_config)
 
     def test_parse_success(self, agent):
         """测试解析成功"""
@@ -156,9 +172,9 @@ class TestQuestionParsingNode:
         ) as mock:
             mock.return_value = {
                 "question_parsing": {
-                    "llm_profile": "qwen_plus",
-                    "temperature": 0,
-                    "max_tokens": 1500,
+                    "provider": "dashscope",
+                    "llm_name": "qwen-plus",
+                    "params": {"temperature": 0, "max_tokens": 1500},
                     "enable_internal_parser": True,
                     "fallback_to_empty": True,
                 }
@@ -211,7 +227,12 @@ class TestQuestionParsingNode:
             assert result["parse_result"]["keywords"] == ["销售额"]
             assert result["parsing_source"] == "llm"
             assert result["rewritten_query"] == "查询销售额"
-            assert mock_agent_instance.parse_with_rewrite.call_args.kwargs["dependencies_results"] == {}
+            assert (
+                mock_agent_instance.parse_with_rewrite.call_args.kwargs[
+                    "dependencies_results"
+                ]
+                == {}
+            )
 
     def test_internal_parsing_passes_dependencies_results(self, mock_config):
         """测试内部解析会透传 dependencies_results"""
@@ -250,7 +271,9 @@ class TestQuestionParsingNode:
 
             assert result["rewritten_query"] == "查询门店ID为 BJ001 的订单总额"
             assert (
-                mock_agent_instance.parse_with_rewrite.call_args.kwargs["dependencies_results"]
+                mock_agent_instance.parse_with_rewrite.call_args.kwargs[
+                    "dependencies_results"
+                ]
                 == state["dependencies_results"]
             )
 
@@ -284,7 +307,9 @@ class TestQuestionParsingNode:
             "src.modules.sql_generation.subgraph.nodes.question_parsing.QuestionParsingAgent"
         ) as mock_agent:
             mock_agent_instance = MagicMock()
-            mock_agent_instance.parse_with_rewrite.side_effect = Exception("LLM 调用失败")
+            mock_agent_instance.parse_with_rewrite.side_effect = Exception(
+                "LLM 调用失败"
+            )
             mock_agent.return_value = mock_agent_instance
 
             result = question_parsing_node(state)
@@ -298,7 +323,9 @@ class TestQuestionParsingNode:
         """测试解析失败时不回退（严格模式）"""
         mock_config.return_value = {
             "question_parsing": {
-                "llm_profile": "qwen_plus",
+                "provider": "dashscope",
+                "llm_name": "qwen-plus",
+                "params": {"temperature": 0, "max_tokens": 1500},
                 "enable_internal_parser": True,
                 "fallback_to_empty": False,
             }
@@ -313,7 +340,9 @@ class TestQuestionParsingNode:
             "src.modules.sql_generation.subgraph.nodes.question_parsing.QuestionParsingAgent"
         ) as mock_agent:
             mock_agent_instance = MagicMock()
-            mock_agent_instance.parse_with_rewrite.side_effect = Exception("LLM 调用失败")
+            mock_agent_instance.parse_with_rewrite.side_effect = Exception(
+                "LLM 调用失败"
+            )
             mock_agent.return_value = mock_agent_instance
 
             result = question_parsing_node(state)
@@ -397,7 +426,7 @@ _MINIMAL_RETRIEVER_CONFIG = {
 }
 
 
-def _make_retriever(extra_config: dict = None):
+def _make_retriever(extra_config: dict | None = None):
     """在 mock 外部客户端的上下文中创建 SchemaRetriever。"""
     from src.tools.schema_retrieval.retriever import SchemaRetriever
 
@@ -489,7 +518,12 @@ class TestDimensionTableOptimization:
 
         def mock_plan_join_paths(base_tables, target_tables, **kwargs):
             if base_tables[0] == "public.dim_store":
-                return [{"base": "public.dim_store", "edges": [{"src_table": "public.dim_store"}]}]
+                return [
+                    {
+                        "base": "public.dim_store",
+                        "edges": [{"src_table": "public.dim_store"}],
+                    }
+                ]
             else:
                 return []
 

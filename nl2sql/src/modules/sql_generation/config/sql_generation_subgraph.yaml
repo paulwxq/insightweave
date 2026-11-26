@@ -127,11 +127,11 @@ schema_retrieval:
 # SQL 生成配置
 # ------------------------------------------------------------------------------
 sql_generation:
-  # LLM 配置（引用全局 llm_profiles 注册表）
-  # llm_profile: qwen3_max
-  llm_profile: qwen_plus
-  temperature: 0                     # 温度（0=确定性输出）
-  max_tokens: 2000                   # 最大 token 数
+  provider: dashscope
+  llm_name: qwen-plus
+  params:
+    temperature: 0                   # 温度（0=确定性输出）
+    max_tokens: 2000                 # 最大 token 数
 
   # 提示词配置
   prompt:
@@ -253,8 +253,10 @@ retry:
 # 问题解析配置
 # ------------------------------------------------------------------------------
 question_parsing:
-  llm_profile: qwen_plus
-  temperature: 0
-  max_tokens: 1500
+  provider: dashscope
+  llm_name: qwen-plus
+  params:
+    temperature: 0
+    max_tokens: 1500
   enable_internal_parser: true      # 为 false 时跳过 LLM 解析
   fallback_to_empty: true           # 解析失败时是否返回空结构继续流程

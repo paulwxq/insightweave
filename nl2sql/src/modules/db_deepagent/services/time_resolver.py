@@ -26,6 +26,7 @@ from pydantic import BaseModel, Field
 
 from src.modules.db_deepagent.context import DbAgentContext
 from src.modules.db_deepagent.schemas import TimeEvidence
+from src.services.llm_factory import resolve_llm_config
 from src.utils.logger import get_module_logger
 
 logger = get_module_logger("nl2sql.db_deepagent.services.time_resolver")
@@ -296,13 +297,17 @@ def build_time_resolver(cfg: Any) -> TimeResolver:
     """按 time_resolution 配置构造 LLM 版解析器（doc 16 §6/§8）。
 
     - 提示词来自 config/time_resolution_prompts.yaml（缺文件即配置错误）；
-    - get_llm 覆盖参数来自 overrides，request_timeout_seconds 显式映射为
-      timeout（原生 dashscope provider 不支持 timeout 覆盖，走 profile 默认）；
+    - get_llm 接收 time_resolution.params 与 request_timeout_seconds；原生
+      dashscope 不支持该业务超时映射，工厂会明确报错；
     - 模型 metadata 标记 dbda_call_kind=time_resolution（observer 识别用途）。
     """
     from src.services.llm_factory import get_llm
 
     tr = cfg.time_resolution
+    try:
+        resolve_llm_config(tr.provider, tr.llm_name)
+    except ValueError as exc:
+        raise ValueError(f"time_resolution: {exc}") from exc
     prompt_path = _CONFIG_DIR / "time_resolution_prompts.yaml"
     try:
         with open(prompt_path, encoding="utf-8") as fh:
@@ -318,10 +323,15 @@ def build_time_resolver(cfg: Any) -> TimeResolver:
     # timeout 无条件映射（C1-06）：request_timeout_seconds 必须生效；
     # 原生 dashscope provider 不支持 timeout，由工厂显式拒绝（报错指向
     # time_resolution 配置），不静默丢弃。
-    overrides = dict(tr.overrides)
-    overrides.setdefault("timeout", tr.request_timeout_seconds)
-
-    model_with_meta = get_llm(tr.llm_profile, **overrides)
+    try:
+        model_with_meta = get_llm(
+            tr.provider,
+            tr.llm_name,
+            params=dict(tr.params),
+            request_timeout_seconds=tr.request_timeout_seconds,
+        )
+    except ValueError as exc:
+        raise ValueError(f"time_resolution: {exc}") from exc
     model = model_with_meta.llm
     model.metadata = {
         **(getattr(model, "metadata", None) or {}),

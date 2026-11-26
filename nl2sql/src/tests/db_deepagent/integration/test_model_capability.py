@@ -32,20 +32,22 @@ def submit_final_answer(answer: str) -> str:
 
 
 def test_tool_loop_then_final_submission(db_agent_config):
-    """可用 DBDA_TEST_LLM_PROFILE 覆盖 profile（默认用配置的 qwen3_max；
-    当前开发 key 无 qwen3-max 访问权时用可访问的 profile 验证同一能力链路）。"""
+    """可用 DBDA_TEST_LLM_PROVIDER / DBDA_TEST_LLM_NAME 覆盖模型选择。"""
     import os
 
     from deepagents import create_deep_agent
-
     from src.modules.db_deepagent.agent import build_model
 
-    override = os.environ.get("DBDA_TEST_LLM_PROFILE")
-    if override:
+    provider = os.environ.get("DBDA_TEST_LLM_PROVIDER")
+    llm_name = os.environ.get("DBDA_TEST_LLM_NAME")
+    if provider or llm_name:
         db_agent_config = db_agent_config.model_copy(
             update={
                 "model": db_agent_config.model.model_copy(
-                    update={"llm_profile": override}
+                    update={
+                        "provider": provider or db_agent_config.model.provider,
+                        "llm_name": llm_name or db_agent_config.model.llm_name,
+                    }
                 )
             }
         )

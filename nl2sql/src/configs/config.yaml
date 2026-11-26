@@ -204,183 +204,83 @@ api:
 #
 # 关于 API Key 配置：
 # - ${VAR_NAME} 格式：环境变量未设置时，该字段值为 None（不影响启动）
-#   只有在代码实际调用 get_llm("profile_name") 时才会校验并报错。
+#   只有在代码实际调用 get_llm(provider, llm_name) 时才会校验并报错。
 # - ${VAR_NAME:default} 格式：环境变量未设置时使用默认值。
 # - 因此可以在此处预先写入任意 provider 的配置，未设置对应 API Key 时
 #   系统正常启动，仅在调用该 provider 时才会提示缺少 API Key。
 # ------------------------------------------------------------------------------
 llm_providers:
   dashscope:
+    adapter: dashscope_native
     api_key: ${DASHSCOPE_API_KEY}
-    # base_url 无需配置（DashScope 原生 SDK 自动管理路由）
-    # 若需切换至 OpenAI 兼容模式，可设置：
-    #   base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+    models:
+      qwen-turbo: {}
+      qwen-plus: {}
+      qwen-max: {}
 
   dashscope_openai:
+    adapter: openai_chat_completions
     api_key: ${DASHSCOPE_API_KEY}
     base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+    models:
+      qwen3.8-max:
+        params:
+          enable_thinking: false
+      qwen3.8-flash:
+        params:
+          temperature: 0
+          max_tokens: 8192
+          enable_thinking: false
+      qwen3.5-plus:
+        params:
+          enable_thinking: false
+      qwen4-max: {}
 
-  # 未来接入时取消注释并配置对应环境变量：
-  # openai:
-  #   api_key: ${OPENAI_API_KEY}
-  #   base_url: https://api.openai.com/v1   # 可省略，使用官方默认地址
-
-  # openrouter:
-  #   api_key: ${OPENROUTER_API_KEY}
-  #   base_url: https://openrouter.ai/api/v1  # 必填
+  # 其他 OpenAI 兼容供应商须显式配置 adapter、base_url 与 models。
 
   deepseek:
+    adapter: openai_chat_completions
     api_key: ${DEEPSEEK_API_KEY}
     base_url: ${DEEPSEEK_BASE_URI:https://api.deepseek.com}  # 从 .env 读取，默认官方端点
+    models:
+      deepseek-flash: {}
+      deepseek-chat:
+        params:
+          temperature: 0
+          max_tokens: 8192
+          timeout: 60
+      deepseek-reasoner:
+        params:
+          max_tokens: 32768
+
+  glm_coding:  # 国内编程套餐技术验证通过，生产使用待确认
+    adapter: openai_chat_completions
+    api_key: ${GLM_API_KEY}
+    base_url: https://open.bigmodel.cn/api/coding/paas/v4
+    models:
+      glm-5.4: {}
+      glm-5.3: {}
+      glm-5.3-flash: {}
+
+  kimi_code:  # 国内编程套餐技术验证通过，生产使用待确认
+    adapter: openai_chat_completions
+    api_key: ${KIMI_CODE_API_KEY}
+    base_url: https://api.kimi.com/coding/v1
+    models:
+      k3.1-pro: {}
 
   minimax:
+    adapter: openai_chat_completions
     api_key: ${MINIMAX_API_KEY}
     base_url: https://api.minimaxi.com/v1
+    models:
+      MiniMax-M2.1:
+        params: {temperature: 1.0}
+      MiniMax-M2.5:
+        params: {temperature: 1.0}
 
-# ------------------------------------------------------------------------------
-# Chat LLM 画像注册表
-#
-# 必填字段：
-#   provider  - 引用 llm_providers 中的 key（如 dashscope / openai / openrouter / deepseek）
-#   model     - 模型名称（如 qwen-plus / gpt-4o / deepseek-chat / deepseek-reasoner）
-#
-# 可选参数（所有 provider 通用）：
-#   temperature    - 采样温度，控制输出随机性，取值 [0, 2)，默认由模型决定
-#                    注意：DeepSeek 思考模式下（deepseek-reasoner 或开启 thinking 的 deepseek-chat）
-#                    传入 temperature 不报错，但服务端会忽略，实际不生效
-#   top_p          - 核采样概率阈值，取值 (0, 1]，与 temperature 选其一调整
-#                    注意：同上，DeepSeek 思考模式下不生效
-#   max_tokens     - 最大输出 Token 数，默认为模型上限
-#                    注意：DeepSeek 思考模式下含思维链输出，建议设 ≥ 32768（最大 64K）
-#   stream         - 是否流式输出，true/false，映射为 LangChain streaming 参数
-#   response_format - 返回格式，如 {type: json_object} 或 {type: text}
-#
-# DashScope 专用参数（provider: dashscope 时有效，其他 provider 传入会报错）：
-#   enable_thinking  - 是否开启深度思考模式（适用于 Qwen3/Qwen3.5 系列），true/false
-#   enable_search    - 是否开启联网搜索，true/false
-#   search_options   - 联网搜索策略，仅 enable_search: true 时生效，可配置子字段：
-#     enable_source    - 是否在返回结果中展示搜索来源，true/false
-#     enable_citation  - 是否开启角标标注，true/false
-#     forced_search    - 是否强制搜索（不让模型自行判断），true/false
-#     search_strategy  - 搜索策略：turbo（默认）/ max / agent / agent_max
-#
-# DeepSeek 专用参数（provider: deepseek 时有效，其他 provider 传入会报错）：
-#   thinking         - 思考模式配置，格式：{type: enabled} 或 {type: disabled}
-#                      注意：使用 model: deepseek-reasoner 会自动开启思考，无需此参数
-#                      注意：思考模式下 temperature/top_p 传入不报错但不生效
-#
-# OpenAI 兼容 provider 专用参数（provider: openai / openrouter / deepseek）：
-#   timeout  - 请求超时秒数，映射为 LangChain request_timeout 参数
-#              （DashScope 不支持此参数，传入会报错）
-#
-# 参数优先级：节点级 override > profile 中定义的值 > LangChain/SDK 自身默认值
-# ------------------------------------------------------------------------------
-llm_profiles:
-  qwen_turbo:
-    provider: dashscope
-    model: qwen-turbo
-
-  qwen_plus:
-    provider: dashscope
-    model: qwen-plus
-
-  qwen_max:
-    provider: dashscope
-    model: qwen-max
-
-  qwen3_max:
-    provider: dashscope
-    model: qwen3-max
-    # enable_thinking 默认为 false（qwen3-max 系列默认关闭思考模式，无需显式声明）
-    # streaming 默认为 false（LangChain ChatTongyi 默认非流式）
-    # 注意：qwen3-max 已于 2026-10 下线（API 404），保留仅供历史配置参考
-
-  qwen3_8_max:
-    provider: dashscope_openai
-    model: qwen3.8-max
-    # 2026-10-15 新增：qwen3-max 下线后的替代（db_deepagent 初始 profile）。
-    # 实测 qwen3.8-max 仅在 compatible-mode 服务（原生 Generation API 返回
-    # 400 url error），故走 dashscope_openai（ChatOpenAI 兼容模式，doc 5 K5：
-    # 匹配键 openai:qwen3.8-max）
-    enable_thinking: false           # 显式关闭；兼容模式下 thinking 默认行为随模型变化，勿依赖默认值
-
-  qwen3_8_flash:
-    provider: dashscope_openai
-    model: qwen3.8-flash
-    # 2026-11-10 新增（doc 5.1）：摘要器专用 profile。
-    # 上下文 1,000,000 tokens；非思考输入上限 991,808，仅说明模型能力，
-    # 不作为调整摘要阈值（96000/24000）的依据。
-    # 注意：不得加入 context_window / max_input_tokens 等非参数白名单字段。
-    temperature: 0
-    max_tokens: 8192                 # 项目为摘要设置的初始输出上限，不是模型上下文/输入上限
-    enable_thinking: false           # 控制摘要耗时与输出开销；费用变化以运行记录为准
-
-  qwen3_5_plus:
-    provider: dashscope_openai
-    model: qwen3.5-plus
-    enable_thinking: false           # qwen3.5-plus 默认开启 thinking，此处显式关闭
-
-  # 示例：开启深度思考的 Qwen3 profile
-  # qwen3_thinking:
-  #   provider: dashscope
-  #   model: qwen3-plus
-  #   enable_thinking: true
-  #   temperature: 0.6
-  #   top_p: 0.95
-
-  # 示例：带联网搜索的 profile
-  # qwen_plus_search:
-  #   provider: dashscope
-  #   model: qwen-plus
-  #   enable_search: true
-  #   search_options:
-  #     enable_source: true
-  #     search_strategy: turbo
-
-  # 示例：OpenRouter profile（需在 llm_providers 中取消注释 openrouter）
-  # claude_sonnet:
-  #   provider: openrouter
-  #   model: anthropic/claude-3.5-sonnet
-  #   temperature: 0.7
-  #   max_tokens: 4096
-
-  # 示例：DeepSeek V3 profile（需在 llm_providers 中取消注释 deepseek）
-  deepseek_chat:
-    provider: deepseek
-    model: deepseek-chat      # DeepSeek-V3.2 非思考模式；支持 temperature/top_p
-    temperature: 0
-    max_tokens: 8192
-    timeout: 60
-
-  # 示例：DeepSeek-R1 思考模式（deepseek-reasoner = DeepSeek-V3.2 思考模式固定开启）
-  deepseek_reasoner:
-    provider: deepseek
-    model: deepseek-reasoner  # 无需 thinking 参数，思考已内置
-    max_tokens: 32768         # 含思维链输出，最大 64K
-    # 注意：temperature/top_p 传入不报错但完全不生效，建议不要配置
-
-  # 示例：deepseek-chat 手动开启思考模式（与 deepseek-reasoner 等价，但更灵活）
-  # deepseek_chat_thinking:
-  #   provider: deepseek
-  #   model: deepseek-chat
-  #   thinking:                 # 通过 extra_body 传给 API
-  #     type: enabled
-  #   max_tokens: 32768
-  #   # 注意：开启 thinking 后 temperature/top_p 同样不生效
-
-  # MiniMax 系列（OpenAI 兼容接口）
-  # 注意：temperature 范围 (0.0, 1.0]，不能设为 0，推荐 1.0
-  minimax_m21:
-    provider: minimax
-    model: MiniMax-M2.1
-    temperature: 1.0
-    # max_tokens 不设置，使用模型默认上限（204,800 上下文）
-
-  minimax_m25:
-    provider: minimax
-    model: MiniMax-M2.5
-    temperature: 1.0
-    # max_tokens 不设置，使用模型默认上限（204,800 上下文）
+# 聊天模型默认值统一位于上方 llm_providers.<provider>.models.<llm_name>。
+# 业务段通过 provider + llm_name 选择模型，并用 params 按键覆盖默认值。
 
 # ------------------------------------------------------------------------------
 # 开发/调试配置

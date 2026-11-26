@@ -7,8 +7,9 @@
 # ==============================================================================
 
 model:
-  llm_profile: qwen3_8_max               # 引用全局 config.yaml 的 llm_profiles（2026-10-15 起 qwen3-max 已下线）
-  overrides:
+  provider: dashscope_openai
+  llm_name: qwen3.8-max
+  params:
     temperature: 0
   # 可选：显式声明期望的 SDK 匹配键；声明后与实际解析结果不一致则初始化失败
   expected_harness_key: null             # 例如 "tongyi:qwen3.8-max"
@@ -141,17 +142,19 @@ budget:
   run_timeout_seconds: 300               # 协作式时限（§11.1）
   final_answer_reminders: 1              # 模型未提交就结束时的提醒次数（§11.3）
 
-summarization:                           # 摘要器配置（doc 5.1：独立摘要模型 qwen3.8-flash）
-  llm_profile: qwen3_8_flash             # 引用全局 config.yaml 的 llm_profiles（2026-11-10 起）
-  overrides: {}                          # 仅覆盖摘要参数，不继承 model.overrides
+summarization:                           # 摘要器配置（独立摘要模型 qwen3.8-flash）
+  provider: dashscope_openai
+  llm_name: qwen3.8-flash
+  params: {}                             # 仅覆盖摘要参数，不继承 model.params
   request_timeout_seconds: 120           # 摘要请求独立超时；暂取 120s，按实际耗时记录再调整
   summary_trigger_tokens: 96000          # 须低于模型实际输入上限并留余量
   recent_context_tokens: 24000           # 必须小于 summary_trigger_tokens
   trim_tokens_to_summarize: null         # 显式传 None，所选待摘要历史不再按 SDK 默认 4000 Token 裁剪
 
 time_resolution:                          # 日期解析专用 flash 模型（doc 16）
-  llm_profile: qwen3_8_flash             # 引用全局 llm_profiles；profile 自带 temperature=0 与 enable_thinking=false
-  overrides:
+  provider: dashscope_openai
+  llm_name: qwen3.8-flash
+  params:
     response_format: {type: json_object} # 输出协议固定 JSON 对象
     max_retries: 2                       # SDK 传输层重试（连接失败/429/5xx）
   request_timeout_seconds: 15            # build_time_resolver 显式映射为工厂 timeout 覆盖

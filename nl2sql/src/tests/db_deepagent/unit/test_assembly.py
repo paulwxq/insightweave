@@ -115,28 +115,123 @@ class TestRetryModelConstruction:
         assert model.root_async_client.max_retries == 0
 
     def test_conflicting_override_rejected(self, db_agent_config):
-        """启用项目重试时 overrides 显式 max_retries≠0 → 拒绝。"""
+        """启用项目重试时 params 显式 max_retries≠0 → 拒绝。"""
         from src.modules.db_deepagent.agent import build_model
         from src.modules.db_deepagent.errors import DbAgentConfigError
 
         cfg = db_agent_config.model_copy(deep=True)
-        cfg.model.overrides = {**cfg.model.overrides, "max_retries": 2}
+        cfg.model.params = {**cfg.model.params, "max_retries": 2}
         with pytest.raises(DbAgentConfigError, match="max_retries"):
             build_model(cfg)
 
-    def test_native_dashscope_enabled_rejected(self, db_agent_config, monkeypatch):
-        """原生 dashscope + enabled=true：启动校验拒绝并指引关闭。"""
-        import src.services.config_loader as config_loader
+    def test_missing_key_has_neutral_role_and_registry_path(
+        self, db_agent_config, monkeypatch
+    ):
+        from src.modules.db_deepagent.agent import build_model
+
+        config = {
+            "llm_providers": {
+                "dashscope_openai": {
+                    "adapter": "openai_chat_completions",
+                    "api_key": None,
+                    "base_url": "https://example.invalid/v1",
+                    "models": {"qwen3.8-max": {}},
+                }
+            }
+        }
+        monkeypatch.setattr("src.services.llm_factory.get_config", lambda: config)
+
+        with pytest.raises(ValueError) as exc_info:
+            build_model(db_agent_config)
+
+        assert str(exc_info.value).startswith(
+            "model: llm_providers.dashscope_openai.api_key"
+        )
+        assert "model.params" not in str(exc_info.value)
+
+    @pytest.mark.parametrize(
+        ("direct", "inherited", "rejected"),
+        [
+            (True, False, True),
+            (None, True, True),
+            (False, True, False),
+            (None, None, False),
+        ],
+    )
+    def test_stream_guard_before_client_construction(
+        self, db_agent_config, monkeypatch, direct, inherited, rejected
+    ):
+        from unittest.mock import MagicMock
+
+        from src.modules.db_deepagent.agent import build_model
+        from src.modules.db_deepagent.errors import DbAgentConfigError
+        from src.services.llm_factory import LLMWithMeta
+
+        model_params = {} if inherited is None else {"stream": inherited}
+        monkeypatch.setattr(
+            "src.modules.db_deepagent.agent.resolve_llm_config",
+            lambda *_args: (
+                {"adapter": "openai_chat_completions"},
+                {"params": model_params},
+            ),
+        )
+        factory = MagicMock(
+            return_value=LLMWithMeta(MagicMock(), "dashscope_openai", "qwen3.8-max")
+        )
+        monkeypatch.setattr("src.services.llm_factory.get_llm", factory)
+        cfg = db_agent_config.model_copy(deep=True)
+        cfg.model.retry.enabled = False
+        cfg.model.params = {} if direct is None else {"stream": direct}
+
+        if rejected:
+            with pytest.raises(DbAgentConfigError, match="model.params.stream"):
+                build_model(cfg)
+            factory.assert_not_called()
+        else:
+            build_model(cfg)
+            factory.assert_called_once()
+
+    def test_inherited_non_bool_stream_has_registry_path(
+        self, db_agent_config, monkeypatch
+    ):
+        from unittest.mock import MagicMock
+
         from src.modules.db_deepagent.agent import build_model
         from src.modules.db_deepagent.errors import DbAgentConfigError
 
         monkeypatch.setattr(
-            config_loader,
-            "get_config",
-            lambda: {"llm_profiles": {"native_ds": {"provider": "dashscope"}}},
+            "src.modules.db_deepagent.agent.resolve_llm_config",
+            lambda *_args: (
+                {"adapter": "openai_chat_completions"},
+                {"params": {"stream": "false"}},
+            ),
+        )
+        factory = MagicMock()
+        monkeypatch.setattr("src.services.llm_factory.get_llm", factory)
+        cfg = db_agent_config.model_copy(deep=True)
+        cfg.model.retry.enabled = False
+        cfg.model.params = {}
+
+        with pytest.raises(DbAgentConfigError) as exc_info:
+            build_model(cfg)
+
+        assert "llm_providers.dashscope_openai.models.qwen3.8-max.params.stream" in str(
+            exc_info.value
+        )
+        factory.assert_not_called()
+
+    def test_native_dashscope_enabled_rejected(self, db_agent_config, monkeypatch):
+        """原生 dashscope + enabled=true：启动校验拒绝并指引关闭。"""
+        from src.modules.db_deepagent.agent import build_model
+        from src.modules.db_deepagent.errors import DbAgentConfigError
+
+        monkeypatch.setattr(
+            "src.modules.db_deepagent.agent.resolve_llm_config",
+            lambda *_args: ({"adapter": "dashscope_native"}, {}),
         )
         cfg = db_agent_config.model_copy(deep=True)
-        cfg.model.llm_profile = "native_ds"
+        cfg.model.provider = "dashscope"
+        cfg.model.llm_name = "qwen-plus"
         cfg.model.retry.enabled = True
         with pytest.raises(DbAgentConfigError, match="model.retry.enabled=false"):
             build_model(cfg)
@@ -147,7 +242,7 @@ class TestRetryModelConstruction:
 
         cfg = db_agent_config.model_copy(deep=True)
         cfg.model.retry.enabled = False
-        assert "max_retries" not in cfg.model.overrides
+        assert "max_retries" not in cfg.model.params
         model = build_model(cfg)  # 不抛错（不进入核验分支）
         assert model.max_retries is None  # ChatOpenAI 默认（客户端内部默认 2）
 

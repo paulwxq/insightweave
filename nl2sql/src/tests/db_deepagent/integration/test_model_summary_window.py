@@ -61,7 +61,6 @@ def test_summary_near_trigger_real_model(db_agent_config, tmp_path):
     from deepagents.backends import FilesystemBackend
     from deepagents.middleware.summarization import SummarizationMiddleware
     from langchain_core.messages import HumanMessage
-
     from src.modules.db_deepagent.agent import build_model, build_summarizer_model
     from src.modules.db_deepagent.middleware.model_observer import ModelCallObserver
     from src.services.config_loader import get_config
@@ -91,7 +90,6 @@ def test_summary_near_trigger_real_model(db_agent_config, tmp_path):
     }
 
     from deepagents import create_deep_agent
-
     from langgraph.checkpoint.memory import InMemorySaver
 
     agent = create_deep_agent(
@@ -170,10 +168,12 @@ def test_summary_near_trigger_real_model(db_agent_config, tmp_path):
         "production_keep_tokens": cfg.summarization.recent_context_tokens,
         # ---- 六项身份字段（doc 5.1 §5.4）：profile 来自配置，模型 ID 与
         # ls_provider 来自回调记录（ls_provider 为适配器名，非配置 provider）----
-        "agent_llm_profile": cfg.model.llm_profile,
+        "agent_provider": cfg.model.provider,
+        "agent_llm_name": cfg.model.llm_name,
         "agent_model": agent_model_id,
         "agent_ls_provider": agent_ls_provider,
-        "summary_llm_profile": cfg.summarization.llm_profile,
+        "summary_provider": cfg.summarization.provider,
+        "summary_llm_name": cfg.summarization.llm_name,
         "summary_model": summary_model_id,
         "summary_ls_provider": summary_ls_provider,
         "note": "低阈值强制触发验证摘要路径；生产 96000/24000 的余量=模型输入上限-触发点，"
