@@ -19,7 +19,6 @@ from typing import Any
 import pytest
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
-
 from src.modules.db_deepagent.agent import (
     build_backend,
     build_filesystem_middleware,
@@ -30,7 +29,6 @@ from src.modules.db_deepagent.agent import (
 from src.modules.db_deepagent.middleware.model_observer import ModelCallObserver
 from src.modules.db_deepagent.services.table_catalog import TableCatalog
 from src.modules.db_deepagent.tools.schema_tools import make_inspect_tables_tool
-from src.services.config_loader import get_config
 from src.tests.db_deepagent.conftest import FakeColumn
 
 pytestmark = [pytest.mark.integration, pytest.mark.requires_llm]
@@ -146,7 +144,8 @@ def test_real_model_reads_middle_of_offloaded_inspect_output(
     assert target_name not in question
     report: dict[str, Any] = {
         "scope": "synthetic schema, real model and production tool/filesystem",
-        "llm_profile": cfg.model.llm_profile,
+        "provider": cfg.model.provider,
+        "llm_name": cfg.model.llm_name,
         "raw_characters": len(raw),
         "target_character_offset": target_offset,
         "expected": {"column_name": target_name, "pg_type": target_type},
@@ -216,7 +215,7 @@ def test_real_model_reads_middle_of_offloaded_inspect_output(
         if answer.startswith("```"):
             answer = "\n".join(answer.splitlines()[1:-1])
         assert json.loads(answer) == report["expected"]
-        expected_model = get_config()["llm_profiles"][cfg.model.llm_profile]["model"]
+        expected_model = cfg.model.llm_name
         assert capture.calls and all(
             c["model"] == expected_model for c in capture.calls
         )

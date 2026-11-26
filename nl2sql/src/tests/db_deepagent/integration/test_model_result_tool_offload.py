@@ -29,7 +29,6 @@ import pytest
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.types import Command
-
 from src.modules.db_deepagent.config import load_db_agent_config
 from src.modules.db_deepagent.context import DbAgentContext
 from src.modules.db_deepagent.middleware.model_observer import ModelCallObserver
@@ -229,9 +228,8 @@ def _write_evidence(tmp_path: Path, report: dict[str, Any]) -> None:
 
 def test_real_model_reads_offloaded_execute_sql_and_submits(tmp_path, monkeypatch):
     """主路径：validate_sql → execute_sql(>80000 转存) → read_file → submit。"""
-    from langgraph.checkpoint.memory import InMemorySaver
-
     import src.modules.db_deepagent.agent as agent_mod
+    from langgraph.checkpoint.memory import InMemorySaver
     from src.modules.db_deepagent.agent import build_db_agent, build_session_dir
 
     scenario = _build_scenario(tmp_path)
@@ -296,7 +294,8 @@ def test_real_model_reads_offloaded_execute_sql_and_submits(tmp_path, monkeypatc
 
     report: dict[str, Any] = {
         "scope": "real LLM + production graph, controlled fake business data",
-        "llm_profile": cfg.model.llm_profile,
+        "provider": cfg.model.provider,
+        "llm_name": cfg.model.llm_name,
         "question": scenario["question"],
         "target_note_kind": "random-suffix, middle of multi-line JSON",
         "model_call_limit": _MODEL_CALL_LIMIT,

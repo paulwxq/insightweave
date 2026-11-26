@@ -54,10 +54,11 @@ _SIMPLE_MESSAGES = [
 # DeepSeek deepseek-chat（普通对话模式）
 # ---------------------------------------------------------------------------
 
+
 @_SKIP_DEEPSEEK
 def test_deepseek_chat_basic_invoke():
     """deepseek-chat 基本调用：能返回非空 content"""
-    llm_meta = get_llm("deepseek_chat")
+    llm_meta = get_llm("deepseek", "deepseek-chat")
     assert llm_meta.provider == "deepseek"
     assert llm_meta.model == "deepseek-chat"
 
@@ -70,7 +71,7 @@ def test_deepseek_chat_basic_invoke():
 @_SKIP_DEEPSEEK
 def test_deepseek_chat_temperature_override():
     """deepseek-chat 支持 temperature 节点级 override"""
-    llm_meta = get_llm("deepseek_chat", temperature=0)
+    llm_meta = get_llm("deepseek", "deepseek-chat", params={"temperature": 0})
     response = llm_meta.llm.invoke(_SIMPLE_MESSAGES)
     assert response.content
     print(f"\n[deepseek-chat temperature=0] response.content = {response.content!r}")
@@ -79,7 +80,7 @@ def test_deepseek_chat_temperature_override():
 @_SKIP_DEEPSEEK
 def test_deepseek_chat_max_tokens_override():
     """deepseek-chat max_tokens 节点级 override 不报错"""
-    llm_meta = get_llm("deepseek_chat", max_tokens=128)
+    llm_meta = get_llm("deepseek", "deepseek-chat", params={"max_tokens": 128})
     response = llm_meta.llm.invoke(_SIMPLE_MESSAGES)
     assert response.content
     print(f"\n[deepseek-chat max_tokens=128] response.content = {response.content!r}")
@@ -88,7 +89,7 @@ def test_deepseek_chat_max_tokens_override():
 @_SKIP_DEEPSEEK
 def test_deepseek_chat_provider_meta():
     """LLMWithMeta 元信息字段正确"""
-    llm_meta = get_llm("deepseek_chat")
+    llm_meta = get_llm("deepseek", "deepseek-chat")
     assert llm_meta.provider == "deepseek"
     assert llm_meta.model == "deepseek-chat"
 
@@ -97,10 +98,11 @@ def test_deepseek_chat_provider_meta():
 # DeepSeek deepseek-reasoner（思考模式）
 # ---------------------------------------------------------------------------
 
+
 @_SKIP_DEEPSEEK
 def test_deepseek_reasoner_basic_invoke():
     """deepseek-reasoner 基本调用：能返回非空 content"""
-    llm_meta = get_llm("deepseek_reasoner")
+    llm_meta = get_llm("deepseek", "deepseek-reasoner", request_timeout_seconds=60)
     assert llm_meta.provider == "deepseek"
     assert llm_meta.model == "deepseek-reasoner"
 
@@ -115,7 +117,7 @@ def test_deepseek_reasoner_basic_invoke():
 @_SKIP_DEEPSEEK
 def test_deepseek_reasoner_provider_meta():
     """deepseek-reasoner LLMWithMeta 元信息字段正确"""
-    llm_meta = get_llm("deepseek_reasoner")
+    llm_meta = get_llm("deepseek", "deepseek-reasoner", request_timeout_seconds=60)
     assert llm_meta.provider == "deepseek"
     assert llm_meta.model == "deepseek-reasoner"
 
@@ -124,10 +126,11 @@ def test_deepseek_reasoner_provider_meta():
 # DashScope 回归测试（验证原有功能未被破坏）
 # ---------------------------------------------------------------------------
 
+
 @_SKIP_DASHSCOPE
 def test_dashscope_qwen_turbo_basic_invoke():
     """qwen_turbo 基本调用：验证 DashScope 功能未被 DeepSeek 改动破坏"""
-    llm_meta = get_llm("qwen_turbo")
+    llm_meta = get_llm("dashscope", "qwen-turbo")
     assert llm_meta.provider == "dashscope"
     assert llm_meta.model == "qwen-turbo"
 
@@ -140,7 +143,7 @@ def test_dashscope_qwen_turbo_basic_invoke():
 @_SKIP_DASHSCOPE
 def test_dashscope_temperature_in_model_kwargs():
     """DashScope temperature 通过 model_kwargs 传入，调用不报错"""
-    llm_meta = get_llm("qwen_turbo", temperature=0)
+    llm_meta = get_llm("dashscope", "qwen-turbo", params={"temperature": 0})
     response = llm_meta.llm.invoke(_SIMPLE_MESSAGES)
     assert response.content
     print(f"\n[qwen_turbo temperature=0] response.content = {response.content!r}")
@@ -149,6 +152,6 @@ def test_dashscope_temperature_in_model_kwargs():
 @_SKIP_DASHSCOPE
 def test_dashscope_provider_meta():
     """DashScope LLMWithMeta 元信息字段正确"""
-    llm_meta = get_llm("qwen_turbo")
+    llm_meta = get_llm("dashscope", "qwen-turbo")
     assert llm_meta.provider == "dashscope"
     assert llm_meta.model == "qwen-turbo"

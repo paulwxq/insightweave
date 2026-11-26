@@ -125,3 +125,9 @@ env -u all_proxy -u ALL_PROXY .venv/bin/python -m pytest \
   代表 1M 容量、生产阈值表现或成本收益已验收。
 
 详见 [doc 5.1 实施记录](../../../docs/5.1_摘要器独立LLM配置与Qwen3.8-Flash接入方案.md)。
+
+## 当前模型选择结构（Doc 23）
+
+生产角色已改为 `provider + llm_name + params`：主 Agent 默认 `dashscope_openai + qwen3.8-max`，摘要和日期解析默认 `dashscope_openai + qwen3.8-flash`。摘要 `params` 独立于主 Agent，日期解析继续使用 `response_format: {type: json_object}` 和 `max_retries: 2`。
+
+模型默认值位于 `llm_providers.<provider>.models.<llm_name>.params`，业务 `params` 按键覆盖，嵌套对象整项替换；`0` 和 `false` 为显式值。切换摘要模型时须同时检查窗口、超时、思考与输出上限，不能把旧 Qwen 参数自动带给 GLM 或 Kimi。本文此前的 profile 配置和实施记录保留为历史证据。

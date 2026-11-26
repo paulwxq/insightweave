@@ -11,9 +11,11 @@
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
 
 import pytest
+import yaml
 
 from src.utils.logger import setup_logging_from_yaml
 
@@ -51,6 +53,26 @@ def _console_level() -> int:
 
 
 class TestLogLevelEnv:
+    def test_standard_formatter_includes_milliseconds(self):
+        config = yaml.safe_load(YAML_PATH.read_text(encoding="utf-8"))
+        standard = config["formatters"]["standard"]
+        formatter = logging.Formatter(
+            fmt=standard["format"], datefmt=standard["datefmt"]
+        )
+        record = logging.LogRecord(
+            name="nl2sql.test",
+            level=logging.INFO,
+            pathname=__file__,
+            lineno=1,
+            msg="timestamp probe",
+            args=(),
+            exc_info=None,
+        )
+
+        timestamp = formatter.format(record).split(" - ", 1)[0]
+
+        assert re.fullmatch(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}", timestamp)
+
     def test_unset_keeps_yaml_debug(self, monkeypatch):
         _setup(monkeypatch, None)
         assert _business_level() == logging.DEBUG

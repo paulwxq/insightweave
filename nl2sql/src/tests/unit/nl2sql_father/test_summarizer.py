@@ -1,7 +1,8 @@
 """Summarizer 节点单元测试"""
 
-import pytest
 from unittest.mock import MagicMock, patch
+
+import pytest
 
 from src.modules.nl2sql_father.nodes.summarizer import summarizer_node
 
@@ -41,8 +42,9 @@ class TestSummarizerNode:
         with patch("src.modules.nl2sql_father.nodes.summarizer.load_config") as mock:
             mock.return_value = {
                 "summarizer": {
-                    "llm_profile": "qwen_plus",
-                    "temperature": 0.3,
+                    "provider": "dashscope",
+                    "llm_name": "qwen-plus",
+                    "params": {"temperature": 0.3},
                     "max_rows_in_prompt": 10,
                     "use_template": False,
                     "llm_retry": {"max_attempts": 3, "delays_seconds": [1, 2, 3]},
@@ -56,8 +58,9 @@ class TestSummarizerNode:
         with patch("src.modules.nl2sql_father.nodes.summarizer.load_config") as mock:
             mock.return_value = {
                 "summarizer": {
-                    "llm_profile": "qwen_plus",
-                    "temperature": 0.3,
+                    "provider": "dashscope",
+                    "llm_name": "qwen-plus",
+                    "params": {"temperature": 0.3},
                     "max_rows_in_prompt": 10,
                     "use_template": True,
                     "llm_retry": {"max_attempts": 3, "delays_seconds": [1, 2, 3]},
@@ -174,13 +177,30 @@ class TestSummarizerNode:
             ],
         }
 
-        with patch("src.modules.nl2sql_father.nodes.summarizer.get_llm") as mock_get_llm:
-            mock_get_llm.return_value = _mock_get_llm_return("2024年的总销售额为15万元。")
+        with patch(
+            "src.modules.nl2sql_father.nodes.summarizer.get_llm"
+        ) as mock_get_llm:
+            mock_get_llm.return_value = _mock_get_llm_return(
+                "2024年的总销售额为15万元。"
+            )
 
             result = summarizer_node(state)
 
             assert "summary" in result
             assert result["summary"] == "2024年的总销售额为15万元。"
+
+    def test_legacy_flat_model_param_is_rejected(self, mock_config):
+        mock_config.return_value["summarizer"]["top_p"] = 0.9
+        state = {
+            "user_query": "查询销售额",
+            "query_id": "test-legacy-param",
+            "execution_results": [
+                {"success": True, "columns": ["amount"], "rows": [[100]]}
+            ],
+        }
+
+        with pytest.raises(ValueError, match="summarizer.*top_p.*params"):
+            summarizer_node(state)
 
     def test_scenario_3_single_sql_success_with_template(self, mock_config_template):
         """场景 3：单 SQL 成功（使用模板）"""
@@ -241,7 +261,9 @@ class TestSummarizerNode:
             ],
         }
 
-        with patch("src.modules.nl2sql_father.nodes.summarizer.get_llm") as mock_get_llm:
+        with patch(
+            "src.modules.nl2sql_father.nodes.summarizer.get_llm"
+        ) as mock_get_llm:
             mock_get_llm.return_value = _mock_get_llm_return(
                 side_effect=Exception("API 失败")
             )
@@ -266,7 +288,9 @@ class TestSummarizerNode:
             ],
         }
 
-        with patch("src.modules.nl2sql_father.nodes.summarizer.get_llm") as mock_get_llm:
+        with patch(
+            "src.modules.nl2sql_father.nodes.summarizer.get_llm"
+        ) as mock_get_llm:
             mock_get_llm.return_value = _mock_get_llm_return(
                 "销售额为1000，成本为600，利润为400。"
             )
@@ -308,7 +332,9 @@ class TestSummarizerNode:
             ],
         }
 
-        with patch("src.modules.nl2sql_father.nodes.summarizer.get_llm") as mock_get_llm:
+        with patch(
+            "src.modules.nl2sql_father.nodes.summarizer.get_llm"
+        ) as mock_get_llm:
             llm_meta = _mock_get_llm_return("最终回答")
             mock_get_llm.return_value = llm_meta
 
@@ -331,11 +357,17 @@ class TestSummarizerNode:
 
         with (
             patch("src.modules.nl2sql_father.nodes.summarizer.get_llm") as mock_get_llm,
-            patch("src.modules.nl2sql_father.nodes.summarizer.time.sleep") as mock_sleep,
+            patch(
+                "src.modules.nl2sql_father.nodes.summarizer.time.sleep"
+            ) as mock_sleep,
         ):
             timeout_error = Exception("ConnectTimeout: temporary timeout")
             mock_get_llm.return_value = _mock_get_llm_return(
-                side_effect=[timeout_error, timeout_error, MagicMock(content="第三次成功")]
+                side_effect=[
+                    timeout_error,
+                    timeout_error,
+                    MagicMock(content="第三次成功"),
+                ]
             )
 
             result = summarizer_node(state)
@@ -358,7 +390,9 @@ class TestSummarizerNode:
 
         with (
             patch("src.modules.nl2sql_father.nodes.summarizer.get_llm") as mock_get_llm,
-            patch("src.modules.nl2sql_father.nodes.summarizer.time.sleep") as mock_sleep,
+            patch(
+                "src.modules.nl2sql_father.nodes.summarizer.time.sleep"
+            ) as mock_sleep,
         ):
             mock_get_llm.return_value = _mock_get_llm_return(
                 side_effect=Exception("HTTP 400 Bad Request")
@@ -382,7 +416,9 @@ class TestSummarizerNode:
 
         with (
             patch("src.modules.nl2sql_father.nodes.summarizer.get_llm") as mock_get_llm,
-            patch("src.modules.nl2sql_father.nodes.summarizer.time.sleep") as mock_sleep,
+            patch(
+                "src.modules.nl2sql_father.nodes.summarizer.time.sleep"
+            ) as mock_sleep,
         ):
             mock_get_llm.return_value = _mock_get_llm_return(
                 side_effect=Exception("HTTP 401 Unauthorized")
@@ -406,7 +442,9 @@ class TestSummarizerNode:
 
         with (
             patch("src.modules.nl2sql_father.nodes.summarizer.get_llm") as mock_get_llm,
-            patch("src.modules.nl2sql_father.nodes.summarizer.time.sleep") as mock_sleep,
+            patch(
+                "src.modules.nl2sql_father.nodes.summarizer.time.sleep"
+            ) as mock_sleep,
         ):
             timeout_error = Exception("ConnectTimeout: temporary timeout")
             mock_get_llm.return_value = _mock_get_llm_return(
@@ -439,11 +477,13 @@ class TestSummarizerNode:
 
     def test_format_table_empty(self):
         from src.modules.nl2sql_father.nodes.summarizer import _format_table
+
         result = _format_table(["col1"], [])
         assert "无数据" in result
 
     def test_format_table_normal(self):
         from src.modules.nl2sql_father.nodes.summarizer import _format_table
+
         columns = ["id", "name"]
         rows = [[1, "Alice"], [2, "Bob"]]
         result = _format_table(columns, rows)
@@ -454,6 +494,7 @@ class TestSummarizerNode:
 
     def test_format_table_truncation(self):
         from src.modules.nl2sql_father.nodes.summarizer import _format_table
+
         columns = ["num"]
         rows = [[i] for i in range(15)]
         result = _format_table(columns, rows)
@@ -461,11 +502,13 @@ class TestSummarizerNode:
 
     def test_build_error_summary_parsing_failed(self):
         from src.modules.nl2sql_father.nodes.summarizer import _build_error_summary
+
         summary = _build_error_summary("Error", "parsing_failed", "测试")
         assert "换一种方式" in summary or "无法理解" in summary
 
     def test_build_error_summary_unknown_type(self):
         from src.modules.nl2sql_father.nodes.summarizer import _build_error_summary
+
         summary = _build_error_summary("Error", "unknown_type", "测试")
         assert "抱歉" in summary
 

@@ -76,11 +76,13 @@ def test_trim_tokens_to_summarize_positive_or_none(config_dict: dict):
 
 
 def test_summarization_independent_profile_loaded(db_agent_config: DbAgentConfig):
-    """doc 5.1 §3：主模型仍 qwen3_8_max；摘要独立 Flash profile + 120s 超时，阈值不变。"""
-    assert db_agent_config.model.llm_profile == "qwen3_8_max"
+    """doc 5.1 §3：主模型仍 qwen3.8-max；摘要独立 Flash profile + 120s 超时，阈值不变。"""
+    assert db_agent_config.model.provider == "dashscope_openai"
+    assert db_agent_config.model.llm_name == "qwen3.8-max"
     s = db_agent_config.summarization
-    assert s.llm_profile == "qwen3_8_flash"
-    assert s.overrides == {}
+    assert s.provider == "dashscope_openai"
+    assert s.llm_name == "qwen3.8-flash"
+    assert s.params == {}
     assert s.request_timeout_seconds == 120
     # 原阈值与 trim=None 保留（doc 5.1 Global Constraints）
     assert s.summary_trigger_tokens == 96000
@@ -99,14 +101,14 @@ def _assert_validation_error(config_dict: dict, *, loc: tuple, err_type: str) ->
 
 
 def test_summarization_profile_and_timeout_required(config_dict: dict):
-    """llm_profile 与 request_timeout_seconds 必填：缺失报 missing，路径含 summarization。"""
+    """llm_name 与 request_timeout_seconds 必填：缺失报 missing，路径含 summarization。"""
     import copy
 
     missing_profile = copy.deepcopy(config_dict)
-    missing_profile["summarization"].pop("llm_profile", None)
+    missing_profile["summarization"].pop("llm_name", None)
     _assert_validation_error(
         missing_profile,
-        loc=("summarization", "llm_profile"),
+        loc=("summarization", "llm_name"),
         err_type="missing",
     )
 
@@ -124,10 +126,10 @@ def test_summarization_profile_nonempty_and_timeout_positive(config_dict: dict):
     import copy
 
     empty_profile = copy.deepcopy(config_dict)
-    empty_profile["summarization"]["llm_profile"] = ""
+    empty_profile["summarization"]["llm_name"] = ""
     _assert_validation_error(
         empty_profile,
-        loc=("summarization", "llm_profile"),
+        loc=("summarization", "llm_name"),
         err_type="string_too_short",
     )
 
@@ -142,10 +144,144 @@ def test_summarization_profile_nonempty_and_timeout_positive(config_dict: dict):
 
 def test_summarization_profile_must_exist_in_global_registry(config_dict: dict):
     """引用不存在的 profile → _check_summarization 明确报错并指向全局注册位置。"""
-    config_dict["summarization"]["llm_profile"] = "no_such_profile"
+    config_dict["summarization"]["llm_name"] = "no_such_profile"
     cfg = _validated(config_dict)
-    with pytest.raises(DbAgentConfigError, match="llm_profiles"):
+    with pytest.raises(DbAgentConfigError, match="models.no_such_profile"):
         run_config_checks(cfg, check_embedding_profile=False)
+
+
+def test_main_model_unknown_provider_has_role_path(config_dict: dict):
+    config_dict["model"]["provider"] = "missing_provider"
+    cfg = _validated(config_dict)
+    with pytest.raises(DbAgentConfigError) as exc_info:
+        run_config_checks(cfg, check_embedding_profile=False)
+    assert str(exc_info.value).startswith("model: llm_providers.missing_provider")
+
+
+def test_registry_unknown_param_fails_config_check_with_full_path(
+    config_dict: dict, monkeypatch
+):
+    import copy
+
+    from src.services.config_loader import get_config
+
+    global_config = copy.deepcopy(get_config())
+    global_config["llm_providers"]["dashscope_openai"]["models"]["qwen3.8-max"][
+        "params"
+    ]["temperautre"] = 0
+    monkeypatch.setattr("src.services.llm_factory.get_config", lambda: global_config)
+
+    with pytest.raises(DbAgentConfigError) as exc_info:
+        run_config_checks(_validated(config_dict), check_embedding_profile=False)
+
+    message = str(exc_info.value)
+    assert message.startswith(
+        "model: llm_providers.dashscope_openai.models.qwen3.8-max.params.temperautre"
+    )
+    assert "model.params: params.temperautre" not in message
+
+
+@pytest.mark.parametrize("value", [None, {"type": "text"}, []])
+def test_time_resolution_requires_json_object(config_dict: dict, value):
+    if value is None:
+        config_dict["time_resolution"]["params"].pop("response_format")
+    else:
+        config_dict["time_resolution"]["params"]["response_format"] = value
+
+    with pytest.raises(
+        DbAgentConfigError, match="time_resolution.params.response_format.type"
+    ):
+        run_config_checks(_validated(config_dict), check_embedding_profile=False)
+
+
+def test_time_resolution_inherited_json_error_has_registry_path(
+    config_dict: dict, monkeypatch
+):
+    import copy
+
+    from src.services.config_loader import get_config
+
+    config_dict["time_resolution"]["params"].pop("response_format")
+    global_config = copy.deepcopy(get_config())
+    global_config["llm_providers"]["dashscope_openai"]["models"]["qwen3.8-flash"][
+        "params"
+    ]["response_format"] = {"type": "text"}
+    monkeypatch.setattr("src.services.llm_factory.get_config", lambda: global_config)
+
+    with pytest.raises(DbAgentConfigError) as exc_info:
+        run_config_checks(_validated(config_dict), check_embedding_profile=False)
+
+    assert (
+        "llm_providers.dashscope_openai.models.qwen3.8-flash.params."
+        "response_format.type" in str(exc_info.value)
+    )
+
+
+def test_time_resolution_inherits_json_object(config_dict: dict, monkeypatch):
+    import copy
+
+    from src.services.config_loader import get_config
+
+    config_dict["time_resolution"]["params"].pop("response_format")
+    global_config = copy.deepcopy(get_config())
+    global_config["llm_providers"]["dashscope_openai"]["models"]["qwen3.8-flash"][
+        "params"
+    ]["response_format"] = {"type": "json_object"}
+    monkeypatch.setattr("src.services.llm_factory.get_config", lambda: global_config)
+
+    run_config_checks(_validated(config_dict), check_embedding_profile=False)
+
+
+@pytest.mark.parametrize("role", ["model", "summarization", "time_resolution"])
+@pytest.mark.parametrize("value", [True, "15"])
+def test_yaml_role_timeout_rejects_bool_and_string_before_assembly(
+    config_dict: dict, tmp_path, role, value
+):
+    import yaml
+
+    from src.modules.db_deepagent.config import load_base_db_agent_config
+
+    config_dict[role]["request_timeout_seconds"] = value
+    config_path = tmp_path / "db_deepagent.yaml"
+    config_path.write_text(
+        yaml.safe_dump(config_dict, allow_unicode=True), encoding="utf-8"
+    )
+
+    with pytest.raises(DbAgentConfigError) as exc_info:
+        load_base_db_agent_config(config_path)
+
+    assert f"{role}.request_timeout_seconds" in str(exc_info.value)
+
+
+def test_yaml_timeout_env_reference_reaches_model_assembly(
+    config_dict: dict, tmp_path, monkeypatch
+):
+    from unittest.mock import MagicMock
+
+    import yaml
+
+    from src.modules.db_deepagent.agent import build_model
+    from src.modules.db_deepagent.config import load_base_db_agent_config
+    from src.services.llm_factory import LLMWithMeta
+
+    config_dict["model"]["request_timeout_seconds"] = "${TEST_MODEL_TIMEOUT_SECONDS}"
+    config_path = tmp_path / "db_deepagent.yaml"
+    config_path.write_text(
+        yaml.safe_dump(config_dict, allow_unicode=True), encoding="utf-8"
+    )
+    monkeypatch.setenv("TEST_MODEL_TIMEOUT_SECONDS", "20")
+    captured = {}
+
+    def fake_get_llm(provider, llm_name, *, params, request_timeout_seconds):
+        captured["timeout"] = request_timeout_seconds
+        return LLMWithMeta(MagicMock(), provider, llm_name)
+
+    monkeypatch.setattr("src.services.llm_factory.get_llm", fake_get_llm)
+    cfg = load_base_db_agent_config(config_path)
+    cfg.model.retry.enabled = False
+    build_model(cfg)
+
+    assert captured["timeout"] == 20
 
 
 def test_summarization_change_keeps_validation_fingerprint(config_dict: dict):
@@ -154,7 +290,7 @@ def test_summarization_change_keeps_validation_fingerprint(config_dict: dict):
 
     fp = compute_validation_fingerprint(_validated(config_dict))
     changed = copy.deepcopy(config_dict)
-    changed["summarization"]["llm_profile"] = "qwen3_8_max"
+    changed["summarization"]["llm_name"] = "qwen3.8-max"
     changed["summarization"]["request_timeout_seconds"] = 60
     assert compute_validation_fingerprint(_validated(changed)) == fp
 

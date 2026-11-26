@@ -1,7 +1,8 @@
 """SQL 生成子图集成测试"""
 
-import pytest
 from unittest.mock import MagicMock, patch
+
+import pytest
 
 from src.modules.sql_generation.subgraph.create_subgraph import (
     create_sql_generation_subgraph,
@@ -39,23 +40,33 @@ _SUBGRAPH_PKG = "src.modules.sql_generation.subgraph"
 @pytest.fixture
 def mock_all_dependencies():
     """Mock 所有外部依赖"""
-    with patch(f"{_SUBGRAPH_NODES}.schema_retrieval.SchemaRetriever") as mock_retriever, \
-         patch(f"{_SUBGRAPH_NODES}.question_parsing.get_llm") as mock_parser_get_llm, \
-         patch(f"{_SUBGRAPH_NODES}.sql_generation.get_llm") as mock_gen_get_llm, \
-         patch(f"{_SUBGRAPH_NODES}.validation.SQLValidationTool") as mock_validation, \
-         patch(f"{_SUBGRAPH_NODES}.question_parsing.load_subgraph_config") as mock_cfg_parsing, \
-         patch(f"{_SUBGRAPH_NODES}.sql_generation.load_subgraph_config") as mock_cfg_gen, \
-         patch(f"{_SUBGRAPH_NODES}.schema_retrieval.load_subgraph_config") as mock_cfg_schema, \
-         patch(f"{_SUBGRAPH_NODES}.validation.load_subgraph_config") as mock_cfg_validation, \
-         patch(f"{_SUBGRAPH_PKG}.create_subgraph.load_subgraph_config") as mock_cfg_subgraph:
+    with patch(
+        f"{_SUBGRAPH_NODES}.schema_retrieval.SchemaRetriever"
+    ) as mock_retriever, patch(
+        f"{_SUBGRAPH_NODES}.question_parsing.get_llm"
+    ) as mock_parser_get_llm, patch(
+        f"{_SUBGRAPH_NODES}.sql_generation.get_llm"
+    ) as mock_gen_get_llm, patch(
+        f"{_SUBGRAPH_NODES}.validation.SQLValidationTool"
+    ) as mock_validation, patch(
+        f"{_SUBGRAPH_NODES}.question_parsing.load_subgraph_config"
+    ) as mock_cfg_parsing, patch(
+        f"{_SUBGRAPH_NODES}.sql_generation.load_subgraph_config"
+    ) as mock_cfg_gen, patch(
+        f"{_SUBGRAPH_NODES}.schema_retrieval.load_subgraph_config"
+    ) as mock_cfg_schema, patch(
+        f"{_SUBGRAPH_NODES}.validation.load_subgraph_config"
+    ) as mock_cfg_validation, patch(
+        f"{_SUBGRAPH_PKG}.create_subgraph.load_subgraph_config"
+    ) as mock_cfg_subgraph:
 
         # 所有 load_subgraph_config mock 共享同一份配置
         _fixture_config = {
             "question_parsing": {
                 "enable_internal_parser": True,
-                "llm_profile": "qwen_plus",
-                "temperature": 0,
-                "max_tokens": 1500,
+                "provider": "dashscope",
+                "llm_name": "qwen-plus",
+                "params": {"temperature": 0, "max_tokens": 1500},
                 "fallback_to_empty": True,
             },
             "schema_retrieval": {
@@ -64,9 +75,9 @@ def mock_all_dependencies():
                 "column_backfill_top_k": 10,
             },
             "sql_generation": {
-                "llm_profile": "qwen_max",
-                "temperature": 0,
-                "max_tokens": 2000,
+                "provider": "dashscope",
+                "llm_name": "qwen-max",
+                "params": {"temperature": 0, "max_tokens": 2000},
             },
             "validation": {
                 "enable_syntax_check": True,
@@ -77,8 +88,13 @@ def mock_all_dependencies():
                 "max_iterations": 3,
             },
         }
-        for _m in (mock_cfg_parsing, mock_cfg_gen, mock_cfg_schema,
-                    mock_cfg_validation, mock_cfg_subgraph):
+        for _m in (
+            mock_cfg_parsing,
+            mock_cfg_gen,
+            mock_cfg_schema,
+            mock_cfg_validation,
+            mock_cfg_subgraph,
+        ):
             _m.return_value = _fixture_config
 
         # Mock question parsing LLM (via get_llm)
@@ -180,18 +196,29 @@ class TestShouldRetryLogic:
 
     def test_retry_on_validation_failure(self):
         state = SQLGenerationState(
-            messages=[], query="test", query_id="q1", user_query="test",
-            dependencies_results={}, iteration_count=1,
-            validated_sql=None, error_type="validation_failed",
+            messages=[],
+            query="test",
+            query_id="q1",
+            user_query="test",
+            dependencies_results={},
+            iteration_count=1,
+            validated_sql=None,
+            error_type="validation_failed",
         )
-        with patch(f"{_SUBGRAPH_PKG}.create_subgraph.load_subgraph_config") as mock_config:
+        with patch(
+            f"{_SUBGRAPH_PKG}.create_subgraph.load_subgraph_config"
+        ) as mock_config:
             mock_config.return_value = {"retry": {"max_iterations": 3}}
             assert should_retry(state) == "retry"
 
     def test_success_on_validated_sql(self):
         state = SQLGenerationState(
-            messages=[], query="test", query_id="q1", user_query="test",
-            dependencies_results={}, iteration_count=1,
+            messages=[],
+            query="test",
+            query_id="q1",
+            user_query="test",
+            dependencies_results={},
+            iteration_count=1,
             validated_sql="SELECT * FROM public.test",
         )
         with patch(f"{_SUBGRAPH_PKG}.create_subgraph.load_subgraph_config"):
@@ -199,28 +226,45 @@ class TestShouldRetryLogic:
 
     def test_fail_on_max_iterations(self):
         state = SQLGenerationState(
-            messages=[], query="test", query_id="q1", user_query="test",
-            dependencies_results={}, iteration_count=3,
-            validated_sql=None, error_type="validation_failed",
+            messages=[],
+            query="test",
+            query_id="q1",
+            user_query="test",
+            dependencies_results={},
+            iteration_count=3,
+            validated_sql=None,
+            error_type="validation_failed",
         )
-        with patch(f"{_SUBGRAPH_PKG}.create_subgraph.load_subgraph_config") as mock_config:
+        with patch(
+            f"{_SUBGRAPH_PKG}.create_subgraph.load_subgraph_config"
+        ) as mock_config:
             mock_config.return_value = {"retry": {"max_iterations": 3}}
             assert should_retry(state) == "fail"
 
     def test_fail_on_non_recoverable_error(self):
         state = SQLGenerationState(
-            messages=[], query="test", query_id="q1", user_query="test",
-            dependencies_results={}, iteration_count=1,
-            validated_sql=None, error_type="schema_retrieval_failed",
+            messages=[],
+            query="test",
+            query_id="q1",
+            user_query="test",
+            dependencies_results={},
+            iteration_count=1,
+            validated_sql=None,
+            error_type="schema_retrieval_failed",
         )
         with patch(f"{_SUBGRAPH_PKG}.create_subgraph.load_subgraph_config"):
             assert should_retry(state) == "fail"
 
     def test_fail_on_generation_failed(self):
         state = SQLGenerationState(
-            messages=[], query="test", query_id="q1", user_query="test",
-            dependencies_results={}, iteration_count=1,
-            validated_sql=None, error_type="generation_failed",
+            messages=[],
+            query="test",
+            query_id="q1",
+            user_query="test",
+            dependencies_results={},
+            iteration_count=1,
+            validated_sql=None,
+            error_type="generation_failed",
         )
         with patch(f"{_SUBGRAPH_PKG}.create_subgraph.load_subgraph_config"):
             assert should_retry(state) == "fail"
@@ -231,7 +275,9 @@ class TestSubgraphExecution:
 
     def test_successful_execution(self, mock_all_dependencies):
         output = run_sql_generation_subgraph(
-            query="查询2024年1月的订单", query_id="test-001", user_query="查询2024年1月的订单",
+            query="查询2024年1月的订单",
+            query_id="test-001",
+            user_query="查询2024年1月的订单",
         )
         assert "validated_sql" in output
         assert output["validated_sql"] is not None
@@ -243,8 +289,10 @@ class TestSubgraphExecution:
             "dimensions": [{"text": "北京", "type": "location"}],
         }
         output = run_sql_generation_subgraph(
-            query="查询北京地区的订单", query_id="test-002",
-            user_query="查询北京地区的订单", parse_hints=parse_hints,
+            query="查询北京地区的订单",
+            query_id="test-002",
+            user_query="查询北京地区的订单",
+            parse_hints=parse_hints,
         )
         assert output["validated_sql"] is not None
 
@@ -255,15 +303,20 @@ class TestSubgraphExecution:
                 "execution_result": {
                     "sub_query_id": "sub1",
                     "sql": "SELECT store_id FROM public.dim_store WHERE city = '北京'",
-                    "success": True, "columns": ["store_id"],
-                    "rows": [["BJ001"]], "row_count": 1,
-                    "execution_time_ms": 3.0, "error": None,
+                    "success": True,
+                    "columns": ["store_id"],
+                    "rows": [["BJ001"]],
+                    "row_count": 1,
+                    "execution_time_ms": 3.0,
+                    "error": None,
                 },
             }
         }
         output = run_sql_generation_subgraph(
-            query="查询这些门店的订单", query_id="test-003",
-            user_query="查询北京门店的订单", dependencies_results=dependencies_results,
+            query="查询这些门店的订单",
+            query_id="test-003",
+            user_query="查询北京门店的订单",
+            dependencies_results=dependencies_results,
         )
         assert output["validated_sql"] is not None
 
@@ -319,14 +372,28 @@ class TestSubgraphExecution:
 
     def test_retry_on_validation_failure(self, mock_all_dependencies):
         validation_results = [
-            {"valid": False, "errors": ["表名不存在"], "warnings": [], "layer": "semantic", "explain_plan": None},
-            {"valid": True, "errors": [], "warnings": [], "layer": "all_passed", "explain_plan": "Seq Scan"},
+            {
+                "valid": False,
+                "errors": ["表名不存在"],
+                "warnings": [],
+                "layer": "semantic",
+                "explain_plan": None,
+            },
+            {
+                "valid": True,
+                "errors": [],
+                "warnings": [],
+                "layer": "all_passed",
+                "explain_plan": "Seq Scan",
+            },
         ]
         mock_validation_instance = mock_all_dependencies["validation"].return_value
         mock_validation_instance.validate.side_effect = validation_results
 
         output = run_sql_generation_subgraph(
-            query="查询订单", query_id="test-004", user_query="查询订单",
+            query="查询订单",
+            query_id="test-004",
+            user_query="查询订单",
         )
         assert output["iteration_count"] == 2
         assert output["validated_sql"] is not None
@@ -334,10 +401,16 @@ class TestSubgraphExecution:
     def test_max_iterations_reached(self, mock_all_dependencies):
         mock_validation_instance = mock_all_dependencies["validation"].return_value
         mock_validation_instance.validate.return_value = {
-            "valid": False, "errors": ["持续错误"], "warnings": [], "layer": "semantic", "explain_plan": None,
+            "valid": False,
+            "errors": ["持续错误"],
+            "warnings": [],
+            "layer": "semantic",
+            "explain_plan": None,
         }
         output = run_sql_generation_subgraph(
-            query="查询订单", query_id="test-005", user_query="查询订单",
+            query="查询订单",
+            query_id="test-005",
+            user_query="查询订单",
         )
         assert output["iteration_count"] == 3
         assert output["validated_sql"] is None
@@ -348,7 +421,9 @@ class TestSubgraphExecution:
         mock_retriever_instance.retrieve.side_effect = Exception("数据库连接失败")
 
         output = run_sql_generation_subgraph(
-            query="查询订单", query_id="test-006", user_query="查询订单",
+            query="查询订单",
+            query_id="test-006",
+            user_query="查询订单",
         )
         assert output["validated_sql"] is None
         assert output["error"] is not None
@@ -363,7 +438,9 @@ class TestSubgraphExecution:
         mock_gen_meta.llm.invoke.side_effect = Exception("API 调用失败")
 
         output = run_sql_generation_subgraph(
-            query="查询订单", query_id="test-007", user_query="查询订单",
+            query="查询订单",
+            query_id="test-007",
+            user_query="查询订单",
         )
         assert output["validated_sql"] is None
         assert output["error"] is not None
@@ -372,21 +449,37 @@ class TestSubgraphExecution:
 
     def test_execution_time_recorded(self, mock_all_dependencies):
         output = run_sql_generation_subgraph(
-            query="查询订单", query_id="test-008", user_query="查询订单",
+            query="查询订单",
+            query_id="test-008",
+            user_query="查询订单",
         )
         assert "execution_time" in output
         assert output["execution_time"] >= 0
 
     def test_validation_history_recorded(self, mock_all_dependencies):
         validation_results = [
-            {"valid": False, "errors": ["错误1"], "warnings": [], "layer": "semantic", "explain_plan": None},
-            {"valid": True, "errors": [], "warnings": [], "layer": "all_passed", "explain_plan": "Seq Scan"},
+            {
+                "valid": False,
+                "errors": ["错误1"],
+                "warnings": [],
+                "layer": "semantic",
+                "explain_plan": None,
+            },
+            {
+                "valid": True,
+                "errors": [],
+                "warnings": [],
+                "layer": "all_passed",
+                "explain_plan": "Seq Scan",
+            },
         ]
         mock_validation_instance = mock_all_dependencies["validation"].return_value
         mock_validation_instance.validate.side_effect = validation_results
 
         output = run_sql_generation_subgraph(
-            query="查询订单", query_id="test-009", user_query="查询订单",
+            query="查询订单",
+            query_id="test-009",
+            user_query="查询订单",
         )
         assert "validation_history" in output
         assert len(output["validation_history"]) == 2
@@ -396,7 +489,9 @@ class TestStateHelpers:
     """测试状态辅助函数"""
 
     def test_create_initial_state(self):
-        state = create_initial_state(query="test query", query_id="q1", user_query="original query")
+        state = create_initial_state(
+            query="test query", query_id="q1", user_query="original query"
+        )
         assert state["query"] == "test query"
         assert state["query_id"] == "q1"
         assert state["user_query"] == "original query"
@@ -405,15 +500,23 @@ class TestStateHelpers:
 
     def test_is_successful_true(self):
         state = SQLGenerationState(
-            messages=[], query="test", query_id="q1", user_query="test",
-            dependencies_results={}, validated_sql="SELECT * FROM test",
+            messages=[],
+            query="test",
+            query_id="q1",
+            user_query="test",
+            dependencies_results={},
+            validated_sql="SELECT * FROM test",
         )
         assert is_successful(state) is True
 
     def test_is_successful_false(self):
         state = SQLGenerationState(
-            messages=[], query="test", query_id="q1", user_query="test",
-            dependencies_results={}, validated_sql=None,
+            messages=[],
+            query="test",
+            query_id="q1",
+            user_query="test",
+            dependencies_results={},
+            validated_sql=None,
         )
         assert is_successful(state) is False
 
@@ -423,7 +526,9 @@ class TestEndToEndScenarios:
 
     def test_simple_query_success(self, mock_all_dependencies):
         output = run_sql_generation_subgraph(
-            query="查询所有订单", query_id="e2e-001", user_query="查询所有订单",
+            query="查询所有订单",
+            query_id="e2e-001",
+            user_query="查询所有订单",
         )
         assert output["validated_sql"] is not None
         assert output["error"] is None
@@ -439,8 +544,10 @@ class TestEndToEndScenarios:
             "metric": {"text": "销售额", "aggregation": "sum"},
         }
         output = run_sql_generation_subgraph(
-            query="查询北京地区电子产品的销售额", query_id="e2e-002",
-            user_query="2024年北京地区电子产品的销售额", parse_hints=parse_hints,
+            query="查询北京地区电子产品的销售额",
+            query_id="e2e-002",
+            user_query="2024年北京地区电子产品的销售额",
+            parse_hints=parse_hints,
         )
         assert output["validated_sql"] is not None
 
@@ -451,14 +558,19 @@ class TestEndToEndScenarios:
                 "execution_result": {
                     "sub_query_id": "sub_query_1",
                     "sql": "SELECT store_id FROM public.dim_store WHERE region = 'A'",
-                    "success": True, "columns": ["store_id"],
-                    "rows": [["001"], ["002"]], "row_count": 2,
-                    "execution_time_ms": 3.0, "error": None,
+                    "success": True,
+                    "columns": ["store_id"],
+                    "rows": [["001"], ["002"]],
+                    "row_count": 2,
+                    "execution_time_ms": 3.0,
+                    "error": None,
                 },
             }
         }
         output = run_sql_generation_subgraph(
-            query="查询这些门店的订单总额", query_id="e2e-003",
-            user_query="查询这些门店的订单总额", dependencies_results=dependencies,
+            query="查询这些门店的订单总额",
+            query_id="e2e-003",
+            user_query="查询这些门店的订单总额",
+            dependencies_results=dependencies,
         )
         assert output["validated_sql"] is not None

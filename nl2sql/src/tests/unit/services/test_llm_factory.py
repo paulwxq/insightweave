@@ -1,1397 +1,738 @@
-"""llm_factory 单元测试
+"""provider + llm_name 注册解析、参数映射与本地 HTTP 请求测试。"""
 
-测试 get_llm() / _build_params() 的参数映射、校验逻辑和异常路径。
-通过 patch get_config 隔离全局单例，确保每个 test case 独立控制配置内容。
-"""
+from __future__ import annotations
 
-import pytest
 from unittest.mock import MagicMock, patch
+
+import httpx
+import pytest
+from langchain_core.messages import HumanMessage
+from langchain_openai import ChatOpenAI
 
 from src.services.llm_factory import (
     LLMWithMeta,
     _build_params,
     extract_llm_content,
-    extract_overrides,
     get_llm,
+    resolve_llm_config,
 )
 
-# ---------------------------------------------------------------------------
-# helpers
-# ---------------------------------------------------------------------------
 
-
-def _make_config(
-    *,
-    profiles: dict | None = None,
-    providers: dict | None = None,
-) -> MagicMock:
-    """构造一个模拟 ConfigLoader 实例，支持 .get(key_path) 调用。"""
-    if providers is None:
-        providers = {
-            "dashscope": {"api_key": "test-dashscope-key"},
-        }
-    if profiles is None:
-        profiles = {
-            "qwen_max": {"provider": "dashscope", "model": "qwen-max"},
-        }
-
-    store = {
-        "llm_providers": providers,
-        "llm_profiles": profiles,
+def _providers():
+    return {
+        "dashscope": {
+            "adapter": "dashscope_native",
+            "api_key": "ds-key",
+            "models": {"qwen-plus": {}, "qwen-turbo": {}},
+        },
+        "dashscope_openai": {
+            "adapter": "openai_chat_completions",
+            "api_key": "ds-key",
+            "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+            "models": {
+                "qwen3.8-max": {"params": {"enable_thinking": False}},
+                "qwen3.8-flash": {
+                    "params": {
+                        "temperature": 0,
+                        "max_tokens": 8192,
+                        "enable_thinking": False,
+                    }
+                },
+                "qwen4-max": {},
+            },
+        },
+        "deepseek": {
+            "adapter": "openai_chat_completions",
+            "api_key": "deepseek-key",
+            "base_url": "https://api.deepseek.com",
+            "models": {
+                "deepseek-flash": {},
+                "deepseek-chat": {
+                    "params": {"temperature": 0, "max_tokens": 8192, "timeout": 60}
+                },
+                "deepseek-reasoner": {"params": {"max_tokens": 32768}},
+            },
+        },
+        "glm_coding": {
+            "adapter": "openai_chat_completions",
+            "api_key": "glm-key",
+            "base_url": "https://open.bigmodel.cn/api/coding/paas/v4",
+            "models": {"glm-5.4": {}, "glm-5.3": {}, "glm-5.3-flash": {}},
+        },
+        "kimi_code": {
+            "adapter": "openai_chat_completions",
+            "api_key": "kimi-key",
+            "base_url": "https://api.kimi.com/coding/v1",
+            "models": {"k3.1-pro": {}},
+        },
+        "minimax": {
+            "adapter": "openai_chat_completions",
+            "api_key": "minimax-key",
+            "base_url": "https://api.minimaxi.com/v1",
+            "models": {"MiniMax-M2.1": {"params": {"temperature": 1.0}}},
+        },
     }
 
-    mock_config = MagicMock()
-    mock_config.get = lambda key_path, default=None: store.get(key_path, default)
-    return mock_config
+
+def _mock_config(providers=None):
+    store = {"llm_providers": _providers() if providers is None else providers}
+    config = MagicMock()
+    config.get = lambda key, default=None: store.get(key, default)
+    return config
 
 
-# ---------------------------------------------------------------------------
-# _build_params — DashScope 分支
-# ---------------------------------------------------------------------------
+def _chat_response(model="test-model"):
+    return {
+        "id": "chatcmpl-test",
+        "object": "chat.completion",
+        "created": 1,
+        "model": model,
+        "choices": [
+            {
+                "index": 0,
+                "message": {"role": "assistant", "content": "ok"},
+                "finish_reason": "stop",
+            }
+        ],
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+    }
 
 
-class TestBuildParamsDashScope:
-    """DashScope provider 参数构建规则"""
+class TestResolveAndMerge:
+    def test_dotted_model_id_and_provider_connection(self):
+        with patch("src.services.llm_factory.get_config", return_value=_mock_config()):
+            provider, model = resolve_llm_config("dashscope_openai", "qwen3.8-flash")
+        assert provider["base_url"].endswith("/v1")
+        assert model["params"]["max_tokens"] == 8192
 
-    def test_basic_params(self):
-        params = _build_params(
-            "dashscope",
-            {"api_key": "sk-xxx"},
-            "qwen-max",
-            {},
-        )
-        assert params == {
-            "model": "qwen-max",
-            "dashscope_api_key": "sk-xxx",
+    def test_same_model_name_uses_selected_provider(self):
+        providers = _providers()
+        providers["dashscope"]["models"]["shared"] = {}
+        providers["deepseek"]["models"]["shared"] = {}
+        with patch(
+            "src.services.llm_factory.get_config", return_value=_mock_config(providers)
+        ):
+            provider, _ = resolve_llm_config("deepseek", "shared")
+        assert provider["base_url"] == "https://api.deepseek.com"
+
+    def test_empty_params_inherit_and_override_without_mutation(self):
+        providers = _providers()
+        providers["dashscope_openai"]["models"]["qwen3.8-flash"]["params"][
+            "response_format"
+        ] = {"type": "json_object", "schema": {"old": True}}
+        original = _mock_config(providers)
+        with (
+            patch("src.services.llm_factory.get_config", return_value=original),
+            patch("src.services.llm_factory._import_class") as importer,
+        ):
+            client = MagicMock()
+            importer.return_value = client
+            get_llm(
+                "dashscope_openai",
+                "qwen3.8-flash",
+                params={
+                    "response_format": {"type": "text"},
+                    "max_retries": 0,
+                    "stream": False,
+                },
+                request_timeout_seconds=30,
+            )
+            get_llm(
+                "dashscope_openai",
+                "qwen3.8-flash",
+                params={},
+                request_timeout_seconds=30,
+            )
+        first = client.call_args_list[0].kwargs
+        assert first["temperature"] == 0
+        assert first["max_retries"] == 0
+        assert first["streaming"] is False
+        assert first["response_format"] == {"type": "text"}
+        assert first["max_tokens"] == 8192
+        assert first["extra_body"] == {"enable_thinking": False}
+        assert client.call_args_list[1].kwargs["response_format"] == {
+            "type": "json_object",
+            "schema": {"old": True},
         }
+        assert providers["dashscope_openai"]["models"]["qwen3.8-flash"]["params"][
+            "response_format"
+        ] == {"type": "json_object", "schema": {"old": True}}
 
-    def test_temperature_routed_to_model_kwargs(self):
-        params = _build_params(
-            "dashscope",
-            {"api_key": "sk-xxx"},
-            "qwen-max",
-            {"temperature": 0},
+    @pytest.mark.parametrize(
+        ("provider", "model", "path"),
+        [
+            ("missing", "qwen3.8-max", "llm_providers.missing"),
+            ("dashscope_openai", "qwen3-max", "models.qwen3-max"),
+        ],
+    )
+    def test_unknown_reference_has_path(self, provider, model, path):
+        with (
+            patch("src.services.llm_factory.get_config", return_value=_mock_config()),
+            pytest.raises(ValueError, match=path),
+        ):
+            resolve_llm_config(provider, model)
+
+    def test_params_must_be_mapping(self):
+        with (
+            patch("src.services.llm_factory.get_config", return_value=_mock_config()),
+            pytest.raises(ValueError, match="params"),
+        ):
+            get_llm("dashscope_openai", "qwen3.8-max", params=[])
+
+    def test_unselected_provider_missing_key_does_not_block(self):
+        providers = _providers()
+        providers["glm_coding"]["api_key"] = None
+        providers["kimi_code"]["api_key"] = None
+        with (
+            patch(
+                "src.services.llm_factory.get_config",
+                return_value=_mock_config(providers),
+            ),
+            patch("src.services.llm_factory._import_class") as importer,
+        ):
+            importer.return_value = MagicMock()
+            result = get_llm(
+                "dashscope_openai", "qwen3.8-max", request_timeout_seconds=30
+            )
+        assert isinstance(result, LLMWithMeta)
+
+    def test_openai_timeout_is_required_when_all_sources_are_missing(self):
+        with (
+            patch("src.services.llm_factory.get_config", return_value=_mock_config()),
+            patch("src.services.llm_factory._import_class") as importer,
+            pytest.raises(ValueError) as exc_info,
+        ):
+            get_llm("dashscope_openai", "qwen3.8-max")
+
+        message = str(exc_info.value)
+        assert "request_timeout_seconds" in message
+        assert "params.timeout" in message
+        assert (
+            "llm_providers.dashscope_openai.models.qwen3.8-max.params.timeout"
+            in message
         )
-        assert params["model_kwargs"] == {"temperature": 0}
-        assert "temperature" not in params
+        importer.assert_not_called()
 
-    def test_max_tokens_routed_to_model_kwargs(self):
-        params = _build_params(
-            "dashscope",
-            {"api_key": "sk-xxx"},
-            "qwen-max",
-            {"max_tokens": 2000},
+    def test_openai_timeout_accepts_all_three_sources(self):
+        with (
+            patch("src.services.llm_factory.get_config", return_value=_mock_config()),
+            patch("src.services.llm_factory._import_class") as importer,
+        ):
+            importer.return_value = MagicMock()
+            get_llm("dashscope_openai", "qwen3.8-max", request_timeout_seconds=30)
+            get_llm("dashscope_openai", "qwen3.8-max", params={"timeout": 20})
+            get_llm("deepseek", "deepseek-chat")
+
+        timeouts = [
+            call.kwargs["request_timeout"]
+            for call in importer.return_value.call_args_list
+        ]
+        assert timeouts == [30, 20, 60]
+
+    @pytest.mark.parametrize("source", ["role", "business", "registry"])
+    @pytest.mark.parametrize(
+        "value", [0, -5, "30", [5, 30], True, float("nan"), float("inf")]
+    )
+    def test_timeout_must_be_finite_positive_number(self, source, value):
+        providers = _providers()
+        kwargs = {}
+        if source == "role":
+            kwargs["request_timeout_seconds"] = value
+            expected_path = "request_timeout_seconds"
+        elif source == "business":
+            kwargs["params"] = {"timeout": value}
+            expected_path = "params.timeout"
+        else:
+            providers["dashscope_openai"]["models"]["qwen3.8-max"]["params"][
+                "timeout"
+            ] = value
+            expected_path = (
+                "llm_providers.dashscope_openai.models.qwen3.8-max.params.timeout"
+            )
+
+        with (
+            patch(
+                "src.services.llm_factory.get_config",
+                return_value=_mock_config(providers),
+            ),
+            patch("src.services.llm_factory._import_class") as importer,
+            pytest.raises(ValueError) as exc_info,
+        ):
+            get_llm("dashscope_openai", "qwen3.8-max", **kwargs)
+
+        assert expected_path in str(exc_info.value)
+        assert "有限且大于 0" in str(exc_info.value)
+        importer.assert_not_called()
+
+    def test_inherited_invalid_value_has_registry_path(self):
+        providers = _providers()
+        providers["glm_coding"]["models"]["glm-5.4"]["params"] = {
+            "thinking": {"type": "disabled"},
+            "timeout": 60,
+        }
+        with (
+            patch(
+                "src.services.llm_factory.get_config",
+                return_value=_mock_config(providers),
+            ),
+            patch("src.services.llm_factory._import_class") as importer,
+            pytest.raises(ValueError) as exc_info,
+        ):
+            get_llm("glm_coding", "glm-5.4")
+
+        assert "llm_providers.glm_coding.models.glm-5.4.params.thinking.type" in str(
+            exc_info.value
         )
-        assert params["model_kwargs"] == {"max_tokens": 2000}
+        importer.assert_not_called()
 
-    def test_temperature_and_max_tokens_combined(self):
-        params = _build_params(
-            "dashscope",
-            {"api_key": "sk-xxx"},
-            "qwen-max",
-            {"temperature": 0.7, "max_tokens": 1500},
+    def test_selected_provider_missing_key_has_field_path(self):
+        providers = _providers()
+        providers["glm_coding"]["api_key"] = None
+        with (
+            patch(
+                "src.services.llm_factory.get_config",
+                return_value=_mock_config(providers),
+            ),
+            pytest.raises(ValueError, match="llm_providers.glm_coding.api_key"),
+        ):
+            get_llm("glm_coding", "glm-5.4")
+
+    def test_unknown_model_rejected_before_client_import(self):
+        with (
+            patch("src.services.llm_factory.get_config", return_value=_mock_config()),
+            patch("src.services.llm_factory._import_class") as importer,
+            pytest.raises(ValueError, match="qwen3-max"),
+        ):
+            get_llm("dashscope_openai", "qwen3-max")
+        importer.assert_not_called()
+
+    def test_deepseek_default_url_and_explicit_empty_rejected(self):
+        providers = _providers()
+        del providers["deepseek"]["base_url"]
+        with (
+            patch(
+                "src.services.llm_factory.get_config",
+                return_value=_mock_config(providers),
+            ),
+            patch("src.services.llm_factory._import_class") as importer,
+        ):
+            importer.return_value = MagicMock()
+            get_llm("deepseek", "deepseek-flash", request_timeout_seconds=30)
+        assert (
+            importer.return_value.call_args.kwargs["base_url"]
+            == "https://api.deepseek.com"
         )
-        assert params["model_kwargs"] == {"temperature": 0.7, "max_tokens": 1500}
+        providers["deepseek"]["base_url"] = ""
+        with (
+            patch(
+                "src.services.llm_factory.get_config",
+                return_value=_mock_config(providers),
+            ),
+            pytest.raises(ValueError, match="llm_providers.deepseek.base_url"),
+        ):
+            get_llm("deepseek", "deepseek-flash", request_timeout_seconds=30)
 
-    def test_top_p_routed_to_model_kwargs(self):
+
+class TestBuildParams:
+    def test_native_dashscope_model_kwargs_and_timeout_rejected(self):
         params = _build_params(
             "dashscope",
-            {"api_key": "sk-xxx"},
-            "qwen-max",
-            {"top_p": 0.9},
-        )
-        assert params["model_kwargs"] == {"top_p": 0.9}
-
-    def test_enable_thinking_routed_to_model_kwargs(self):
-        params = _build_params(
-            "dashscope",
-            {"api_key": "sk-xxx"},
+            _providers()["dashscope"],
             "qwen-plus",
-            {"enable_thinking": True},
+            {"temperature": 0, "enable_thinking": False},
+            adapter="dashscope_native",
         )
-        assert params["model_kwargs"] == {"enable_thinking": True}
+        assert params["model"] == "qwen-plus"
+        assert params["dashscope_api_key"] == "ds-key"
+        assert params["model_kwargs"] == {
+            "temperature": 0,
+            "enable_thinking": False,
+        }
+        with pytest.raises(ValueError, match="request_timeout_seconds"):
+            _build_params(
+                "dashscope",
+                _providers()["dashscope"],
+                "qwen-plus",
+                {},
+                adapter="dashscope_native",
+                request_timeout_seconds=15,
+            )
 
-    def test_enable_search_routed_to_model_kwargs(self):
+    def test_native_legacy_parameter_mapping_preserved(self):
         params = _build_params(
             "dashscope",
-            {"api_key": "sk-xxx"},
-            "qwen-plus",
-            {"enable_search": True},
-        )
-        assert params["model_kwargs"] == {"enable_search": True}
-
-    def test_search_options_routed_to_model_kwargs(self):
-        opts = {"enable_source": True, "forced_search": True, "search_strategy": "max"}
-        params = _build_params(
-            "dashscope",
-            {"api_key": "sk-xxx"},
-            "qwen-plus",
-            {"enable_search": True, "search_options": opts},
-        )
-        assert params["model_kwargs"]["enable_search"] is True
-        assert params["model_kwargs"]["search_options"] == opts
-
-    def test_response_format_routed_to_model_kwargs(self):
-        fmt = {"type": "json_object"}
-        params = _build_params(
-            "dashscope",
-            {"api_key": "sk-xxx"},
-            "qwen-plus",
-            {"response_format": fmt},
-        )
-        assert params["model_kwargs"] == {"response_format": fmt}
-
-    def test_stream_mapped_to_streaming(self):
-        params = _build_params(
-            "dashscope",
-            {"api_key": "sk-xxx"},
-            "qwen-plus",
-            {"stream": True},
-        )
-        assert params["streaming"] is True
-        assert "stream" not in params
-        assert "model_kwargs" not in params
-
-    def test_all_dashscope_overrides_combined(self):
-        params = _build_params(
-            "dashscope",
-            {"api_key": "sk-xxx"},
+            _providers()["dashscope"],
             "qwen-plus",
             {
-                "temperature": 0.6,
-                "max_tokens": 4096,
-                "top_p": 0.95,
-                "enable_thinking": True,
+                "max_tokens": 1500,
+                "top_p": 0.9,
                 "enable_search": True,
                 "search_options": {"forced_search": True},
-                "response_format": {"type": "text"},
+                "response_format": {"type": "json_object"},
                 "stream": True,
             },
+            adapter="dashscope_native",
         )
         assert params["streaming"] is True
         assert params["model_kwargs"] == {
-            "temperature": 0.6,
-            "max_tokens": 4096,
-            "top_p": 0.95,
-            "enable_thinking": True,
+            "max_tokens": 1500,
+            "top_p": 0.9,
             "enable_search": True,
             "search_options": {"forced_search": True},
-            "response_format": {"type": "text"},
+            "response_format": {"type": "json_object"},
         }
 
-    def test_timeout_raises_error(self):
-        with pytest.raises(ValueError, match="DashScope.*timeout"):
-            _build_params(
-                "dashscope",
-                {"api_key": "sk-xxx"},
-                "qwen-max",
-                {"timeout": 30},
-            )
-
-    def test_no_model_kwargs_when_no_overrides(self):
+    def test_openai_direct_and_extra_body_fields(self):
         params = _build_params(
-            "dashscope",
-            {"api_key": "sk-xxx"},
-            "qwen-max",
-            {},
-        )
-        assert "model_kwargs" not in params
-
-
-# ---------------------------------------------------------------------------
-# _build_params — OpenAI 分支
-# ---------------------------------------------------------------------------
-
-
-class TestBuildParamsOpenAI:
-    """OpenAI provider 参数构建规则"""
-
-    def test_basic_params(self):
-        params = _build_params(
-            "openai",
-            {"api_key": "sk-openai"},
-            "gpt-4",
-            {},
-        )
-        assert params == {
-            "model": "gpt-4",
-            "api_key": "sk-openai",
-        }
-
-    def test_temperature_as_direct_field(self):
-        params = _build_params(
-            "openai",
-            {"api_key": "sk-openai"},
-            "gpt-4",
-            {"temperature": 0.5},
-        )
-        assert params["temperature"] == 0.5
-        assert "model_kwargs" not in params
-
-    def test_max_tokens_as_direct_field(self):
-        params = _build_params(
-            "openai",
-            {"api_key": "sk-openai"},
-            "gpt-4",
-            {"max_tokens": 4096},
-        )
-        assert params["max_tokens"] == 4096
-
-    def test_timeout_mapped_to_request_timeout(self):
-        params = _build_params(
-            "openai",
-            {"api_key": "sk-openai"},
-            "gpt-4",
-            {"timeout": 60},
-        )
-        assert params["request_timeout"] == 60
-        assert "timeout" not in params
-
-    def test_base_url_included(self):
-        params = _build_params(
-            "openai",
-            {"api_key": "sk-openai", "base_url": "https://custom.api/v1"},
-            "gpt-4",
-            {},
-        )
-        assert params["base_url"] == "https://custom.api/v1"
-
-    def test_top_p_as_direct_field(self):
-        params = _build_params(
-            "openai",
-            {"api_key": "sk-openai"},
-            "gpt-4",
-            {"top_p": 0.9},
-        )
-        assert params["top_p"] == 0.9
-
-    def test_stream_mapped_to_streaming(self):
-        params = _build_params(
-            "openai",
-            {"api_key": "sk-openai"},
-            "gpt-4",
-            {"stream": True},
-        )
-        assert params["streaming"] is True
-        assert "stream" not in params
-
-    def test_response_format_as_direct_field(self):
-        fmt = {"type": "json_object"}
-        params = _build_params(
-            "openai",
-            {"api_key": "sk-openai"},
-            "gpt-4",
-            {"response_format": fmt},
-        )
-        assert params["response_format"] == fmt
-
-    def test_all_overrides_combined(self):
-        params = _build_params(
-            "openai",
-            {"api_key": "sk-openai"},
-            "gpt-4",
-            {"temperature": 0.8, "max_tokens": 2048, "timeout": 30, "top_p": 0.9},
-        )
-        assert params["temperature"] == 0.8
-        assert params["max_tokens"] == 2048
-        assert params["request_timeout"] == 30
-        assert params["top_p"] == 0.9
-
-    def test_dashscope_only_params_rejected(self):
-        with pytest.raises(ValueError, match="仅适用于 DashScope"):
-            _build_params(
-                "openai",
-                {"api_key": "sk-openai"},
-                "gpt-4",
-                {"enable_thinking": True},
-            )
-
-    def test_dashscope_only_search_rejected(self):
-        with pytest.raises(ValueError, match="仅适用于 DashScope"):
-            _build_params(
-                "openai",
-                {"api_key": "sk-openai"},
-                "gpt-4",
-                {"enable_search": True, "search_options": {"forced_search": True}},
-            )
-
-
-# ---------------------------------------------------------------------------
-# _build_params — OpenRouter 分支（OpenAI 兼容）
-# ---------------------------------------------------------------------------
-
-
-class TestBuildParamsOpenRouter:
-    """OpenRouter provider 参数构建规则（复用 ChatOpenAI，需 base_url）"""
-
-    def test_basic_params_with_base_url(self):
-        params = _build_params(
-            "openrouter",
-            {"api_key": "sk-or-xxx", "base_url": "https://openrouter.ai/api/v1"},
-            "anthropic/claude-3.5-sonnet",
-            {},
-        )
-        assert params == {
-            "model": "anthropic/claude-3.5-sonnet",
-            "api_key": "sk-or-xxx",
-            "base_url": "https://openrouter.ai/api/v1",
-        }
-
-    def test_temperature_and_max_tokens_as_direct_fields(self):
-        params = _build_params(
-            "openrouter",
-            {"api_key": "sk-or-xxx", "base_url": "https://openrouter.ai/api/v1"},
-            "deepseek/deepseek-chat",
-            {"temperature": 0.7, "max_tokens": 4096},
-        )
-        assert params["temperature"] == 0.7
-        assert params["max_tokens"] == 4096
-        assert "model_kwargs" not in params
-
-    def test_timeout_mapped_to_request_timeout(self):
-        params = _build_params(
-            "openrouter",
-            {"api_key": "sk-or-xxx", "base_url": "https://openrouter.ai/api/v1"},
-            "meta-llama/llama-3-70b",
-            {"timeout": 45},
-        )
-        assert params["request_timeout"] == 45
-        assert "timeout" not in params
-
-    def test_all_overrides_combined(self):
-        params = _build_params(
-            "openrouter",
-            {"api_key": "sk-or-xxx", "base_url": "https://openrouter.ai/api/v1"},
-            "anthropic/claude-3.5-sonnet",
-            {"temperature": 0.5, "max_tokens": 2048, "timeout": 60},
-        )
-        assert params == {
-            "model": "anthropic/claude-3.5-sonnet",
-            "api_key": "sk-or-xxx",
-            "base_url": "https://openrouter.ai/api/v1",
-            "temperature": 0.5,
-            "max_tokens": 2048,
-            "request_timeout": 60,
-        }
-
-    def test_dashscope_only_params_rejected_on_openrouter(self):
-        with pytest.raises(ValueError, match="仅适用于 DashScope"):
-            _build_params(
-                "openrouter",
-                {"api_key": "sk-or-xxx", "base_url": "https://openrouter.ai/api/v1"},
-                "deepseek/deepseek-chat",
-                {"enable_thinking": True},
-            )
-
-
-# ---------------------------------------------------------------------------
-# _build_params — DeepSeek 分支
-# ---------------------------------------------------------------------------
-
-
-class TestBuildParamsDeepSeek:
-    """DeepSeek provider 参数构建规则"""
-
-    _provider_cfg = {"api_key": "sk-ds-xxx", "base_url": "https://api.deepseek.com"}
-
-    def test_basic_params(self):
-        params = _build_params("deepseek", self._provider_cfg, "deepseek-chat", {})
-        assert params == {
-            "model": "deepseek-chat",
-            "api_key": "sk-ds-xxx",
-            "base_url": "https://api.deepseek.com",
-        }
-
-    def test_temperature_as_direct_field(self):
-        params = _build_params(
-            "deepseek", self._provider_cfg, "deepseek-chat", {"temperature": 0}
-        )
-        assert params["temperature"] == 0
-        assert "model_kwargs" not in params
-
-    def test_max_tokens_as_direct_field(self):
-        params = _build_params(
-            "deepseek", self._provider_cfg, "deepseek-chat", {"max_tokens": 8192}
-        )
-        assert params["max_tokens"] == 8192
-
-    def test_top_p_as_direct_field(self):
-        params = _build_params(
-            "deepseek", self._provider_cfg, "deepseek-chat", {"top_p": 0.9}
-        )
-        assert params["top_p"] == 0.9
-
-    def test_timeout_mapped_to_request_timeout(self):
-        params = _build_params(
-            "deepseek", self._provider_cfg, "deepseek-chat", {"timeout": 60}
-        )
-        assert params["request_timeout"] == 60
-        assert "timeout" not in params
-
-    def test_stream_mapped_to_streaming(self):
-        params = _build_params(
-            "deepseek", self._provider_cfg, "deepseek-chat", {"stream": True}
-        )
-        assert params["streaming"] is True
-        assert "stream" not in params
-
-    def test_thinking_via_extra_body(self):
-        """thinking 参数必须通过 extra_body 传入，不能放 model_kwargs"""
-        params = _build_params(
-            "deepseek",
-            self._provider_cfg,
-            "deepseek-chat",
-            {"thinking": {"type": "enabled"}},
-        )
-        assert params["extra_body"] == {"thinking": {"type": "enabled"}}
-        assert "model_kwargs" not in params
-        assert "thinking" not in params
-
-    def test_no_thinking_no_extra_body(self):
-        """不传 thinking 时不应产生 extra_body 字段"""
-        params = _build_params("deepseek", self._provider_cfg, "deepseek-reasoner", {})
-        assert "extra_body" not in params
-
-    def test_deepseek_reasoner_with_max_tokens(self):
-        """deepseek-reasoner 常见用法：只设 max_tokens，不设 temperature"""
-        params = _build_params(
-            "deepseek", self._provider_cfg, "deepseek-reasoner", {"max_tokens": 32768}
-        )
-        assert params["max_tokens"] == 32768
-        assert "temperature" not in params
-        assert "extra_body" not in params
-
-    def test_all_overrides_combined(self):
-        params = _build_params(
-            "deepseek",
-            self._provider_cfg,
-            "deepseek-chat",
+            "dashscope_openai",
+            _providers()["dashscope_openai"],
+            "qwen3.8-flash",
             {
                 "temperature": 0,
-                "max_tokens": 8192,
-                "top_p": 0.95,
-                "timeout": 60,
-                "stream": True,
+                "max_tokens": 100,
+                "enable_thinking": False,
                 "response_format": {"type": "json_object"},
+                "stream": False,
+                "max_retries": 2,
             },
+            adapter="openai_chat_completions",
+            request_timeout_seconds=15,
         )
-        assert params["temperature"] == 0
-        assert params["max_tokens"] == 8192
-        assert params["top_p"] == 0.95
-        assert params["request_timeout"] == 60
-        assert params["streaming"] is True
+        assert params["request_timeout"] == 15
+        assert params["streaming"] is False
         assert params["response_format"] == {"type": "json_object"}
+        assert params["max_retries"] == 2
+        assert params["max_tokens"] == 100
+        assert params["extra_body"] == {"enable_thinking": False}
+        assert params["use_responses_api"] is False
+
+    @pytest.mark.parametrize("model", ["deepseek-chat", "deepseek-reasoner"])
+    def test_deepseek_existing_max_tokens_mapping(self, model):
+        params = _build_params(
+            "deepseek",
+            _providers()["deepseek"],
+            model,
+            {"max_tokens": 100},
+            adapter="openai_chat_completions",
+        )
+        assert params["max_tokens"] == 100
         assert "extra_body" not in params
 
-    def test_dashscope_only_params_rejected(self):
-        with pytest.raises(ValueError, match="仅适用于 DashScope"):
-            _build_params(
-                "deepseek",
-                self._provider_cfg,
-                "deepseek-chat",
-                {"enable_thinking": True},
-            )
-
-    def test_dashscope_search_rejected(self):
-        with pytest.raises(ValueError, match="仅适用于 DashScope"):
-            _build_params(
-                "deepseek", self._provider_cfg, "deepseek-chat", {"enable_search": True}
-            )
-
-    def test_thinking_rejected_on_openai(self):
-        """thinking 参数传给 openai provider 应报错"""
-        with pytest.raises(ValueError, match="仅适用于 DeepSeek"):
-            _build_params(
-                "openai",
-                {"api_key": "sk-openai"},
-                "gpt-4",
-                {"thinking": {"type": "enabled"}},
-            )
-
-    def test_thinking_rejected_on_openrouter(self):
-        """thinking 参数传给 openrouter provider 应报错"""
-        with pytest.raises(ValueError, match="仅适用于 DeepSeek"):
-            _build_params(
-                "openrouter",
-                {"api_key": "sk-or", "base_url": "https://openrouter.ai/api/v1"},
-                "meta-llama/llama-3",
-                {"thinking": {"type": "enabled"}},
-            )
-
-
-class TestGetLlmDeepSeek:
-    """get_llm 完整流程 — DeepSeek provider"""
-
-    @patch("src.services.llm_factory._import_class")
-    @patch("src.services.llm_factory.get_config")
-    def test_deepseek_chat_basic(self, mock_get_config, mock_import):
-        mock_get_config.return_value = _make_config(
-            providers={
-                "deepseek": {
-                    "api_key": "sk-ds-xxx",
-                    "base_url": "https://api.deepseek.com",
-                },
-            },
-            profiles={
-                "deepseek_chat": {"provider": "deepseek", "model": "deepseek-chat"},
-            },
-        )
-        mock_cls = MagicMock()
-        mock_cls.return_value = MagicMock()
-        mock_import.return_value = mock_cls
-
-        result = get_llm("deepseek_chat", temperature=0, max_tokens=8192)
-
-        assert result.provider == "deepseek"
-        assert result.model == "deepseek-chat"
-        mock_cls.assert_called_once_with(
-            model="deepseek-chat",
-            api_key="sk-ds-xxx",
-            base_url="https://api.deepseek.com",
-            temperature=0,
-            max_tokens=8192,
-        )
-
-    @patch("src.services.llm_factory._import_class")
-    @patch("src.services.llm_factory.get_config")
-    def test_deepseek_reasoner_no_temperature(self, mock_get_config, mock_import):
-        """deepseek-reasoner profile 不配置 temperature，构造参数中不应含 temperature"""
-        mock_get_config.return_value = _make_config(
-            providers={
-                "deepseek": {
-                    "api_key": "sk-ds-xxx",
-                    "base_url": "https://api.deepseek.com",
-                },
-            },
-            profiles={
-                "deepseek_reasoner": {
-                    "provider": "deepseek",
-                    "model": "deepseek-reasoner",
-                    "max_tokens": 32768,
-                },
-            },
-        )
-        mock_cls = MagicMock()
-        mock_cls.return_value = MagicMock()
-        mock_import.return_value = mock_cls
-
-        result = get_llm("deepseek_reasoner")
-
-        assert result.provider == "deepseek"
-        assert result.model == "deepseek-reasoner"
-        mock_cls.assert_called_once_with(
-            model="deepseek-reasoner",
-            api_key="sk-ds-xxx",
-            base_url="https://api.deepseek.com",
-            max_tokens=32768,
-        )
-
-    @patch("src.services.llm_factory._import_class")
-    @patch("src.services.llm_factory.get_config")
-    def test_deepseek_chat_thinking_profile(self, mock_get_config, mock_import):
-        """profile 中配置 thinking 参数，应通过 extra_body 传入"""
-        mock_get_config.return_value = _make_config(
-            providers={
-                "deepseek": {
-                    "api_key": "sk-ds-xxx",
-                    "base_url": "https://api.deepseek.com",
-                },
-            },
-            profiles={
-                "deepseek_chat_thinking": {
-                    "provider": "deepseek",
-                    "model": "deepseek-chat",
-                    "thinking": {"type": "enabled"},
-                    "max_tokens": 32768,
-                },
-            },
-        )
-        mock_cls = MagicMock()
-        mock_cls.return_value = MagicMock()
-        mock_import.return_value = mock_cls
-
-        get_llm("deepseek_chat_thinking")
-
-        call_kwargs = mock_cls.call_args[1]
-        assert call_kwargs["extra_body"] == {"thinking": {"type": "enabled"}}
-        assert call_kwargs["max_tokens"] == 32768
-        assert "model_kwargs" not in call_kwargs
-
-
-# ---------------------------------------------------------------------------
-# _build_params — 白名单校验
-# ---------------------------------------------------------------------------
-
-
-class TestBuildParamsWhitelist:
-    """Override 白名单校验"""
-
-    def test_model_override_rejected(self):
-        with pytest.raises(ValueError, match="不允许.*override"):
-            _build_params("dashscope", {"api_key": "x"}, "qwen-max", {"model": "gpt-4"})
-
-    def test_api_key_override_rejected(self):
-        with pytest.raises(ValueError, match="不允许.*override"):
-            _build_params(
-                "dashscope", {"api_key": "x"}, "qwen-max", {"api_key": "other"}
-            )
-
-    def test_unknown_field_rejected(self):
-        with pytest.raises(ValueError, match="不允许.*override"):
-            _build_params("dashscope", {"api_key": "x"}, "qwen-max", {"foo": "bar"})
-
-
-# ---------------------------------------------------------------------------
-# _build_params — 不支持的 provider
-# ---------------------------------------------------------------------------
-
-
-class TestBuildParamsAutoDetected:
-    """自动检测的 provider（不在 _PROVIDER_MAP 中）走 OpenAI 兼容路径"""
-
-    _provider_cfg = {
-        "api_key": "sk-ds-xxx",
-        "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-    }
-
-    def test_basic_params(self):
+    @pytest.mark.parametrize(
+        "model", ["deepseek-flash", "glm-5.4", "glm-5.3", "glm-5.3-flash"]
+    )
+    def test_four_models_max_tokens_uses_extra_body(self, model):
+        provider = "deepseek" if model == "deepseek-flash" else "glm_coding"
         params = _build_params(
-            "dashscope_openai",
-            self._provider_cfg,
-            "qwen3.5-plus",
-            {},
+            provider,
+            _providers()[provider],
+            model,
+            {"max_tokens": 100},
+            adapter="openai_chat_completions",
         )
-        assert params == {
-            "model": "qwen3.5-plus",
-            "api_key": "sk-ds-xxx",
-            "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-        }
+        assert params["extra_body"] == {"max_tokens": 100}
+        assert "max_tokens" not in params
 
-    def test_enable_thinking_passthrough_via_extra_body(self):
-        """自动检测的 provider 允许 enable_thinking，透传为 extra_body"""
+    def test_deepseek_flash_thinking_and_max_tokens_share_extra_body(self):
         params = _build_params(
-            "dashscope_openai",
-            self._provider_cfg,
-            "qwen3.5-plus",
-            {"enable_thinking": False},
-        )
-        assert params["extra_body"] == {"enable_thinking": False}
-        assert "enable_thinking" not in params.get("model_kwargs", {})
-
-    def test_enable_search_passthrough_via_extra_body(self):
-        params = _build_params(
-            "dashscope_openai",
-            self._provider_cfg,
-            "qwen3.5-plus",
-            {"enable_search": True, "search_options": {"forced_search": True}},
+            "deepseek",
+            _providers()["deepseek"],
+            "deepseek-flash",
+            {"thinking": {"type": "disabled"}, "max_tokens": 100},
+            adapter="openai_chat_completions",
         )
         assert params["extra_body"] == {
-            "enable_search": True,
-            "search_options": {"forced_search": True},
+            "thinking": {"type": "disabled"},
+            "max_tokens": 100,
         }
+        assert "max_tokens" not in params
 
-    def test_temperature_as_direct_field(self):
+    @pytest.mark.parametrize(
+        "thinking", ["disabled", None, {}, {"type": "unknown"}, {"type": []}]
+    )
+    def test_deepseek_thinking_requires_supported_type(self, thinking):
+        with pytest.raises(ValueError, match="params.thinking.type"):
+            _build_params(
+                "deepseek",
+                _providers()["deepseek"],
+                "deepseek-flash",
+                {"thinking": thinking},
+                adapter="openai_chat_completions",
+            )
+
+    @pytest.mark.parametrize("thinking_type", ["enabled", "disabled"])
+    def test_deepseek_thinking_accepts_supported_types(self, thinking_type):
         params = _build_params(
-            "dashscope_openai",
-            self._provider_cfg,
-            "qwen3.5-plus",
-            {"temperature": 0},
+            "deepseek",
+            _providers()["deepseek"],
+            "deepseek-flash",
+            {"thinking": {"type": thinking_type}},
+            adapter="openai_chat_completions",
         )
-        assert params["temperature"] == 0
+        assert params["extra_body"] == {"thinking": {"type": thinking_type}}
+
+    def test_kimi_defaults_and_reasoning_effort(self):
+        params = _build_params(
+            "kimi_code",
+            _providers()["kimi_code"],
+            "k3.1-pro",
+            {"reasoning_effort": "high"},
+            adapter="openai_chat_completions",
+        )
+        assert params["reasoning_effort"] == "high"
+        assert "temperature" not in params
         assert "extra_body" not in params
+        with pytest.raises(ValueError, match="reasoning_effort"):
+            _build_params(
+                "kimi_code",
+                _providers()["kimi_code"],
+                "k3.1-pro",
+                {"reasoning_effort": "none"},
+                adapter="openai_chat_completions",
+            )
 
-    def test_all_overrides_combined(self):
+    @pytest.mark.parametrize("temperature", [0, 0.6, 2, True, "1", None])
+    def test_kimi_unsupported_temperature_is_rejected(self, temperature):
+        with pytest.raises(ValueError, match="params.temperature"):
+            _build_params(
+                "kimi_code",
+                _providers()["kimi_code"],
+                "k3.1-pro",
+                {"temperature": temperature},
+                adapter="openai_chat_completions",
+            )
+
+    @pytest.mark.parametrize("temperature", [1, 1.0])
+    def test_kimi_thinking_mode_accepts_temperature_one(self, temperature):
         params = _build_params(
-            "dashscope_openai",
-            self._provider_cfg,
-            "qwen3.5-plus",
-            {
-                "temperature": 0,
-                "max_tokens": 4096,
-                "enable_thinking": False,
-                "timeout": 60,
-                "stream": True,
-            },
+            "kimi_code",
+            _providers()["kimi_code"],
+            "k3.1-pro",
+            {"temperature": temperature},
+            adapter="openai_chat_completions",
         )
-        assert params["temperature"] == 0
-        assert params["max_tokens"] == 4096
-        assert params["request_timeout"] == 60
-        assert params["streaming"] is True
-        assert params["extra_body"] == {"enable_thinking": False}
+        assert params["temperature"] == 1
 
-    def test_thinking_rejected_on_auto_detected(self):
-        """DeepSeek thinking 参数对自动检测的 provider 仍应报错"""
-        with pytest.raises(ValueError, match="仅适用于 DeepSeek"):
+    @pytest.mark.parametrize("model", ["glm-5.4", "glm-5.3", "glm-5.3-flash"])
+    def test_glm_disabled_thinking_is_rejected(self, model):
+        with pytest.raises(ValueError, match="params.thinking.type"):
+            _build_params(
+                "glm_coding",
+                _providers()["glm_coding"],
+                model,
+                {"thinking": {"type": "disabled"}},
+                adapter="openai_chat_completions",
+            )
+
+    def test_glm_enabled_thinking_is_allowed(self):
+        params = _build_params(
+            "glm_coding",
+            _providers()["glm_coding"],
+            "glm-5.4",
+            {"thinking": {"type": "enabled"}},
+            adapter="openai_chat_completions",
+        )
+        assert params["extra_body"] == {"thinking": {"type": "enabled"}}
+
+    @pytest.mark.parametrize(
+        ("provider", "model", "value"),
+        [
+            ("kimi_code", "k3.1-pro", "low"),
+            ("kimi_code", "k3.1-pro", "max"),
+            ("dashscope_openai", "qwen4-max", "none"),
+        ],
+    )
+    def test_reasoning_effort_verified_values(self, provider, model, value):
+        params = _build_params(
+            provider,
+            _providers()[provider],
+            model,
+            {"reasoning_effort": value},
+            adapter="openai_chat_completions",
+        )
+        assert params["reasoning_effort"] == value
+
+    def test_reasoning_effort_container_has_config_error(self):
+        with pytest.raises(ValueError, match="params.reasoning_effort"):
+            _build_params(
+                "kimi_code",
+                _providers()["kimi_code"],
+                "k3.1-pro",
+                {"reasoning_effort": []},
+                adapter="openai_chat_completions",
+            )
+
+    @pytest.mark.parametrize("stream", [0, 1, "false", None, []])
+    def test_stream_must_be_boolean(self, stream):
+        with pytest.raises(ValueError, match="params.stream"):
             _build_params(
                 "dashscope_openai",
-                self._provider_cfg,
-                "qwen3.5-plus",
-                {"thinking": {"type": "enabled"}},
+                _providers()["dashscope_openai"],
+                "qwen3.8-max",
+                {"stream": stream},
+                adapter="openai_chat_completions",
+            )
+
+    def test_invalid_param_has_field_path(self):
+        with pytest.raises(ValueError, match="params.unknown"):
+            _build_params(
+                "dashscope_openai",
+                _providers()["dashscope_openai"],
+                "qwen3.8-max",
+                {"unknown": 1},
+                adapter="openai_chat_completions",
+            )
+
+    def test_registry_timeout_does_not_conflict_with_role_timeout(self):
+        with (
+            patch("src.services.llm_factory.get_config", return_value=_mock_config()),
+            patch("src.services.llm_factory._import_class") as importer,
+        ):
+            importer.return_value = MagicMock()
+            get_llm("deepseek", "deepseek-chat", request_timeout_seconds=15)
+        assert importer.return_value.call_args.kwargs["request_timeout"] == 15
+
+    def test_timeout_conflict_has_paths(self):
+        with pytest.raises(ValueError, match="params.timeout"):
+            _build_params(
+                "dashscope_openai",
+                _providers()["dashscope_openai"],
+                "qwen3.8-max",
+                {"timeout": 10},
+                adapter="openai_chat_completions",
+                request_timeout_seconds=15,
+            )
+
+    @pytest.mark.parametrize("value", [-1, None, True, "0", 1.5])
+    def test_max_retries_must_be_nonnegative_int(self, value):
+        with pytest.raises(ValueError, match="max_retries"):
+            _build_params(
+                "dashscope_openai",
+                _providers()["dashscope_openai"],
+                "qwen3.8-max",
+                {"max_retries": value},
+                adapter="openai_chat_completions",
             )
 
 
-class TestBuildParamsUnsupportedProvider:
-
-    def test_unknown_provider_raises(self):
-        """不在 _PROVIDER_MAP 且无 base_url 的 provider 在 get_llm 阶段报错，
-        但 _build_params 的 else 分支仍可处理（由 get_llm 网关控制）"""
-        # _build_params 的 else 分支现在是 OpenAI 兼容路径，
-        # 不再有 "不支持的 provider" 错误；由 get_llm 网关控制
-        params = _build_params("anthropic", {"api_key": "x"}, "claude", {})
-        assert params["model"] == "claude"
-        assert params["api_key"] == "x"
-
-
-# ---------------------------------------------------------------------------
-# get_llm — 正常路径
-# ---------------------------------------------------------------------------
-
-
-class TestGetLlmHappyPath:
-    """get_llm 正常创建 LLM 实例"""
-
-    @patch("src.services.llm_factory._import_class")
-    @patch("src.services.llm_factory.get_config")
-    def test_dashscope_profile(self, mock_get_config, mock_import):
-        mock_get_config.return_value = _make_config()
-
-        mock_cls = MagicMock()
-        mock_instance = MagicMock()
-        mock_cls.return_value = mock_instance
-        mock_import.return_value = mock_cls
-
-        result = get_llm("qwen_max", temperature=0)
-
-        assert isinstance(result, LLMWithMeta)
-        assert result.llm is mock_instance
-        assert result.provider == "dashscope"
-        assert result.model == "qwen-max"
-
-        mock_cls.assert_called_once_with(
-            model="qwen-max",
-            dashscope_api_key="test-dashscope-key",
-            model_kwargs={"temperature": 0},
-        )
-
-    @patch("src.services.llm_factory._import_class")
-    @patch("src.services.llm_factory.get_config")
-    def test_openai_profile(self, mock_get_config, mock_import):
-        mock_get_config.return_value = _make_config(
-            providers={
-                "openai": {
-                    "api_key": "sk-openai",
-                    "base_url": "https://api.openai.com/v1",
-                },
-            },
-            profiles={
-                "gpt4": {"provider": "openai", "model": "gpt-4"},
-            },
-        )
-
-        mock_cls = MagicMock()
-        mock_cls.return_value = MagicMock()
-        mock_import.return_value = mock_cls
-
-        result = get_llm("gpt4", temperature=0.5, timeout=30)
-
-        assert result.provider == "openai"
-        assert result.model == "gpt-4"
-
-        mock_cls.assert_called_once_with(
-            model="gpt-4",
-            api_key="sk-openai",
-            base_url="https://api.openai.com/v1",
-            temperature=0.5,
-            request_timeout=30,
-        )
-
-    @patch("src.services.llm_factory._import_class")
-    @patch("src.services.llm_factory.get_config")
-    def test_openrouter_profile(self, mock_get_config, mock_import):
-        mock_get_config.return_value = _make_config(
-            providers={
-                "openrouter": {
-                    "api_key": "sk-or-xxx",
-                    "base_url": "https://openrouter.ai/api/v1",
-                },
-            },
-            profiles={
-                "claude_sonnet": {
-                    "provider": "openrouter",
-                    "model": "anthropic/claude-3.5-sonnet",
-                },
-            },
-        )
-
-        mock_cls = MagicMock()
-        mock_cls.return_value = MagicMock()
-        mock_import.return_value = mock_cls
-
-        result = get_llm("claude_sonnet", temperature=0.3, max_tokens=4096)
-
-        assert result.provider == "openrouter"
-        assert result.model == "anthropic/claude-3.5-sonnet"
-
-        mock_cls.assert_called_once_with(
-            model="anthropic/claude-3.5-sonnet",
-            api_key="sk-or-xxx",
-            base_url="https://openrouter.ai/api/v1",
-            temperature=0.3,
-            max_tokens=4096,
-        )
-
-
-# ---------------------------------------------------------------------------
-# get_llm — 自动检测的 provider（OpenAI 兼容模式）
-# ---------------------------------------------------------------------------
-
-
-class TestGetLlmAutoDetected:
-    """get_llm 完整流程 — 自动检测的 provider（如 dashscope_openai）"""
-
-    @patch("src.services.llm_factory._import_class")
-    @patch("src.services.llm_factory.get_config")
-    def test_dashscope_openai_basic(self, mock_get_config, mock_import):
-        mock_get_config.return_value = _make_config(
-            providers={
-                "dashscope_openai": {
-                    "api_key": "sk-ds-xxx",
-                    "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-                },
-            },
-            profiles={
-                "qwen3_5_plus": {
-                    "provider": "dashscope_openai",
-                    "model": "qwen3.5-plus",
-                    "enable_thinking": False,
-                },
-            },
-        )
-        mock_cls = MagicMock()
-        mock_cls.return_value = MagicMock()
-        mock_import.return_value = mock_cls
-
-        result = get_llm("qwen3_5_plus", temperature=0, max_tokens=100)
-
-        assert result.provider == "dashscope_openai"
-        assert result.model == "qwen3.5-plus"
-        mock_import.assert_called_once_with("langchain_openai", "ChatOpenAI")
-        mock_cls.assert_called_once_with(
-            model="qwen3.5-plus",
-            api_key="sk-ds-xxx",
-            base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
-            temperature=0,
-            max_tokens=100,
-            extra_body={"enable_thinking": False},
-        )
-
-    @patch("src.services.llm_factory._import_class")
-    @patch("src.services.llm_factory.get_config")
-    def test_auto_detected_no_base_url_raises(self, mock_get_config, mock_import):
-        """未注册 provider + 无 base_url → 报错"""
-        mock_get_config.return_value = _make_config(
-            providers={
-                "custom_provider": {"api_key": "sk-xxx"},
-            },
-            profiles={
-                "custom": {"provider": "custom_provider", "model": "some-model"},
-            },
-        )
-        with pytest.raises(ValueError, match="base_url"):
-            get_llm("custom")
-
-    @patch("src.services.llm_factory._import_class")
-    @patch("src.services.llm_factory.get_config")
-    def test_dashscope_openai_qwen3_8_flash_summary_profile(
-        self, mock_get_config, mock_import
-    ):
-        """doc 5.1 §3.1：Flash 摘要 profile 经兼容 provider 的参数映射。
-
-        与 build_summarizer_model 的调用方式一致：profile 默认参数 +
-        timeout 覆盖。核对 model/base_url/temperature/max_tokens/
-        enable_thinking→extra_body/request_timeout 映射；假 ChatOpenAI，
-        不访问网络。
-        """
-        mock_get_config.return_value = _make_config(
-            providers={
-                "dashscope_openai": {
-                    "api_key": "sk-ds-xxx",
-                    "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-                },
-            },
-            profiles={
-                "qwen3_8_flash": {
-                    "provider": "dashscope_openai",
-                    "model": "qwen3.8-flash",
-                    "temperature": 0,
-                    "max_tokens": 8192,
-                    "enable_thinking": False,
-                },
-            },
-        )
-        mock_cls = MagicMock()
-        mock_cls.return_value = MagicMock()
-        mock_import.return_value = mock_cls
-
-        result = get_llm("qwen3_8_flash", timeout=120)
-
-        assert result.provider == "dashscope_openai"
-        assert result.model == "qwen3.8-flash"
-        mock_import.assert_called_once_with("langchain_openai", "ChatOpenAI")
-        mock_cls.assert_called_once_with(
-            model="qwen3.8-flash",
-            api_key="sk-ds-xxx",
-            base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
-            temperature=0,
-            max_tokens=8192,
-            request_timeout=120,
-            extra_body={"enable_thinking": False},
-        )
-
-
-# ---------------------------------------------------------------------------
-# get_llm — profile 级参数默认值
-# ---------------------------------------------------------------------------
-
-
-class TestGetLlmProfileDefaults:
-    """profile 中除 provider/model 外的字段作为参数默认值"""
-
-    @patch("src.services.llm_factory._import_class")
-    @patch("src.services.llm_factory.get_config")
-    def test_profile_defaults_applied(self, mock_get_config, mock_import):
-        """profile 定义了 temperature/top_p，调用时不传 override 应使用 profile 值"""
-        mock_get_config.return_value = _make_config(
-            profiles={
-                "qwen_plus_thinking": {
-                    "provider": "dashscope",
-                    "model": "qwen-plus",
-                    "temperature": 0.6,
-                    "top_p": 0.95,
-                    "enable_thinking": True,
-                },
-            },
-        )
-        mock_cls = MagicMock()
-        mock_cls.return_value = MagicMock()
-        mock_import.return_value = mock_cls
-
-        get_llm("qwen_plus_thinking")
-
-        mock_cls.assert_called_once_with(
-            model="qwen-plus",
-            dashscope_api_key="test-dashscope-key",
-            model_kwargs={
-                "temperature": 0.6,
-                "top_p": 0.95,
-                "enable_thinking": True,
-            },
-        )
-
-    @patch("src.services.llm_factory._import_class")
-    @patch("src.services.llm_factory.get_config")
-    def test_node_override_wins_over_profile_default(
-        self, mock_get_config, mock_import
-    ):
-        """节点 override 优先级高于 profile 默认值"""
-        mock_get_config.return_value = _make_config(
-            profiles={
-                "qwen_plus_hot": {
-                    "provider": "dashscope",
-                    "model": "qwen-plus",
-                    "temperature": 0.9,
-                    "top_p": 0.95,
-                },
-            },
-        )
-        mock_cls = MagicMock()
-        mock_cls.return_value = MagicMock()
-        mock_import.return_value = mock_cls
-
-        get_llm("qwen_plus_hot", temperature=0)
-
-        call_kwargs = mock_cls.call_args[1]
-        assert call_kwargs["model_kwargs"]["temperature"] == 0
-        assert call_kwargs["model_kwargs"]["top_p"] == 0.95
-
-    @patch("src.services.llm_factory._import_class")
-    @patch("src.services.llm_factory.get_config")
-    def test_profile_with_search_options(self, mock_get_config, mock_import):
-        """profile 中配置 enable_search + search_options 嵌套对象"""
-        mock_get_config.return_value = _make_config(
-            profiles={
-                "qwen_search": {
-                    "provider": "dashscope",
-                    "model": "qwen-plus",
-                    "enable_search": True,
-                    "search_options": {
-                        "enable_source": True,
-                        "search_strategy": "turbo",
-                    },
-                },
-            },
-        )
-        mock_cls = MagicMock()
-        mock_cls.return_value = MagicMock()
-        mock_import.return_value = mock_cls
-
-        get_llm("qwen_search")
-
-        call_kwargs = mock_cls.call_args[1]
-        assert call_kwargs["model_kwargs"]["enable_search"] is True
-        assert call_kwargs["model_kwargs"]["search_options"] == {
-            "enable_source": True,
-            "search_strategy": "turbo",
-        }
-
-    @patch("src.services.llm_factory._import_class")
-    @patch("src.services.llm_factory.get_config")
-    def test_profile_with_stream(self, mock_get_config, mock_import):
-        """profile 级 stream 参数映射为 streaming 构造参数"""
-        mock_get_config.return_value = _make_config(
-            profiles={
-                "qwen_stream": {
-                    "provider": "dashscope",
-                    "model": "qwen-plus",
-                    "stream": True,
-                },
-            },
-        )
-        mock_cls = MagicMock()
-        mock_cls.return_value = MagicMock()
-        mock_import.return_value = mock_cls
-
-        get_llm("qwen_stream")
-
-        call_kwargs = mock_cls.call_args[1]
-        assert call_kwargs["streaming"] is True
-        assert "stream" not in call_kwargs
-
-    @patch("src.services.llm_factory._import_class")
-    @patch("src.services.llm_factory.get_config")
-    def test_profile_invalid_override_rejected(self, mock_get_config, mock_import):
-        """profile 中含非白名单字段应被 _build_params 拒绝"""
-        mock_get_config.return_value = _make_config(
-            profiles={
-                "bad_profile": {
-                    "provider": "dashscope",
-                    "model": "qwen-plus",
-                    "api_key": "sneaky-override",
-                },
-            },
-        )
-        mock_import.return_value = MagicMock()
-
-        with pytest.raises(ValueError, match="不允许.*override"):
-            get_llm("bad_profile")
-
-
-# ---------------------------------------------------------------------------
-# get_llm — 配置校验（各种异常路径）
-# ---------------------------------------------------------------------------
-
-
-class TestGetLlmValidation:
-    """get_llm 配置缺失 / 引用错误场景"""
-
-    @patch("src.services.llm_factory.get_config")
-    def test_missing_llm_profiles(self, mock_get_config):
-        mock_get_config.return_value = _make_config(profiles=None)
-        # profiles=None → store["llm_profiles"] = None
-        mock_get_config.return_value.get = lambda k, d=None: (
-            None if k == "llm_profiles" else {"dashscope": {"api_key": "x"}}.get(k, d)
-        )
-        with pytest.raises(ValueError, match="llm_profiles"):
-            get_llm("qwen_max")
-
-    @patch("src.services.llm_factory.get_config")
-    def test_missing_llm_providers(self, mock_get_config):
-        store = {
-            "llm_profiles": {
-                "qwen_max": {"provider": "dashscope", "model": "qwen-max"}
-            },
-            "llm_providers": None,
-        }
-        mock_cfg = MagicMock()
-        mock_cfg.get = lambda k, d=None: store.get(k, d)
-        mock_get_config.return_value = mock_cfg
-
-        with pytest.raises(ValueError, match="llm_providers"):
-            get_llm("qwen_max")
-
-    @patch("src.services.llm_factory.get_config")
-    def test_profile_not_found(self, mock_get_config):
-        mock_get_config.return_value = _make_config()
-        with pytest.raises(ValueError, match="不存在"):
-            get_llm("nonexistent_profile")
-
-    @patch("src.services.llm_factory.get_config")
-    def test_profile_missing_provider_field(self, mock_get_config):
-        mock_get_config.return_value = _make_config(
-            profiles={"bad": {"model": "qwen-max"}},
-        )
-        with pytest.raises(ValueError, match="provider"):
-            get_llm("bad")
-
-    @patch("src.services.llm_factory.get_config")
-    def test_profile_missing_model_field(self, mock_get_config):
-        mock_get_config.return_value = _make_config(
-            profiles={"bad": {"provider": "dashscope"}},
-        )
-        with pytest.raises(ValueError, match="model"):
-            get_llm("bad")
-
-    @patch("src.services.llm_factory.get_config")
-    def test_provider_not_registered_no_base_url(self, mock_get_config):
-        """未注册的 provider 且无 base_url 应报错并提示配置 base_url"""
-        mock_get_config.return_value = _make_config(
-            profiles={"p": {"provider": "unknown_provider", "model": "m"}},
-            providers={"unknown_provider": {"api_key": "x"}},
-        )
-        with pytest.raises(ValueError, match="base_url"):
-            get_llm("p")
-
-    @patch("src.services.llm_factory.get_config")
-    def test_provider_not_in_providers_section(self, mock_get_config):
-        mock_get_config.return_value = _make_config(
-            profiles={"p": {"provider": "ghost", "model": "m"}},
-            providers={"dashscope": {"api_key": "x"}},
-        )
-        with pytest.raises(ValueError, match="不存在的 provider 'ghost'"):
-            get_llm("p")
-
-    @patch("src.services.llm_factory.get_config")
-    def test_provider_missing_api_key(self, mock_get_config):
-        mock_get_config.return_value = _make_config(
-            providers={"dashscope": {}},
-        )
-        with pytest.raises(ValueError, match="api_key"):
-            get_llm("qwen_max")
-
-    @patch("src.services.llm_factory.get_config")
-    def test_provider_empty_api_key(self, mock_get_config):
-        mock_get_config.return_value = _make_config(
-            providers={"dashscope": {"api_key": ""}},
-        )
-        with pytest.raises(ValueError, match="api_key"):
-            get_llm("qwen_max")
-
-    @patch("src.services.llm_factory._import_class")
-    @patch("src.services.llm_factory.get_config")
-    def test_import_failure(self, mock_get_config, mock_import):
-        mock_get_config.return_value = _make_config()
-        mock_import.side_effect = ImportError("No module named 'langchain_community'")
-
-        with pytest.raises(ValueError, match="无法导入"):
-            get_llm("qwen_max")
-
-
-# ---------------------------------------------------------------------------
-# extract_overrides 测试
-# ---------------------------------------------------------------------------
-
-
-class TestExtractOverrides:
-    """测试 extract_overrides 从节点配置中提取允许的 override"""
-
-    def test_extracts_temperature_only(self):
-        config = {"llm_profile": "qwen_turbo", "temperature": 0, "log_decision": True}
-        assert extract_overrides(config) == {"temperature": 0}
-
-    def test_extracts_all_allowed(self):
-        config = {
-            "llm_profile": "qwen_max",
-            "temperature": 0.3,
-            "max_tokens": 2000,
-            "timeout": 30,
-        }
-        result = extract_overrides(config)
-        assert result == {"temperature": 0.3, "max_tokens": 2000, "timeout": 30}
-
-    def test_extracts_new_dashscope_params(self):
-        config = {
-            "llm_profile": "qwen_plus",
-            "top_p": 0.9,
-            "enable_thinking": True,
-            "enable_search": True,
-            "search_options": {"forced_search": True},
-            "response_format": {"type": "json_object"},
-            "stream": True,
-            "unrelated_key": "ignored",
-        }
-        result = extract_overrides(config)
-        assert result == {
-            "top_p": 0.9,
-            "enable_thinking": True,
-            "enable_search": True,
-            "search_options": {"forced_search": True},
-            "response_format": {"type": "json_object"},
-            "stream": True,
-        }
-
-    def test_ignores_non_override_keys(self):
-        config = {
-            "llm_profile": "qwen_plus",
-            "temperature": 0,
-            "prompt": {"template_path": "..."},
-            "strategy": {"prefer_explicit_joins": True},
-        }
-        assert extract_overrides(config) == {"temperature": 0}
-
-    def test_empty_config(self):
-        assert extract_overrides({}) == {}
-
-    def test_no_matching_keys(self):
-        config = {"llm_profile": "qwen_turbo", "log_decision": True}
-        assert extract_overrides(config) == {}
-
-
-# ---------------------------------------------------------------------------
-# extract_llm_content 测试
-# ---------------------------------------------------------------------------
-
-
-class TestExtractLlmContent:
-    """extract_llm_content 从 LLM 响应中提取干净文本。
-
-    测试覆盖：
-    - 无 think 标签时透传（不启用 thinking 的常规场景）
-    - 剥离单个 <think>...</think> 块
-    - 剥离多个 think 块
-    - 大小写不敏感（<THINK>、<Think> 等）
-    - think 块跨多行
-    - response.content 为 None / 空字符串
-    - think 块后有有效内容
-    - additional_kwargs 中包含 reasoning_content 时不影响 content 提取
-    """
-
-    def _mock_response(self, content):
-        """构造一个只含 content 字段的模拟 LLM 响应对象。"""
-        mock = MagicMock()
-        mock.content = content
-        return mock
-
-    def test_plain_content_unchanged(self):
-        """无 think 标签时返回原始内容（不启用 thinking 的常规场景）"""
-        response = self._mock_response("SELECT * FROM orders WHERE date = '2024-01'")
-        assert (
-            extract_llm_content(response)
-            == "SELECT * FROM orders WHERE date = '2024-01'"
-        )
-
-    def test_json_content_unchanged(self):
-        """JSON 内容无 think 标签时原样返回"""
-        content = '{"rewritten_query": "2024年1月订单", "parse_result": {}}'
-        response = self._mock_response(content)
-        assert extract_llm_content(response) == content
-
-    def test_strips_single_think_block(self):
-        """剥离单个 <think>...</think> 块，保留后续内容"""
-        content = "<think>这是推理过程，用户想查询订单。</think>\nSELECT * FROM orders"
-        response = self._mock_response(content)
-        assert extract_llm_content(response) == "SELECT * FROM orders"
-
-    def test_strips_multiline_think_block(self):
-        """剥离跨多行的 think 块"""
-        content = (
-            "<think>\n"
-            "第一步：分析用户意图\n"
-            "第二步：确定表结构\n"
-            "</think>\n"
-            '{"rewritten_query": "2024年销售额"}'
-        )
-        response = self._mock_response(content)
-        assert extract_llm_content(response) == '{"rewritten_query": "2024年销售额"}'
-
-    def test_strips_multiple_think_blocks(self):
-        """剥离多个 think 块"""
-        content = (
-            "<think>第一段推理</think>\n中间内容\n<think>第二段推理</think>\n最终答案"
-        )
-        response = self._mock_response(content)
-        result = extract_llm_content(response)
-        assert "中间内容" in result
-        assert "最终答案" in result
-        assert "<think>" not in result
-        assert "第一段推理" not in result
-        assert "第二段推理" not in result
-
-    def test_case_insensitive_think_tag(self):
-        """think 标签大小写不敏感（如 <THINK>、<Think>）"""
-        response_upper = self._mock_response("<THINK>推理内容</THINK>\nsimple")
-        assert extract_llm_content(response_upper) == "simple"
-
-        response_mixed = self._mock_response("<Think>推理内容</Think>\ncomplex")
-        assert extract_llm_content(response_mixed) == "complex"
-
-    def test_none_content_returns_empty_string(self):
-        """response.content 为 None 时返回空字符串"""
-        response = self._mock_response(None)
-        assert extract_llm_content(response) == ""
-
-    def test_empty_content_returns_empty_string(self):
-        """response.content 为空字符串时返回空字符串"""
-        response = self._mock_response("")
-        assert extract_llm_content(response) == ""
-
-    def test_only_think_block_returns_empty(self):
-        """只有 think 标签、无实际内容时返回空字符串"""
-        response = self._mock_response("<think>只有推理，没有答案</think>")
-        assert extract_llm_content(response) == ""
-
-    def test_whitespace_trimmed(self):
-        """返回值去除首尾空白"""
-        response = self._mock_response("  <think>x</think>  \n  结果内容  \n  ")
-        assert extract_llm_content(response) == "结果内容"
-
-    def test_reasoning_content_in_additional_kwargs_not_leaked(self):
-        """reasoning_content 在 additional_kwargs 中时不影响 content 提取（标准行为验证）"""
-        response = MagicMock()
-        response.content = '{"rewritten_query": "月销售额"}'
-        response.additional_kwargs = {"reasoning_content": "大量推理内容..."}
-        assert extract_llm_content(response) == '{"rewritten_query": "月销售额"}'
-
-    def test_think_block_before_json_parseable(self):
-        """剥离 think 块后，残余内容可直接被 json.loads() 解析"""
+class TestActualHttpRequests:
+    def _invoke(self, provider, model, params, expected_url, providers=None):
+        captured = []
+
+        def handler(request):
+            captured.append(request)
+            return httpx.Response(200, json=_chat_response(model))
+
+        transport = httpx.MockTransport(handler)
+        real_class = ChatOpenAI
+
+        def client_factory(**kwargs):
+            kwargs["http_client"] = httpx.Client(transport=transport)
+            return real_class(**kwargs)
+
+        with (
+            patch(
+                "src.services.llm_factory.get_config",
+                return_value=_mock_config(providers),
+            ),
+            patch(
+                "src.services.llm_factory._import_class", return_value=client_factory
+            ),
+        ):
+            llm = get_llm(
+                provider, model, params=params, request_timeout_seconds=15
+            ).llm
+            llm.invoke([HumanMessage(content="ping")])
+        assert len(captured) == 1
+        request = captured[0]
+        assert str(request.url) == expected_url
         import json
 
-        content = '<think>分析：用户查询月销售额</think>\n{"rewritten_query": "月销售额", "parse_result": {}}'
-        response = self._mock_response(content)
-        result = extract_llm_content(response)
-        parsed = json.loads(result)
-        assert parsed["rewritten_query"] == "月销售额"
+        return json.loads(request.content)
 
+    def test_deepseek_flash_actual_uri_and_json(self):
+        body = self._invoke(
+            "deepseek",
+            "deepseek-flash",
+            {"thinking": {"type": "disabled"}, "max_tokens": 100},
+            "https://api.deepseek.com/chat/completions",
+        )
+        assert body["model"] == "deepseek-flash"
+        assert body["thinking"] == {"type": "disabled"}
+        assert body["max_tokens"] == 100
+        assert "max_completion_tokens" not in body
 
-class TestMaxRetriesOverride:
-    """doc 6.2 §7.5.1：max_retries 显式支持与校验（白名单/非负/顶层透传/原生拒绝）。"""
+    def test_glm_max_tokens_and_omission(self):
+        url = "https://open.bigmodel.cn/api/coding/paas/v4/chat/completions"
+        body = self._invoke("glm_coding", "glm-5.4", {"max_tokens": 100}, url)
+        assert body["max_tokens"] == 100
+        assert "max_completion_tokens" not in body
+        assert "thinking" not in body and "reasoning_effort" not in body
+        body = self._invoke("glm_coding", "glm-5.4", {}, url)
+        assert "max_tokens" not in body and "max_completion_tokens" not in body
 
-    def test_openai_compatible_top_level_param(self):
-        params = _build_params(
+    def test_max_tokens_mapping_is_scoped_to_verified_provider(self):
+        providers = _providers()
+        providers["generic"] = {
+            "adapter": "openai_chat_completions",
+            "api_key": "generic-key",
+            "base_url": "https://generic.example/v1",
+            "models": {"glm-5.4": {}},
+        }
+        verified_body = self._invoke(
+            "glm_coding",
+            "glm-5.4",
+            {"max_tokens": 100},
+            "https://open.bigmodel.cn/api/coding/paas/v4/chat/completions",
+            providers=providers,
+        )
+        generic_body = self._invoke(
+            "generic",
+            "glm-5.4",
+            {"max_tokens": 100},
+            "https://generic.example/v1/chat/completions",
+            providers=providers,
+        )
+
+        assert verified_body["max_tokens"] == 100
+        assert "max_completion_tokens" not in verified_body
+        assert generic_body["max_completion_tokens"] == 100
+        assert "max_tokens" not in generic_body
+
+    def test_kimi_request_omits_qwen_temperature_and_thinking(self):
+        body = self._invoke(
+            "kimi_code",
+            "k3.1-pro",
+            {},
+            "https://api.kimi.com/coding/v1/chat/completions",
+        )
+        assert body["model"] == "k3.1-pro"
+        assert "temperature" not in body
+        assert "thinking" not in body and "reasoning_effort" not in body
+        assert "enable_thinking" not in body
+
+    def test_qwen_compatible_defaults_reach_http(self):
+        body = self._invoke(
             "dashscope_openai",
-            {"api_key": "sk-xxx", "base_url": "https://x"},
-            "qwen3.8-max",
-            {"max_retries": 0},
+            "qwen3.8-flash",
+            {},
+            "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
         )
-        assert params["max_retries"] == 0  # 顶层构造参数，非 model_kwargs/extra_body
-        assert (
-            "model_kwargs" not in params
-            and "extra_body" not in params
-            or (params.get("extra_body") in (None, {}))
-        )
+        assert body["model"] == "qwen3.8-flash"
+        assert body["temperature"] == 0
+        assert body["max_completion_tokens"] == 8192
+        assert body["enable_thinking"] is False
 
-    @pytest.mark.parametrize("bad", [-1, None, True, "0", 1.5], ids=type)
-    def test_invalid_values_rejected(self, bad):
-        with pytest.raises(ValueError, match="max_retries"):
-            _build_params("openai", {"api_key": "sk-xxx"}, "m", {"max_retries": bad})
 
-    def test_native_dashscope_rejected(self):
-        with pytest.raises(ValueError, match="DashScope"):
-            _build_params(
-                "dashscope", {"api_key": "sk-xxx"}, "qwen-max", {"max_retries": 0}
-            )
+def test_extract_llm_content_preserved():
+    response = MagicMock()
+    response.content = "<think>draft</think>\nSELECT 1"
+    assert extract_llm_content(response) == "SELECT 1"
+    response.content = "<THINK>one</THINK>middle<Think>two</Think>final"
+    assert extract_llm_content(response) == "middlefinal"
+    response.content = None
+    assert extract_llm_content(response) == ""
+    response.content = '<think>draft</think>{"rewritten_query":"月销售额"}'
+    import json
 
-    def test_absent_param_keeps_current_behavior(self):
-        params = _build_params(
-            "openai", {"api_key": "sk-xxx"}, "m", {"temperature": 0.1}
-        )
-        assert "max_retries" not in params  # 未传的其他调用方行为不变
+    assert json.loads(extract_llm_content(response)) == {"rewritten_query": "月销售额"}

@@ -6,11 +6,11 @@ Router 是父图的第一个节点，负责判断用户问题是 simple 还是 c
 """
 
 import time
-from typing import Any, Dict
+from typing import Any
 
 from src.modules.nl2sql_father.state import NL2SQLFatherState
 from src.services.config_loader import load_config
-from src.services.llm_factory import extract_llm_content, extract_overrides, get_llm
+from src.services.llm_factory import extract_llm_content, get_llm
 from src.utils.logger import get_module_logger, with_query_id
 
 logger = get_module_logger("router")
@@ -20,7 +20,7 @@ _router_config_cache = None
 _routing_config_cache = None
 
 
-def _get_router_config() -> Dict[str, Any]:
+def _get_router_config() -> dict[str, Any]:
     """获取 Router 配置（带缓存）
 
     Returns:
@@ -35,7 +35,7 @@ def _get_router_config() -> Dict[str, Any]:
     return _router_config_cache
 
 
-def _get_routing_config() -> Dict[str, Any]:
+def _get_routing_config() -> dict[str, Any]:
     """获取路由覆盖配置（带缓存）"""
     global _routing_config_cache
     if _routing_config_cache is None:
@@ -45,7 +45,7 @@ def _get_routing_config() -> Dict[str, Any]:
     return _routing_config_cache
 
 
-def router_node(state: NL2SQLFatherState) -> Dict[str, Any]:
+def router_node(state: NL2SQLFatherState) -> dict[str, Any]:
     """Router 节点：判定问题复杂度
 
     职责：
@@ -120,7 +120,29 @@ def router_node(state: NL2SQLFatherState) -> Dict[str, Any]:
         query_logger.debug(prompt)
         query_logger.debug("=" * 80)
 
-        llm_meta = get_llm(config["llm_profile"], **extract_overrides(config))
+        legacy = {
+            "llm_profile",
+            "overrides",
+            "temperature",
+            "timeout",
+            "max_tokens",
+            "top_p",
+            "enable_thinking",
+            "enable_search",
+            "search_options",
+            "response_format",
+            "stream",
+            "thinking",
+            "max_retries",
+            "reasoning_effort",
+        } & set(config)
+        if legacy:
+            raise ValueError(
+                f"router: 旧字段 {sorted(legacy)} 已迁移为 provider、llm_name、params"
+            )
+        llm_meta = get_llm(
+            config["provider"], config["llm_name"], params=config.get("params")
+        )
         llm = llm_meta.llm
 
         response = llm.invoke(prompt)
@@ -133,7 +155,9 @@ def router_node(state: NL2SQLFatherState) -> Dict[str, Any]:
             complexity = "complex"  # ← 字符串
         else:
             # 异常情况：无法识别，使用配置的默认值
-            query_logger.warning(f"Router 输出无法识别: {content}，使用默认值: {default_on_error}")
+            query_logger.warning(
+                f"Router 输出无法识别: {content}，使用默认值: {default_on_error}"
+            )
             complexity = default_on_error  # ← 从配置读取（默认 "complex"）
 
         latency_ms = (time.time() - start_time) * 1000
@@ -148,17 +172,21 @@ def router_node(state: NL2SQLFatherState) -> Dict[str, Any]:
             "complexity": complexity,  # "simple" | "complex"（字符串）
             "router_reason": content[:200],  # 保留前200字符（用于调试）
             "router_latency_ms": latency_ms,
-            "path_taken": "fast" if complexity == "simple" else "complex",  # "fast" | "complex"（字符串）
+            "path_taken": (
+                "fast" if complexity == "simple" else "complex"
+            ),  # "fast" | "complex"（字符串）
         }
 
     except Exception as e:
         # 失败时使用配置的默认值
         latency_ms = (time.time() - start_time) * 1000
-        query_logger.error(f"Router 失败: {str(e)}，使用默认值: {default_on_error}", exc_info=True)
+        query_logger.exception(
+            f"Router 失败: {type(e).__name__}，使用默认值: {default_on_error}"
+        )
 
         return {
             "complexity": default_on_error,  # 从配置读取（默认 "complex"）
-            "router_reason": f"Router failed: {str(e)}",
+            "router_reason": f"Router failed: {e!s}",
             "router_latency_ms": latency_ms,
             "path_taken": "complex" if default_on_error == "complex" else "fast",
         }

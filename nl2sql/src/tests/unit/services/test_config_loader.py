@@ -10,7 +10,6 @@
 
 import os
 import textwrap
-from io import StringIO
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -19,12 +18,14 @@ import yaml
 
 from src.services.config_loader import ConfigLoader
 
-
 # ---------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------
 
-def _loader_from_yaml(yaml_text: str, env: dict[str, str] | None = None) -> dict[str, Any]:
+
+def _loader_from_yaml(
+    yaml_text: str, env: dict[str, str] | None = None
+) -> dict[str, Any]:
     """将 YAML 文本加载为配置字典，env 参数模拟环境变量。"""
     loader = ConfigLoader.__new__(ConfigLoader)
     with patch.dict(os.environ, env or {}, clear=False):
@@ -36,6 +37,7 @@ def _loader_from_yaml(yaml_text: str, env: dict[str, str] | None = None) -> dict
 # ---------------------------------------------------------------------------
 # 独立占位符（整个值就是 ${VAR}）
 # ---------------------------------------------------------------------------
+
 
 class TestSolePlaceholder:
     """整个 YAML 值是单个 ${VAR} 占位符的场景"""
@@ -92,18 +94,22 @@ class TestSolePlaceholder:
     def test_missing_no_default_logs_warning(self, caplog):
         """缺失变量应记录 WARNING 日志"""
         import logging
+
         with caplog.at_level(logging.WARNING, logger="src.services.config_loader"):
             _loader_from_yaml(
                 "api_key: ${MISSING_KEY_XYZ_UNIQUE}",
                 env={},
             )
-        assert any("MISSING_KEY_XYZ_UNIQUE" in record.message for record in caplog.records)
+        assert any(
+            "MISSING_KEY_XYZ_UNIQUE" in record.message for record in caplog.records
+        )
         assert any(record.levelname == "WARNING" for record in caplog.records)
 
 
 # ---------------------------------------------------------------------------
 # 内嵌占位符（${VAR} 嵌在更长字符串中）
 # ---------------------------------------------------------------------------
+
 
 class TestEmbeddedPlaceholder:
     """${VAR} 内嵌在字符串中的场景"""
@@ -127,6 +133,7 @@ class TestEmbeddedPlaceholder:
     def test_missing_embedded_logs_warning(self, caplog):
         """内嵌缺失变量应记录 WARNING"""
         import logging
+
         with caplog.at_level(logging.WARNING, logger="src.services.config_loader"):
             _loader_from_yaml(
                 "base_url: https://${MISSING_HOST_XYZ}/v1",
@@ -138,6 +145,7 @@ class TestEmbeddedPlaceholder:
 # ---------------------------------------------------------------------------
 # 嵌套结构（llm_providers 典型场景）
 # ---------------------------------------------------------------------------
+
 
 class TestNestedStructure:
     """模拟 config.yaml 中 llm_providers 段的完整结构"""
@@ -155,7 +163,10 @@ class TestNestedStructure:
         """已配置的 provider api_key 正常展开"""
         result = _loader_from_yaml(
             self._yaml,
-            env={"DASHSCOPE_API_KEY": "sk-dashscope-real", "MINIMAX_API_KEY": "sk-minimax-real"},
+            env={
+                "DASHSCOPE_API_KEY": "sk-dashscope-real",
+                "MINIMAX_API_KEY": "sk-minimax-real",
+            },
         )
         assert result["llm_providers"]["dashscope"]["api_key"] == "sk-dashscope-real"
         assert result["llm_providers"]["minimax"]["api_key"] == "sk-minimax-real"
@@ -172,7 +183,10 @@ class TestNestedStructure:
         assert result["llm_providers"]["dashscope"]["api_key"] == "sk-dashscope-real"
         assert result["llm_providers"]["minimax"]["api_key"] is None
         # base_url 不含变量，应正常保留
-        assert result["llm_providers"]["minimax"]["base_url"] == "https://api.minimaxi.com/v1"
+        assert (
+            result["llm_providers"]["minimax"]["base_url"]
+            == "https://api.minimaxi.com/v1"
+        )
 
     def test_all_missing_becomes_none(self, monkeypatch):
         """所有 provider api_key 未配置 → 全部 None，不抛异常"""
@@ -187,6 +201,7 @@ class TestNestedStructure:
 # 完整链路：None api_key → get_llm() 调用时才报错
 # ---------------------------------------------------------------------------
 
+
 class TestEndToEndNoneApiKey:
     """None api_key 经过 llm_factory.get_llm() 时才抛 ValueError"""
 
@@ -198,14 +213,10 @@ class TestEndToEndNoneApiKey:
         store = {
             "llm_providers": {
                 "minimax": {
-                    "api_key": None,   # 模拟未设置环境变量后的结果
+                    "adapter": "openai_chat_completions",
+                    "api_key": None,
                     "base_url": "https://api.minimaxi.com/v1",
-                },
-            },
-            "llm_profiles": {
-                "minimax_m21": {
-                    "provider": "minimax",
-                    "model": "MiniMax-M2.1",
+                    "models": {"MiniMax-M2.1": {}},
                 },
             },
         }
@@ -214,7 +225,7 @@ class TestEndToEndNoneApiKey:
         mock_get_config.return_value = mock_cfg
 
         with pytest.raises(ValueError, match="api_key"):
-            get_llm("minimax_m21")
+            get_llm("minimax", "MiniMax-M2.1")
 
     @patch("src.services.llm_factory._import_class")
     @patch("src.services.llm_factory.get_config")
@@ -225,14 +236,10 @@ class TestEndToEndNoneApiKey:
         store = {
             "llm_providers": {
                 "minimax": {
+                    "adapter": "openai_chat_completions",
                     "api_key": "sk-minimax-real",
                     "base_url": "https://api.minimaxi.com/v1",
-                },
-            },
-            "llm_profiles": {
-                "minimax_m21": {
-                    "provider": "minimax",
-                    "model": "MiniMax-M2.1",
+                    "models": {"MiniMax-M2.1": {}},
                 },
             },
         }
@@ -244,7 +251,7 @@ class TestEndToEndNoneApiKey:
         mock_cls.return_value = MagicMock()
         mock_import.return_value = mock_cls
 
-        result = get_llm("minimax_m21")
+        result = get_llm("minimax", "MiniMax-M2.1", request_timeout_seconds=30)
 
         assert isinstance(result, LLMWithMeta)
         assert result.provider == "minimax"
@@ -253,4 +260,6 @@ class TestEndToEndNoneApiKey:
             model="MiniMax-M2.1",
             api_key="sk-minimax-real",
             base_url="https://api.minimaxi.com/v1",
+            use_responses_api=False,
+            request_timeout=30,
         )

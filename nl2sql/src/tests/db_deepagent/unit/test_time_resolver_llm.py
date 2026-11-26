@@ -166,20 +166,26 @@ class TestBuildTimeResolver:
                 self.llm = ScriptedTimeModel()
                 self.llm.metadata = {}
 
-        def fake_get_llm(profile, **overrides):
-            recorded["profile"] = profile
-            recorded["overrides"] = overrides
+        def fake_get_llm(
+            provider, llm_name, *, params=None, request_timeout_seconds=None
+        ):
+            recorded["provider"] = provider
+            recorded["llm_name"] = llm_name
+            recorded["params"] = params
+            recorded["timeout"] = request_timeout_seconds
             meta = _Meta()
             meta.llm = ScriptedTimeModel()
             return type("LLMWithMeta", (), {"llm": meta.llm})()
 
         monkeypatch.setattr(factory, "get_llm", fake_get_llm)
         resolver = build_time_resolver(db_agent_config)
-        assert recorded["profile"] == db_agent_config.time_resolution.llm_profile
-        ov = recorded["overrides"]
+        assert recorded["provider"] == db_agent_config.time_resolution.provider
+        assert recorded["llm_name"] == db_agent_config.time_resolution.llm_name
         assert (
-            ov.get("timeout") == db_agent_config.time_resolution.request_timeout_seconds
+            recorded["timeout"]
+            == db_agent_config.time_resolution.request_timeout_seconds
         )
+        ov = recorded["params"]
         assert ov.get("max_retries") == 2
         assert ov.get("response_format") == {"type": "json_object"}
         assert resolver._model.metadata["dbda_call_kind"] == "time_resolution"
@@ -194,12 +200,27 @@ class TestBuildTimeResolver:
         bad = db_agent_config.model_copy(
             update={
                 "time_resolution": db_agent_config.time_resolution.model_copy(
-                    update={"llm_profile": "no_such_profile"}
+                    update={"llm_name": "no_such_profile"}
                 )
             }
         )
         with pytest.raises(DbAgentConfigError, match="time_resolution"):
             _check_time_resolution(bad)
+
+    def test_factory_error_has_neutral_role_prefix(self, monkeypatch, db_agent_config):
+        import src.services.llm_factory as factory
+
+        def raising_get_llm(*_args, **_kwargs):
+            raise ValueError("llm_providers.dashscope_openai.api_key: 缺少密钥")
+
+        monkeypatch.setattr(factory, "get_llm", raising_get_llm)
+        with pytest.raises(ValueError) as exc_info:
+            build_time_resolver(db_agent_config)
+
+        assert str(exc_info.value).startswith(
+            "time_resolution: llm_providers.dashscope_openai.api_key"
+        )
+        assert "time_resolution.params" not in str(exc_info.value)
 
 
 class TestObserverKind:
@@ -248,8 +269,13 @@ class TestBuildServicesWiring:
         monkeypatch.setattr(
             factory,
             "get_llm",
-            lambda profile, **ov: (
-                created.update(profile=profile, overrides=ov),
+            lambda provider, llm_name, **kwargs: (
+                created.update(
+                    provider=provider,
+                    llm_name=llm_name,
+                    params=kwargs.get("params"),
+                    timeout=kwargs.get("request_timeout_seconds"),
+                ),
                 type(
                     "LLMWithMeta",
                     (),
@@ -277,10 +303,9 @@ class TestBuildServicesWiring:
         )
         try:
             assert isinstance(services.time_resolver, TimeResolver)
-            assert created["profile"] == cfg.time_resolution.llm_profile
-            assert created["overrides"]["timeout"] == (
-                cfg.time_resolution.request_timeout_seconds
-            )
+            assert created["provider"] == cfg.time_resolution.provider
+            assert created["llm_name"] == cfg.time_resolution.llm_name
+            assert created["timeout"] == cfg.time_resolution.request_timeout_seconds
         finally:
             services.close()  # 容器统一释放路径（join_graph→milvus→business_db）
 
@@ -348,42 +373,25 @@ class TestStrictBoundFormats:
         assert "db_time_evidence" not in updates
 
     def test_dashscope_provider_timeout_rejected(self, db_agent_config, monkeypatch):
-        """C1-06：原生 dashscope provider 的 timeout 映射被工厂显式拒绝。"""
-        from src.services import config_loader
-
-        real_get_config = config_loader.get_config
-
-        def patched_get_config():
-            real = real_get_config()
-            profiles = dict(real.get("llm_profiles") or {})
-            profiles["dashscope_native"] = {
-                "provider": "dashscope",
-                "model": "qwen-plus",
-            }
-            providers = dict(real.get("llm_providers") or {})
-            providers["dashscope"] = {"api_key": "test-key"}
-            return {"llm_profiles": profiles, "llm_providers": providers}
-
-        monkeypatch.setattr(
-            "src.modules.db_deepagent.config.get_config", patched_get_config
-        )
-        monkeypatch.setattr("src.services.config_loader.get_config", patched_get_config)
-        monkeypatch.setattr("src.services.llm_factory.get_config", patched_get_config)
+        """原生 dashscope 对业务请求超时仍明确拒绝。"""
         from src.modules.db_deepagent.services.time_resolver import build_time_resolver
 
+        monkeypatch.setattr(
+            "src.modules.db_deepagent.services.time_resolver.resolve_llm_config",
+            lambda *_args: ({"adapter": "dashscope_native"}, {}),
+        )
         bad_cfg = db_agent_config.model_copy(
             update={
                 "time_resolution": db_agent_config.time_resolution.model_copy(
                     update={
-                        "llm_profile": "dashscope_native",
-                        # 剥离 max_retries：原生 dashscope 同样不支持它，
-                        # 留着会让断言命中重试报错而非 timeout 报错
-                        "overrides": {"response_format": {"type": "json_object"}},
+                        "provider": "dashscope",
+                        "llm_name": "qwen-plus",
+                        "params": {"response_format": {"type": "json_object"}},
                     }
                 )
             }
         )
-        with pytest.raises(ValueError, match="timeout"):
+        with pytest.raises(ValueError, match="request_timeout_seconds"):
             build_time_resolver(bad_cfg)
 
 

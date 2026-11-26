@@ -7,11 +7,11 @@ Summarizer 负责将内部状态转换为用户友好的最终响应：
 """
 
 import time
-from typing import Any, Dict, List
+from typing import Any
 
 from src.modules.nl2sql_father.state import NL2SQLFatherState
 from src.services.config_loader import load_config
-from src.services.llm_factory import extract_llm_content, extract_overrides, get_llm
+from src.services.llm_factory import extract_llm_content, get_llm
 from src.utils.logger import get_module_logger, with_query_id
 
 logger = get_module_logger("summarizer")
@@ -20,7 +20,7 @@ logger = get_module_logger("summarizer")
 _summarizer_config_cache = None
 
 
-def _get_summarizer_config() -> Dict[str, Any]:
+def _get_summarizer_config() -> dict[str, Any]:
     """获取 Summarizer 配置（带缓存）
 
     Returns:
@@ -35,7 +35,7 @@ def _get_summarizer_config() -> Dict[str, Any]:
     return _summarizer_config_cache
 
 
-def _build_template_summary(success_results: List[Dict[str, Any]]) -> str:
+def _build_template_summary(success_results: list[dict[str, Any]]) -> str:
     """使用简单模板生成总结。"""
     result_count = sum(len(r.get("rows", [])) for r in success_results)
     if result_count == 0:
@@ -67,7 +67,7 @@ def _is_non_retryable_llm_error(exc: Exception) -> bool:
     return any(marker in msg for marker in non_retryable_markers)
 
 
-def _get_retry_delay(delays_seconds: List[float], attempt_index: int) -> float:
+def _get_retry_delay(delays_seconds: list[float], attempt_index: int) -> float:
     """获取当前 attempt 对应的重试等待时间。"""
     if not delays_seconds:
         return 0.0
@@ -76,7 +76,7 @@ def _get_retry_delay(delays_seconds: List[float], attempt_index: int) -> float:
     return max(0.0, float(delays_seconds[-1]))
 
 
-def summarizer_node(state: NL2SQLFatherState) -> Dict[str, Any]:
+def summarizer_node(state: NL2SQLFatherState) -> dict[str, Any]:
     """Summarizer 节点（响应构建器，两路复用）
 
     职责：
@@ -101,7 +101,6 @@ def summarizer_node(state: NL2SQLFatherState) -> Dict[str, Any]:
     """
     user_query = state["user_query"]
     query_id = state.get("query_id", "unknown")
-    complexity = state.get("complexity")
     execution_results = state.get("execution_results", [])
     error = state.get("error")
     error_type = state.get("error_type")
@@ -128,7 +127,9 @@ def summarizer_node(state: NL2SQLFatherState) -> Dict[str, Any]:
     # ========== 场景2：SQL执行失败或无结果 ==========
     if not execution_results:
         # 尝试从 sub_queries 提取失败信息（Complex Path 增强）
-        failed_sqs = [sq for sq in state.get("sub_queries", []) if sq.get("status") == "failed"]
+        failed_sqs = [
+            sq for sq in state.get("sub_queries", []) if sq.get("status") == "failed"
+        ]
         if failed_sqs:
             lines = []
             for sq in failed_sqs:
@@ -175,7 +176,9 @@ def summarizer_node(state: NL2SQLFatherState) -> Dict[str, Any]:
         # 原因：Phase 1 只处理 Simple 问题，最多只有 1 条 SQL
         # Phase 2 扩展：Complex 问题可能有多条 SQL 结果
         query_logger.info(f"多SQL结果处理（Phase 2），结果数={len(success_results)}")
-        context_info = _format_multi_results(success_results, state.get("sub_queries", []), max_rows_in_prompt)
+        context_info = _format_multi_results(
+            success_results, state.get("sub_queries", []), max_rows_in_prompt
+        )
 
     # 生成总结
     if use_template:
@@ -210,7 +213,29 @@ def summarizer_node(state: NL2SQLFatherState) -> Dict[str, Any]:
 
 请综合以上所有查询结果，用2-3句话回答用户的问题。"""
 
-        llm_meta = get_llm(config["llm_profile"], **extract_overrides(config))
+        legacy = {
+            "llm_profile",
+            "overrides",
+            "temperature",
+            "timeout",
+            "max_tokens",
+            "top_p",
+            "enable_thinking",
+            "enable_search",
+            "search_options",
+            "response_format",
+            "stream",
+            "thinking",
+            "max_retries",
+            "reasoning_effort",
+        } & set(config)
+        if legacy:
+            raise ValueError(
+                f"summarizer: 旧字段 {sorted(legacy)} 已迁移为 provider、llm_name、params"
+            )
+        llm_meta = get_llm(
+            config["provider"], config["llm_name"], params=config.get("params")
+        )
         llm = llm_meta.llm
 
         try:
@@ -230,17 +255,15 @@ def summarizer_node(state: NL2SQLFatherState) -> Dict[str, Any]:
                     break
                 except Exception as e:
                     if _is_non_retryable_llm_error(e):
-                        query_logger.error(
-                            f"LLM 生成总结失败（不可重试）: {str(e)}，使用模板",
-                            exc_info=True,
+                        query_logger.exception(
+                            f"LLM 生成总结失败（不可重试）: {type(e).__name__}，使用模板"
                         )
                         summary = _build_template_summary(success_results)
                         break
 
                     if attempt >= max_attempts:
-                        query_logger.error(
-                            f"LLM 生成总结失败，已重试 {max_attempts} 次: {str(e)}，使用模板",
-                            exc_info=True,
+                        query_logger.exception(
+                            f"LLM 生成总结失败，已重试 {max_attempts} 次: {type(e).__name__}，使用模板"
                         )
                         summary = _build_template_summary(success_results)
                         break
@@ -258,7 +281,7 @@ def summarizer_node(state: NL2SQLFatherState) -> Dict[str, Any]:
                 summary = _build_template_summary(success_results)
         except Exception as e:
             # 节点级保护：理论上不应进入，但保留兜底防止重试逻辑本身异常
-            query_logger.error(f"Summarizer 内部异常: {str(e)}，使用模板", exc_info=True)
+            query_logger.exception(f"Summarizer 内部异常: {type(e).__name__}，使用模板")
             summary = _build_template_summary(success_results)
 
     query_logger.info("Summarizer 完成响应生成")
@@ -271,7 +294,7 @@ def _format_conversation_history(conversation_history: Any) -> str:
     if not conversation_history:
         return ""
 
-    lines: List[str] = ["对话历史（旧→新，仅供指代消解）："]
+    lines: list[str] = ["对话历史（旧→新，仅供指代消解）："]
     for i, turn in enumerate(conversation_history, start=1):
         if not isinstance(turn, dict):
             continue
@@ -307,7 +330,9 @@ def _build_error_summary(error: str, error_type: str, user_query: str) -> str:
     }
 
     # 获取模板（如果error_type未知，使用通用模板）
-    template = error_templates.get(error_type, "抱歉，系统遇到了问题，暂时无法处理您的请求。")
+    template = error_templates.get(
+        error_type, "抱歉，系统遇到了问题，暂时无法处理您的请求。"
+    )
 
     # Phase 1: 直接返回模板
     # Phase 2 可扩展：使用轻量LLM生成更个性化的错误提示
@@ -317,7 +342,7 @@ def _build_error_summary(error: str, error_type: str, user_query: str) -> str:
     return template
 
 
-def _format_table(columns: List[str], rows: List[List[Any]]) -> str:
+def _format_table(columns: list[str], rows: list[list[Any]]) -> str:
     """格式化结果为表格字符串
 
     Args:
@@ -344,7 +369,9 @@ def _format_table(columns: List[str], rows: List[List[Any]]) -> str:
     return "\n".join(lines)
 
 
-def _format_multi_results(results: List[Dict], sub_queries: List[Dict], max_rows: int) -> str:
+def _format_multi_results(
+    results: list[dict], sub_queries: list[dict], max_rows: int
+) -> str:
     """格式化多SQL结果为字符串
 
     ⚠️ 重要提示：本函数仅用于 Phase 2（Complex Path）
@@ -378,10 +405,9 @@ def _format_multi_results(results: List[Dict], sub_queries: List[Dict], max_rows
 
         # 3. 获取子查询文本（用于标题）
         if sub_query_id and sub_query_id in sub_query_map:
-            query_text = (
-                sub_query_map[sub_query_id].get("rewritten_query")
-                or sub_query_map[sub_query_id].get("query", "")
-            )
+            query_text = sub_query_map[sub_query_id].get(
+                "rewritten_query"
+            ) or sub_query_map[sub_query_id].get("query", "")
             if query_text:
                 title = f"【{query_text}】"
             else:

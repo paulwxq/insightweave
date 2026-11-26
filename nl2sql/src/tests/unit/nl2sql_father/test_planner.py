@@ -1,12 +1,11 @@
 """Planner 节点单元测试（Phase 2）"""
 
-import pytest
-from unittest.mock import Mock, MagicMock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 from src.modules.nl2sql_father.nodes.planner import (
-    planner_node,
     _build_dependency_graph,
     _has_cycle,
+    planner_node,
 )
 from src.modules.nl2sql_father.state import create_initial_state
 
@@ -142,7 +141,9 @@ class TestPlannerNode:
 }
 ```""")
 
-        state = create_initial_state(user_query="哪个服务区销售最高？它的地址是？", query_id="test_q1")
+        state = create_initial_state(
+            user_query="哪个服务区销售最高？它的地址是？", query_id="test_q1"
+        )
         result = planner_node(state)
 
         assert "sub_queries" in result
@@ -213,3 +214,25 @@ class TestPlannerNode:
         assert "error" in result
         assert result["error_type"] == "planning_failed"
         assert "至少需要" in result["error"]
+
+    def test_legacy_flat_model_param_is_rejected(self):
+        config = {
+            "provider": "dashscope",
+            "llm_name": "qwen-plus",
+            "params": {"temperature": 0},
+            "top_p": 0.9,
+            "max_sub_queries": 5,
+            "min_sub_queries": 2,
+            "max_rounds": 5,
+            "log_plan": False,
+        }
+        state = create_initial_state(user_query="测试问题", query_id="test_legacy")
+        with patch(
+            "src.modules.nl2sql_father.nodes.planner._get_planner_config",
+            return_value=config,
+        ):
+            result = planner_node(state)
+
+        assert result["error_type"] == "planning_failed"
+        assert "top_p" in result["error"]
+        assert "params" in result["error"]

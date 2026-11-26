@@ -16,13 +16,14 @@ from langchain_core.tools import BaseTool
 
 from src.modules.db_deepagent.config import DbAgentConfig
 from src.modules.db_deepagent.context import DbAgentContext
-from src.modules.db_deepagent.state import DbDeepAgentState
-from src.modules.db_deepagent.tools import build_business_tools
 from src.modules.db_deepagent.errors import (
     AssemblyVerificationError,
     DbAgentConfigError,
     HarnessProfileError,
 )
+from src.modules.db_deepagent.state import DbDeepAgentState
+from src.modules.db_deepagent.tools import build_business_tools
+from src.services.llm_factory import resolve_llm_config
 from src.utils.logger import get_module_logger
 
 logger = get_module_logger("nl2sql.db_deepagent.agent")
@@ -171,8 +172,8 @@ def read_summary_for_handoff(state_values: dict) -> str | None:
 def build_model(cfg: DbAgentConfig) -> BaseChatModel:
     """构造主模型并设置请求超时（§11.1；doc 6.2 §7.5.2）。
 
-    OpenAI 兼容路径：timeout 作为工厂覆盖参数在构造时传入（映射为
-    request_timeout，客户端按该值构建）；显式配置的 overrides.timeout 优先。
+    OpenAI 兼容路径：request_timeout_seconds 在构造时传入（映射为
+    request_timeout，客户端按该值构建）；与 params.timeout 同时出现会报冲突。
     ChatTongyi：工厂拒绝 timeout 覆盖（C12），构造后经 apply_request_timeout
     写入 model_kwargs（DashScope SDK 每次调用时读取）。
 
@@ -180,16 +181,33 @@ def build_model(cfg: DbAgentConfig) -> BaseChatModel:
     max_retries=0（单层重试，由项目中间件统一管理次数），构造后核验实际
     同步/异步客户端确已为零——client 为 None 只表示无法确认，同样拒绝启用。
     """
-    from src.services.config_loader import get_config
     from src.services.llm_factory import get_llm
 
-    profile = get_config().get("llm_profiles", {}).get(cfg.model.llm_profile) or {}
-    provider = profile.get("provider", "")
-    overrides = dict(cfg.model.overrides)
-    if provider != "dashscope":
-        overrides.setdefault("timeout", cfg.model.request_timeout_seconds)
+    try:
+        provider_config, model_config = resolve_llm_config(
+            cfg.model.provider, cfg.model.llm_name
+        )
+    except ValueError as exc:
+        raise ValueError(f"model: {exc}") from exc
+    adapter = provider_config["adapter"]
+    model_defaults = model_config.get("params") or {}
+    effective = {**model_defaults, **cfg.model.params}
+    stream = effective.get("stream")
+    source = (
+        "（值来自 llm_providers."
+        f"{cfg.model.provider}.models.{cfg.model.llm_name}.params.stream）"
+        if "stream" in model_defaults and "stream" not in cfg.model.params
+        else ""
+    )
+    if stream is not None and type(stream) is not bool:
+        raise DbAgentConfigError(f"model.params.stream: 必须是布尔值{source}")
+    if stream is True:
+        raise DbAgentConfigError(
+            f"model.params.stream: 主 Agent 首版仅支持非流式请求{source}"
+        )
+    overrides = dict(cfg.model.params)
     if cfg.model.retry.enabled:
-        if provider == "dashscope":
+        if adapter == "dashscope_native":
             raise DbAgentConfigError(
                 "统一模型重试暂只支持 OpenAI 兼容主模型；"
                 "如需保持原行为，请设置 model.retry.enabled=false"
@@ -201,8 +219,20 @@ def build_model(cfg: DbAgentConfig) -> BaseChatModel:
                 "启用项目重试时，主模型客户端 max_retries 必须为 0"
             )
         overrides["max_retries"] = 0
-    model = get_llm(cfg.model.llm_profile, **overrides).llm
-    if provider == "dashscope":
+    try:
+        model = get_llm(
+            cfg.model.provider,
+            cfg.model.llm_name,
+            params=overrides,
+            request_timeout_seconds=(
+                None
+                if adapter == "dashscope_native"
+                else cfg.model.request_timeout_seconds
+            ),
+        ).llm
+    except ValueError as exc:
+        raise ValueError(f"model: {exc}") from exc
+    if adapter == "dashscope_native":
         apply_request_timeout(model, cfg.model.request_timeout_seconds)
     if cfg.model.retry.enabled:
         # 版本依赖（doc 6.2 §7.5.2）：root_client/root_async_client 为
@@ -233,26 +263,29 @@ def verify_single_layer_retry_clients(model: Any) -> None:
 
 
 def build_summarizer_model(cfg: DbAgentConfig) -> BaseChatModel:
-    """按摘要专用 profile 创建模型并标记调用用途（doc 5.1 §4.2）。
+    """按 summarization.provider + llm_name 创建模型并标记调用用途。
 
-    与 build_model 同一套工厂与超时规则：OpenAI 兼容路径在构造前经 timeout
-    覆盖参数传入（显式 summarization.overrides.timeout 优先）；原生
-    DashScope 构造后经 apply_request_timeout 写入。摘要 overrides 独立于
-    cfg.model.overrides，不继承主模型参数。摘要模型不注册主 Agent Harness
-    （只写摘要，不承担工具调用装配）。
+    OpenAI 兼容路径在构造前传入 request_timeout_seconds；原生 DashScope
+    构造后经 apply_request_timeout 写入。摘要 params 独立于 cfg.model.params，
+    不继承主模型参数。摘要模型不注册主 Agent Harness（只写摘要，不承担工具调用装配）。
     """
-    from src.services.config_loader import get_config
     from src.services.llm_factory import get_llm
 
     s = cfg.summarization
-    profile = get_config().get("llm_profiles", {}).get(s.llm_profile) or {}
-    provider = profile.get("provider", "")
-    overrides = dict(s.overrides)
-    if provider != "dashscope":
-        overrides.setdefault("timeout", s.request_timeout_seconds)
-
-    summary_model = get_llm(s.llm_profile, **overrides).llm
-    if provider == "dashscope":
+    try:
+        provider_config, _ = resolve_llm_config(s.provider, s.llm_name)
+        adapter = provider_config["adapter"]
+        summary_model = get_llm(
+            s.provider,
+            s.llm_name,
+            params=dict(s.params),
+            request_timeout_seconds=(
+                None if adapter == "dashscope_native" else s.request_timeout_seconds
+            ),
+        ).llm
+    except ValueError as exc:
+        raise ValueError(f"summarization: {exc}") from exc
+    if adapter == "dashscope_native":
         apply_request_timeout(summary_model, s.request_timeout_seconds)
 
     summary_model.metadata = {
@@ -356,7 +389,7 @@ TOOL_VISIBLE_FIELDS: dict[str, tuple[list[str], list[str]]] = {
 
 
 def stage_expected_tool_names(
-    cfg: "DbAgentConfig", *, include_result_tools: bool = True
+    cfg: DbAgentConfig, *, include_result_tools: bool = True
 ) -> set[str]:
     """阶段期望工具集合（§10.6）：按 features 计算；装配与运行期审计共用。
 
@@ -376,7 +409,7 @@ def stage_expected_tool_names(
 _HIDDEN_PATHS = ["/**/.*", "/**/.*/**"]
 
 
-def build_session_dir(cfg: "DbAgentConfig", session_id: str) -> Path:
+def build_session_dir(cfg: DbAgentConfig, session_id: str) -> Path:
     # ID 校验先于目录副作用（doc 2 §4.2）：非法 session_id 不得创建目录
     from src.modules.db_deepagent.persistence.checkpoint import valid_web_id
 
@@ -391,7 +424,7 @@ def build_session_dir(cfg: "DbAgentConfig", session_id: str) -> Path:
     return session_dir
 
 
-def build_permissions(cfg: "DbAgentConfig") -> list[Any]:
+def build_permissions(cfg: DbAgentConfig) -> list[Any]:
     from deepagents import FilesystemPermission
 
     permissions = [
@@ -421,7 +454,7 @@ def build_permissions(cfg: "DbAgentConfig") -> list[Any]:
     return permissions
 
 
-def build_backend(session_dir: Path, cfg: "DbAgentConfig"):
+def build_backend(session_dir: Path, cfg: DbAgentConfig):
     from deepagents.backends import CompositeBackend, FilesystemBackend
 
     routes: dict[str, Any] = {
@@ -445,7 +478,7 @@ def build_backend(session_dir: Path, cfg: "DbAgentConfig"):
     )
 
 
-def build_filesystem_middleware(backend, permissions, cfg: "DbAgentConfig"):
+def build_filesystem_middleware(backend, permissions, cfg: DbAgentConfig):
     """§10.2 适配点：白名单实例，显式传 permissions 与转存阈值。
 
     DeepAgents 0.7.31 起公开 `permissions=`（`_permissions` 弃用，0.9.0 移除）；
@@ -485,7 +518,7 @@ def build_summary_prompt(prompts: dict[str, Any]) -> str:
 
 
 def verify_assembly(
-    agent, cfg: "DbAgentConfig", *, include_result_tools: bool = True
+    agent, cfg: DbAgentConfig, *, include_result_tools: bool = True
 ) -> set[str]:
     """创建后立即执行；失败抛 AssemblyVerificationError，不进入会话（步骤 5：15 件）。"""
     from langgraph.channels import DeltaChannel
@@ -612,15 +645,15 @@ def build_db_agent(
 
     tools: list[BaseTool] = list(build_business_tools(services))
     if not include_result_tools:
-        from src.modules.db_deepagent.tools.schema_tools import (
-            make_inspect_tables_tool,
-            make_plan_joins_tool,
-            make_search_schema_tool,
-        )
         from src.modules.db_deepagent.tools.guard_tools import (
             make_probe_dimension_values_tool,
             make_resolve_time_range_tool,
             make_reuse_evidence_tool,
+        )
+        from src.modules.db_deepagent.tools.schema_tools import (
+            make_inspect_tables_tool,
+            make_plan_joins_tool,
+            make_search_schema_tool,
         )
         from src.modules.db_deepagent.tools.sql_tools import (
             make_execute_sql_tool,

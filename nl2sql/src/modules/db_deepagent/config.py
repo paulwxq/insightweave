@@ -15,15 +15,26 @@ import re
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+import yaml
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictFloat,
+    StrictInt,
+    ValidationError,
+)
 
 from src.modules.db_deepagent.errors import DbAgentConfigError
 from src.services.config_loader import ConfigLoader, get_config
 
 # 合法 Schema 标识符（简单规则即可：本次只接受 db_deepagent 这类普通标识符）
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_ENV_REFERENCE_RE = re.compile(r"\$\{[A-Za-z_][A-Za-z0-9_]*?(?::[^}]*)?\}")
 
 _CONFIG_PATH = Path(__file__).resolve().parent / "config" / "db_deepagent.yaml"
+
+TimeoutSeconds = StrictInt | StrictFloat
 
 
 class _StrictModel(BaseModel):
@@ -45,11 +56,15 @@ class ModelRetryConfig(_StrictModel):
     max_retries: int = Field(default=2, ge=0, le=2)
 
 
-class ModelConfig(_StrictModel):
-    llm_profile: str
-    overrides: dict[str, Any] = Field(default_factory=dict)
+class ModelSelectionConfig(_StrictModel):
+    provider: str = Field(min_length=1)
+    llm_name: str = Field(min_length=1)
+    params: dict[str, Any] = Field(default_factory=dict)
+
+
+class ModelConfig(ModelSelectionConfig):
     expected_harness_key: str | None = None
-    request_timeout_seconds: float = Field(gt=0)
+    request_timeout_seconds: TimeoutSeconds = Field(gt=0, allow_inf_nan=False)
     retry: ModelRetryConfig = Field(default_factory=ModelRetryConfig)
 
 
@@ -207,12 +222,8 @@ class BudgetConfig(_StrictModel):
     final_answer_reminders: int = Field(ge=0)
 
 
-class SummarizationConfig(_StrictModel):
-    # 摘要专用 LLM profile（doc 5.1 §4.1）：必填，引用全局 llm_profiles；
-    # 存在性由 _check_summarization 校验，参数合法性仍由 get_llm() 负责
-    llm_profile: str = Field(min_length=1)
-    overrides: dict[str, Any] = Field(default_factory=dict)
-    request_timeout_seconds: float = Field(gt=0)
+class SummarizationConfig(ModelSelectionConfig):
+    request_timeout_seconds: TimeoutSeconds = Field(gt=0, allow_inf_nan=False)
     summary_trigger_tokens: int = Field(gt=0)
     recent_context_tokens: int = Field(gt=0)
     trim_tokens_to_summarize: int | None = Field(default=None, gt=0)
@@ -222,12 +233,8 @@ class FilesystemConfig(_StrictModel):
     tool_token_limit_before_evict: int = Field(gt=0)
 
 
-class TimeResolutionConfig(_StrictModel):
-    # 日期解析专用 LLM profile（doc 16 §6）：必填，引用全局 llm_profiles；
-    # 存在性由 _check_time_resolution 校验，参数合法性由 get_llm() 负责
-    llm_profile: str = Field(min_length=1)
-    overrides: dict[str, Any] = Field(default_factory=dict)
-    request_timeout_seconds: float = Field(gt=0)
+class TimeResolutionConfig(ModelSelectionConfig):
+    request_timeout_seconds: TimeoutSeconds = Field(gt=0, allow_inf_nan=False)
 
 
 class ThreadConfig(_StrictModel):
@@ -285,6 +292,20 @@ class DbAgentConfig(_StrictModel):
 def _field_paths(exc: ValidationError) -> str:
     """提取 ValidationError 的字段路径（不含输入值，防止密码外泄）。"""
     return "; ".join(".".join(str(p) for p in e["loc"]) for e in exc.errors())
+
+
+def _check_raw_role_timeouts(raw: Any) -> None:
+    if not isinstance(raw, dict):
+        return
+    for role in ("model", "summarization", "time_resolution"):
+        section = raw.get(role)
+        if not isinstance(section, dict) or "request_timeout_seconds" not in section:
+            continue
+        value = section["request_timeout_seconds"]
+        if isinstance(value, str) and not _ENV_REFERENCE_RE.fullmatch(value.strip()):
+            raise DbAgentConfigError(
+                f"{role}.request_timeout_seconds: 必须是数字，不能是字符串"
+            )
 
 
 def _check_business_target(cfg: DbAgentConfig) -> None:
@@ -350,6 +371,15 @@ def _check_platform_target(cfg: DbAgentConfig) -> None:
         )
 
 
+def _resolve_role(role: str, selection: ModelSelectionConfig) -> tuple[dict, dict]:
+    from src.services.llm_factory import resolve_llm_config
+
+    try:
+        return resolve_llm_config(selection.provider, selection.llm_name)
+    except ValueError as exc:
+        raise DbAgentConfigError(f"{role}: {exc}") from exc
+
+
 def _check_summarization(cfg: DbAgentConfig) -> None:
     s = cfg.summarization
     if not 0 < s.recent_context_tokens < s.summary_trigger_tokens:
@@ -357,26 +387,34 @@ def _check_summarization(cfg: DbAgentConfig) -> None:
             "summarization: 需满足 0 < recent_context_tokens < summary_trigger_tokens，实际 "
             f"recent={s.recent_context_tokens}, trigger={s.summary_trigger_tokens}"
         )
-    # 摘要 profile 引用检查（doc 5.1 §4.1）：不在此创建 LLM；
-    # provider/模型 ID/密钥合法性由 get_llm() 在构造时校验
-    profiles = get_config().get("llm_profiles", {})
-    if s.llm_profile not in profiles:
-        raise DbAgentConfigError(
-            "summarization.llm_profile: 引用的 LLM profile 不存在；"
-            "请在 src/configs/config.yaml 的 llm_profiles 中注册"
-        )
-    # trim_tokens_to_summarize: None 或正整数已由字段约束保证；显式传 None 时不回落 SDK 默认 4000（§4.3）。
+    _resolve_role("summarization", s)
 
 
 def _check_time_resolution(cfg: DbAgentConfig) -> None:
-    # 日期 profile 引用检查（doc 16 §6）：不在此创建 LLM；
-    # provider/模型 ID/密钥合法性由 get_llm() 在构造时校验
-    profiles = get_config().get("llm_profiles", {})
-    if cfg.time_resolution.llm_profile not in profiles:
-        raise DbAgentConfigError(
-            "time_resolution.llm_profile: 引用的 LLM profile 不存在；"
-            "请在 src/configs/config.yaml 的 llm_profiles 中注册"
+    _, model_config = _resolve_role("time_resolution", cfg.time_resolution)
+    model_defaults = model_config.get("params") or {}
+    params = {
+        **model_defaults,
+        **cfg.time_resolution.params,
+    }
+    response_format_path = (
+        "time_resolution.params.response_format"
+        if (
+            "response_format" in cfg.time_resolution.params
+            or "response_format" not in model_defaults
         )
+        else (
+            "llm_providers."
+            f"{cfg.time_resolution.provider}.models."
+            f"{cfg.time_resolution.llm_name}.params.response_format"
+        )
+    )
+    response_format = params.get("response_format")
+    if (
+        not isinstance(response_format, dict)
+        or response_format.get("type") != "json_object"
+    ):
+        raise DbAgentConfigError(f"{response_format_path}.type: 必须为 json_object")
 
 
 def _check_maintenance(cfg: DbAgentConfig) -> None:
@@ -419,6 +457,7 @@ def run_config_checks(
     """执行 §4.2 检查表（结构约束已由 Pydantic 字段保证，这里做跨字段与外部引用检查）。"""
     _check_business_target(cfg)
     _check_platform_target(cfg)
+    _resolve_role("model", cfg.model)
     _check_summarization(cfg)
     _check_time_resolution(cfg)
     _check_maintenance(cfg)
@@ -456,6 +495,9 @@ def load_base_db_agent_config(config_path: str | Path | None = None) -> DbAgentC
     path = Path(config_path) if config_path is not None else _CONFIG_PATH
     if not path.exists():
         raise DbAgentConfigError(f"配置文件不存在: {path}")
+    with open(path, encoding="utf-8") as fh:
+        raw_yaml = yaml.safe_load(fh)
+    _check_raw_role_timeouts(raw_yaml)
     raw = ConfigLoader(str(path)).load()
     try:
         return DbAgentConfig.model_validate(raw)

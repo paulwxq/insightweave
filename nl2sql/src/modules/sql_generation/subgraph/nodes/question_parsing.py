@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import json
 from datetime import datetime
-from typing import Any, Dict, Optional, Tuple
+from typing import Any
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from src.modules.sql_generation.subgraph.state import SQLGenerationState
 from src.services.config_loader import load_subgraph_config
-from src.services.llm_factory import extract_llm_content, extract_overrides, get_llm
+from src.services.llm_factory import extract_llm_content, get_llm
 from src.utils.logger import get_module_logger, with_query_id
 
 
@@ -23,7 +23,7 @@ def _truncate_dependency_value(value: Any, max_len: int = 120) -> str:
 
 
 def _format_conversation_history(
-    conversation_history: Optional[list[dict[str, str]]],
+    conversation_history: list[dict[str, str]] | None,
 ) -> str:
     if not conversation_history:
         return ""
@@ -41,7 +41,7 @@ def _format_conversation_history(
 
 
 def _format_dependencies_for_parsing(
-    dependencies_results: Optional[Dict[str, Any]],
+    dependencies_results: dict[str, Any] | None,
     *,
     max_rows: int = 3,
     max_cell_len: int = 120,
@@ -59,7 +59,9 @@ def _format_dependencies_for_parsing(
         exec_result = dep_data.get("execution_result")
 
         lines.append(f"- {dep_id}")
-        lines.append(f"  question: {_truncate_dependency_value(question, max_cell_len)}")
+        lines.append(
+            f"  question: {_truncate_dependency_value(question, max_cell_len)}"
+        )
 
         if not isinstance(exec_result, dict):
             lines.append("  result: unavailable")
@@ -98,21 +100,43 @@ def _format_dependencies_for_parsing(
 class QuestionParsingAgent:
     """封装 LLM 调用以生成 QueryParseResult"""
 
-    def __init__(self, config: Dict[str, Any]):
+    def __init__(self, config: dict[str, Any]):
         self._config = config
 
-        llm_meta = get_llm(config["llm_profile"], **extract_overrides(config))
+        legacy = {
+            "llm_profile",
+            "overrides",
+            "temperature",
+            "timeout",
+            "max_tokens",
+            "top_p",
+            "enable_thinking",
+            "enable_search",
+            "search_options",
+            "response_format",
+            "stream",
+            "thinking",
+            "max_retries",
+            "reasoning_effort",
+        } & set(config)
+        if legacy:
+            raise ValueError(
+                f"question_parsing: 旧字段 {sorted(legacy)} 已迁移为 provider、llm_name、params"
+            )
+        llm_meta = get_llm(
+            config["provider"], config["llm_name"], params=config.get("params")
+        )
         self._llm = llm_meta.llm
 
     def parse_with_rewrite(
         self,
         query: str,
         *,
-        current_date: Optional[str] = None,
-        conversation_history: Optional[list[dict[str, str]]] = None,
-        dependencies_results: Optional[Dict[str, Any]] = None,
-        query_id: Optional[str] = None,
-    ) -> Tuple[str, Dict[str, Any]]:
+        current_date: str | None = None,
+        conversation_history: list[dict[str, str]] | None = None,
+        dependencies_results: dict[str, Any] | None = None,
+        query_id: str | None = None,
+    ) -> tuple[str, dict[str, Any]]:
         if not query:
             raise ValueError("问题内容为空，无法解析")
 
@@ -155,37 +179,32 @@ Follow these rules strictly:
         history_text = _format_conversation_history(conversation_history)
         dependencies_text = _format_dependencies_for_parsing(dependencies_results)
         user_prompt = (
-            "Today's date is: {current_date} (Asia/Shanghai timezone)\n\n"
-            "{history_text}\n"
-            "{dependencies_text}"
-            "Current question: {query}\n\n"
-            "Output JSON schema (strict):\n{{\n"
-            "  \"rewritten_query\": str,\n"
-            "  \"parse_result\": {{\n"
-            "    \"keywords\": [str],\n"
-            "    \"time\": {{\n"
-            "      \"start\": \"YYYY-MM-DD\" or \"YYYY-MM-DD HH:MM:SS\",\n"
-            "      \"end\":   \"YYYY-MM-DD\" or \"YYYY-MM-DD HH:MM:SS\",\n"
-            "      \"grain_inferred\": \"year|quarter|month|week|day|hour\",\n"
-            "      \"is_full_period\": bool\n"
-            "    }} | null,\n"
-            "    \"metric\": {{\"text\": str, \"is_aggregate_candidate\": bool}},\n"
-            "    \"dimensions\": [{{\"text\": str, \"role\": \"column|value\", \"evidence\": str}}],\n"
-            "    \"intent\": {{\"task\": \"plain_agg|topn|rank|compare_yoy|compare_mom\", \"topn\": int|null}},\n"
-            "    \"signals\": [str]\n"
-            "  }}\n"
-            "}}\n"
+            f"Today's date is: {current_date} (Asia/Shanghai timezone)\n\n"
+            f"{history_text}\n"
+            f"{dependencies_text}"
+            f"Current question: {query}\n\n"
+            "Output JSON schema (strict):\n{\n"
+            '  "rewritten_query": str,\n'
+            '  "parse_result": {\n'
+            '    "keywords": [str],\n'
+            '    "time": {\n'
+            '      "start": "YYYY-MM-DD" or "YYYY-MM-DD HH:MM:SS",\n'
+            '      "end":   "YYYY-MM-DD" or "YYYY-MM-DD HH:MM:SS",\n'
+            '      "grain_inferred": "year|quarter|month|week|day|hour",\n'
+            '      "is_full_period": bool\n'
+            "    } | null,\n"
+            '    "metric": {"text": str, "is_aggregate_candidate": bool},\n'
+            '    "dimensions": [{"text": str, "role": "column|value", "evidence": str}],\n'
+            '    "intent": {"task": "plain_agg|topn|rank|compare_yoy|compare_mom", "topn": int|null},\n'
+            '    "signals": [str]\n'
+            "  }\n"
+            "}\n"
             "Notes:\n"
             "- rewritten_query MUST be a self-contained question in Chinese; if already self-contained, keep it identical.\n"
             "- If dependency results contain ID/code/name together, prefer ID/code in rewritten_query because they are stronger constraints.\n"
             "- If dependency results are empty, do not fabricate a concrete entity.\n"
             "- Populate time ONLY when explicitly mentioned; otherwise time MUST be null.\n"
             "- Return JSON only, without any extra explanations."
-        ).format(
-            current_date=current_date,
-            query=query,
-            history_text=history_text,
-            dependencies_text=dependencies_text,
         )
 
         if query_id:
@@ -222,15 +241,18 @@ Follow these rules strictly:
         if not rewritten_query:
             rewritten_query = query
         if not isinstance(parse_result, dict):
-            raise ValueError("LLM 输出不符合 schema：parse_result 不是对象")
+            raise ValueError(  # noqa: TRY004 - 节点输出契约沿用 ValueError
+                "LLM 输出不符合 schema：parse_result 不是对象"
+            )
 
         return rewritten_query, parse_result
 
-    def parse(self, query: str, current_date: Optional[str] = None) -> Dict[str, Any]:
+    def parse(self, query: str, current_date: str | None = None) -> dict[str, Any]:
         _, parse_result = self.parse_with_rewrite(query, current_date=current_date)
         return parse_result
 
-def question_parsing_node(state: SQLGenerationState) -> Dict[str, Any]:
+
+def question_parsing_node(state: SQLGenerationState) -> dict[str, Any]:
     """子图中的问题解析节点"""
 
     query_id = state.get("query_id", "unknown")
@@ -249,7 +271,7 @@ def question_parsing_node(state: SQLGenerationState) -> Dict[str, Any]:
 
     # 2. 加载配置，判断是否启用内部解析
     config = load_subgraph_config("sql_generation")
-    parsing_config = (config.get("question_parsing") or {})
+    parsing_config = config.get("question_parsing") or {}
 
     if not parsing_config.get("enable_internal_parser", True):
         qlog.info("内部解析已禁用，返回空解析结果")
@@ -262,7 +284,9 @@ def question_parsing_node(state: SQLGenerationState) -> Dict[str, Any]:
     agent = QuestionParsingAgent(parsing_config)
 
     try:
-        qlog.debug(f"question_parsing 收到 dependencies_results={len(dependencies_results)}")
+        qlog.debug(
+            f"question_parsing 收到 dependencies_results={len(dependencies_results)}"
+        )
         qlog.info("开始执行问题解析")
         rewritten_query, parse_result = agent.parse_with_rewrite(
             query=query,
@@ -272,18 +296,18 @@ def question_parsing_node(state: SQLGenerationState) -> Dict[str, Any]:
         )
         qlog.info("问题解析完成")
         qlog.debug(f"rewritten_query={rewritten_query}")
-        
+
         # 详细记录解析结果
         qlog.debug("========== 问题解析结果 ==========")
         qlog.debug(json.dumps(parse_result, ensure_ascii=False, indent=2))
         qlog.debug("====================================")
-        
+
         return {
             "parse_result": parse_result,
             "parsing_source": "llm",
             "rewritten_query": rewritten_query,
         }
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - 节点保留原有回退契约
         qlog.error(f"问题解析失败: {exc}", exc_info=True)
         if parsing_config.get("fallback_to_empty", True):
             qlog.warning("使用空解析结果作为回退")
