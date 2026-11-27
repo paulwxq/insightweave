@@ -253,11 +253,9 @@ CLI JSON 输出单测仍运行真实子进程，但对 doctor 的业务库/平�
 
 ## NL2SQL 日志级别
 
-Docker 镜像默认 `NL2SQL_LOG_LEVEL=INFO`（覆盖 YAML 的 DEBUG），完整提示词不输出、日志量大幅减少。
+容器与本地运行使用同一份日志配置。未设置 `NL2SQL_LOG_LEVEL` 时，`nl2sql` 业务 logger 和 `nl2sql_file` 文件处理器使用 `DEBUG`，控制台处理器和 `nl2sql.api` 使用 `INFO`。[logging.yaml](../nl2sql/src/configs/logging.yaml)
 
-**临时排查**（doc 16 起）：在开发 `nl2sql/.env` 里设置 `NL2SQL_LOG_LEVEL=DEBUG`，然后按上面"修改配置"的生效方式对最新 main 完整发布一次（自动排空+重建+冒烟）。恢复时把它改回 `INFO` 或删去这一行，再发布一次。doc 16 生效前，这一项是直接改运行目录的 `config/nl2sql.env`；该文件现在由发布生成，改它不会生效。
-
-**注意**：修改后需**重新创建容器**（`--force-recreate`），`restart` 不加载新 env（见上）。
+需要将业务日志调为 `INFO` 时，在开发工作区的 `nl2sql/.env` 显式设置 `NL2SQL_LOG_LEVEL=INFO`。删除这一项会恢复 YAML 中的 `DEBUG`。按本手册「修改配置」的流程完整发布，重建容器后配置生效。
 
 ## 已知边界（M-4 / M-7）
 
