@@ -26,12 +26,41 @@ GIT_SHA=$(git rev-parse HEAD)
 log "源码提交：$GIT_SHA"
 
 # ---------------------------------------------------------------- 2) 构建三镜像（§7.2）
+# 前端使用开发工作区中的 Docker 构建配置。只传递两个 API 地址，不传递 env 文件。
+frontend_env_file="${INSIGHTWEAVE_DEV_PROJECT_ROOT:?需要 INSIGHTWEAVE_DEV_PROJECT_ROOT}/frontend/.env.docker.local"
+env_sync_python="${INSIGHTWEAVE_ENV_SYNC_PYTHON:?需要 INSIGHTWEAVE_ENV_SYNC_PYTHON}"
+frontend_origins=$("$env_sync_python" -B - "$frontend_env_file" <<'PY'
+import sys
+from pathlib import Path
+
+from deploy.scripts.prepare_app_env import SyncError, load_parser, read_env_file
+
+path = Path(sys.argv[1])
+names = ("VITE_API_BASE_URL", "VITE_NL2SQL_API_BASE_URL")
+try:
+    values = read_env_file(load_parser(), "frontend", path, "Docker 构建配置")
+    for name in names:
+        if not values.get(name, "").strip():
+            raise SyncError(f"{path} 缺少非空的 {name}")
+except SyncError as exc:
+    sys.exit(str(exc))
+print(*(values[name] for name in names), sep="\n")
+PY
+) || die "无法读取前端构建配置"
+mapfile -t frontend_origins <<< "$frontend_origins"
+
 build_args=()
 [ -n "$BUILD_PROXY" ] && build_args=(--build-arg HTTP_PROXY="$BUILD_PROXY" --build-arg HTTPS_PROXY="$BUILD_PROXY" --build-arg NO_PROXY="$no_proxy")
 for spec in "metaweave metaweave/Dockerfile" "nl2sql nl2sql/Dockerfile" "frontend frontend/Dockerfile"; do
   set -- $spec
   app_build_args=("${build_args[@]}")
-  [ "$1" = frontend ] && app_build_args+=(--build-arg "APP_GIT_SHA=$GIT_SHA")
+  if [ "$1" = frontend ]; then
+    app_build_args+=(
+      --build-arg "APP_GIT_SHA=$GIT_SHA"
+      --build-arg "VITE_API_BASE_URL=${frontend_origins[0]}"
+      --build-arg "VITE_NL2SQL_API_BASE_URL=${frontend_origins[1]}"
+    )
+  fi
   log "构建 insightweave/$1:$RELEASE_ID"
   $DOCKER_BIN buildx build --builder default --platform linux/amd64 --load \
     "${app_build_args[@]}" -f "$2" -t "insightweave/$1:$RELEASE_ID" "$REPO_ROOT" \

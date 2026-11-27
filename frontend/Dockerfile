@@ -7,11 +7,13 @@ RUN npm ci --include=dev
 COPY frontend/index.html frontend/vite.config.ts frontend/tsconfig.json ./
 COPY frontend/src ./src
 COPY frontend/public ./public
-# 固定 API origin（doc 13 §4.1；构建后固化，改 origin 需重建镜像）
-ARG VITE_API_BASE_URL=http://localhost:18080
-ARG VITE_NL2SQL_API_BASE_URL=http://localhost:18080
+# API origin 由 ci.sh 传入，Vite 构建时写入静态文件。
+ARG VITE_API_BASE_URL
+ARG VITE_NL2SQL_API_BASE_URL
 ARG APP_GIT_SHA
-RUN APP_GIT_SHA="$APP_GIT_SHA" VITE_API_BASE_URL=$VITE_API_BASE_URL VITE_NL2SQL_API_BASE_URL=$VITE_NL2SQL_API_BASE_URL npm run build
+RUN : "${VITE_API_BASE_URL:?需要 VITE_API_BASE_URL}" \
+      "${VITE_NL2SQL_API_BASE_URL:?需要 VITE_NL2SQL_API_BASE_URL}" \
+    && npm run build
 
 FROM docker.io/library/nginx:1.30.6-trixie@sha256:42c68eab6f7e22611786a9fe1d1c019e275c50185bd54b8f75dc2b9184322703
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl && rm -rf /var/lib/apt/lists/*
