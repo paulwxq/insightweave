@@ -627,6 +627,18 @@ class TestComposeSevenServices:
             assert services[name].get("pull_policy") == "never", name
             assert "${" in services[name]["image"], f"{name} 镜像须经 deploy.env 插值"
 
+    def test_backend_env_files_are_read_in_raw_format(self):
+        """doc 16 §4：两个后端的 env 文件由发布程序生成，Compose 必须按 raw 读取，
+        否则值里的 $ 会被 Compose 插值、引号会被当成语法而不是字面值。"""
+        services = _compose()["services"]
+        for name, var in (
+            ("metaweave", "METAWEAVE_ENV_FILE"),
+            ("nl2sql", "NL2SQL_ENV_FILE"),
+        ):
+            assert services[name]["env_file"] == [
+                {"path": f"${{{var}:?deploy.env 需提供 {var}}}", "format": "raw"}
+            ], name
+
     def test_exactly_five_loopback_port_mappings(self):
         expected = {
             "frontend": {"127.0.0.1:18080:80"},
@@ -849,24 +861,58 @@ class TestEnvTemplates:
         ):
             assert key in text, key
 
-    def test_backend_env_templates(self):
+    def _override_template(self, name):
+        """用同步工具同一个解析器读取覆盖文件模板，返回变量字典。"""
+        import io
+
+        from dotenv.parser import parse_stream
+
+        path = REPO_ROOT / "deploy" / "env" / f"{name}.env.example"
+        bindings = parse_stream(io.StringIO(path.read_text(encoding="utf-8")))
+        assert not any(binding.error for binding in bindings), name
+        return {
+            binding.key: binding.value
+            for binding in parse_stream(io.StringIO(path.read_text(encoding="utf-8")))
+            if binding.key is not None
+        }
+
+    def test_backend_env_templates_list_only_docker_specific_variables(self):
+        """doc 16 §2、§4：两个模板是 Docker 覆盖文件的模板，只列 Docker 部署专用的变量；
+        应用变量（LLM 密钥、业务库连接、日志级别）来自开发 .env，由发布程序合并生成。"""
+        shared = {
+            "PLATFORM_DB_HOST", "PLATFORM_DB_PORT", "PLATFORM_DB_NAME",
+            "PLATFORM_DB_USER", "PLATFORM_DB_PASSWORD", "SOURCE_CREDENTIAL_KEY",
+            "NEO4J_URI", "NEO4J_USER", "NEO4J_PASSWORD", "NEO4J_DATABASE",
+            "MILVUS_HOST", "MILVUS_PORT", "MILVUS_DATABASE", "MILVUS_USER",
+            "MILVUS_PASSWORD", "DEPLOY_CONTROL_ENABLED", "DEPLOY_CONTROL_TOKEN",
+        }
+        for name, extra in (
+            ("metaweave", {"PLATFORM_CORS_ORIGINS"}),
+            (
+                "nl2sql",
+                {
+                    "LANGGRAPH_DB_HOST", "LANGGRAPH_DB_PORT", "LANGGRAPH_DB_NAME",
+                    "LANGGRAPH_DB_USER", "LANGGRAPH_DB_PASSWORD",
+                    "NL2SQL_CORS_ORIGINS", "NL2SQL_ALLOWED_HOSTS",
+                },
+            ),
+        ):
+            values = self._override_template(name)
+            assert set(values) == shared | extra, name
+
+    def test_backend_env_templates_pin_browser_and_control_settings(self):
         for name, cors_key in (
             ("metaweave", "PLATFORM_CORS_ORIGINS"),
             ("nl2sql", "NL2SQL_CORS_ORIGINS"),
         ):
-            text = (REPO_ROOT / "deploy" / "env" / f"{name}.env.example").read_text(
-                encoding="utf-8"
-            )
-            assert (
-                f"{cors_key}=http://localhost:18080,http://127.0.0.1:18080" in text
-            ), name
-            assert "SOURCE_CREDENTIAL_KEY=" in text, name
-            assert "DEPLOY_CONTROL_ENABLED=1" in text, name
-            assert "DEPLOY_CONTROL_TOKEN=" in text, name
-            assert "DASHSCOPE_API_KEY=" in text, name
+            values = self._override_template(name)
+            assert values[cors_key] == "http://localhost:18080,http://127.0.0.1:18080", name
+            assert values["DEPLOY_CONTROL_ENABLED"] == "1", name
             # 不配置运行期代理
-            assert not re.search(r"^https?_PROXY=\S+", text, re.MULTILINE), name
-        nl = (REPO_ROOT / "deploy" / "env" / "nl2sql.env.example").read_text(
-            encoding="utf-8"
+            assert not any(
+                key.upper() in {"HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"} and value
+                for key, value in values.items()
+            ), name
+        assert self._override_template("nl2sql")["NL2SQL_ALLOWED_HOSTS"] == (
+            "localhost,127.0.0.1"
         )
-        assert "NL2SQL_ALLOWED_HOSTS=localhost,127.0.0.1" in nl

@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# deploy.sh —— 本地发布编排（doc 13 §6/§7/§8.1；任务 4）
+# deploy.sh —— 本地发布编排（doc 13 §6/§7/§8.1；任务 4；后端 env 随发布同步见 doc 16 §3）
 # 用法：
 #   deploy.sh bootstrap <release_id>   首次安装/重试（§6）
-#   deploy.sh release   <release_id>   日常发布（§7.1/§7.4）
+#   deploy.sh release   <release_id>   日常发布（§7.1/§7.4）；必须提供 CANDIDATE_APP_CONFIG_DIR，
+#                                      且 release_id 不能是当前 current（doc 16 §3.1）
 #   deploy.sh rollback  <release_id>   仅 current/previous（§7.3.1）
 # 仅在本机执行；与 GitHub Actions 调同一脚本。测试经 DOCKER_BIN/CURL_BIN/
 # PYTHON_BIN/COMPOSE_FILE/DEPLOY_ROOT 注入替身。
@@ -17,6 +18,11 @@ DOCKER_BIN="${DOCKER_BIN:-docker --context default}"
 CURL_BIN="${CURL_BIN:-curl}"
 PYTHON_BIN="${PYTHON_BIN:-${INSIGHTWEAVE_CI_PYTHON:-python3}}"
 BACKENDS="metaweave nl2sql"
+# doc 16：正式配置是部署根目录 config/ 里的两份文件；本脚本的 Compose 调用、受保护变量比较、
+# 正式文件的更新与恢复共用这一组路径（见 use_formal_app_config），不取 deploy.env 或调用方环境里的取值。
+# release 只在目标配置预检、创建候选容器和验收时临时切到候选配置。
+CANDIDATE_APP_CONFIG_DIR="${CANDIDATE_APP_CONFIG_DIR:-}"
+CANDIDATE_RID=""
 MANIFEST_TOOL="$(cd "$(dirname "$BASH_SOURCE")" && pwd)/release_manifest.py"
 
 STATE_DIR="$DEPLOY_ROOT/state"; STATE_FILE="$STATE_DIR/deployment.json"
@@ -33,12 +39,28 @@ mkdir -p "$STATE_DIR" "$RELEASES_DIR" "$CONTROL_DIR" "$LOG_DIR"
 
 # ---------------------------------------------------------------- 状态（原子）
 
-state_write() {  # state_write <phase> <current> <previous> <op>
-  $PYTHON_BIN - "$STATE_FILE" "$1" "$2" "$3" "$4" <<'PY' || return 1
+state_write() {  # state_write <phase> <current> <previous> <op> [--pending <release_id>|--clear-pending]
+  local pending="keep"
+  case "${5-}" in
+    "") ;;
+    --pending) pending="set:$6" ;;
+    --clear-pending) pending="clear" ;;
+    *) die "state_write 未知参数：$5" ;;
+  esac
+  $PYTHON_BIN - "$STATE_FILE" "$1" "$2" "$3" "$4" "$pending" <<'PY' || return 1
 import json, os, sys, tempfile
-path, phase, current, previous, op = sys.argv[1:6]
+path, phase, current, previous, op, pending = sys.argv[1:7]
 data = {"phase": phase, "current": current or None, "previous": previous or None,
         "last_operation": op, "updated_at": __import__("datetime").datetime.now().isoformat(timespec="seconds")}
+# doc 16：待恢复 ID 默认随每次状态更新保留，只有成功发布、成功恢复或维护者确认后才显式清除
+if pending == "keep":
+    try:
+        with open(path, encoding="utf-8") as existing:
+            pending = "set:" + json.load(existing)["pending_config_release_id"]
+    except (OSError, ValueError, KeyError, TypeError):
+        pending = "clear"
+if pending.startswith("set:"):
+    data["pending_config_release_id"] = pending[4:]
 d = os.path.dirname(path)
 fd, tmp = tempfile.mkstemp(dir=d)
 with os.fdopen(fd, "w") as f:
@@ -62,6 +84,7 @@ lock_run() { exec 9>"$LOCK_FILE"; flock -n 9 || die "另一发布进程持有锁
 on_exit() {  # 只收尾本次已经开始的变更，不修改预检拒绝时的成功状态
   local status=$?
   trap - EXIT
+  use_formal_app_config  # doc 16 §3.3：异常收尾如需调用容器控制接口，使用正式 env 路径
   if [ "$status" -ne 0 ] && [ "$OPERATION_STARTED" = 1 ] && [ "$(state_get phase)" = deploying ]; then
     # 失败可能发生在 leave/普通冒烟之后，保留重启时可见的标记并尽力关闭存活入口。
     mkdir -p "$CONTROL_DIR" && : > "$CONTROL_DIR/maintenance" || log "无法重建维护标记"
@@ -138,6 +161,202 @@ snapshot_release() {  # CI 身份 + 非敏感配置；全部核验后原子发�
     --releases-dir "$RELEASES_DIR"
 }
 
+# ---------------------------------------------------------------- 后端 env（doc 16 §3）
+
+valid_release_id() { [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]]; }
+
+formal_env_file() { printf '%s/config/%s.env' "$DEPLOY_ROOT" "$1"; }
+
+raw_env_value() {  # raw_env_value <文件> <变量名>：每行按第一个 = 分隔，其后直到行末都是值
+  awk -v key="$2" 'index($0, key "=") == 1 { print substr($0, length(key) + 2); exit }' "$1"
+}
+
+use_candidate_app_config() {  # 仅 release 的目标配置预检、创建候选容器与验收阶段
+  export METAWEAVE_ENV_FILE="$CANDIDATE_APP_CONFIG_DIR/metaweave.env"
+  export NL2SQL_ENV_FILE="$CANDIDATE_APP_CONFIG_DIR/nl2sql.env"
+}
+
+use_formal_app_config() {  # 排空旧容器、所有恢复分支与其余命令：Compose 与文件操作共用这一组路径
+  export METAWEAVE_ENV_FILE="$(formal_env_file metaweave)"
+  export NL2SQL_ENV_FILE="$(formal_env_file nl2sql)"
+}
+
+check_candidate_app_config() {  # 候选目录必须属于本次发布，并包含两份仅属主可读写的文件
+  local rid="$1" want svc
+  want="$DEPLOY_ROOT/config/.pending/$rid"
+  [ -n "$CANDIDATE_APP_CONFIG_DIR" ] \
+    || die "release 需要 CANDIDATE_APP_CONFIG_DIR（doc 16 §3.2）：缺少候选配置，不发布"
+  [ "$CANDIDATE_APP_CONFIG_DIR" = "$want" ] \
+    || die "候选配置目录不属于本次发布：需要 $want，实际为 $CANDIDATE_APP_CONFIG_DIR"
+  for svc in $BACKENDS; do
+    [ -f "$want/$svc.env" ] || die "候选配置缺少 $svc.env：$want"
+    [ "$(stat -c %a "$want/$svc.env")" = 600 ] \
+      || die "候选配置 $svc.env 必须仅属主可读写（0600）：$want"
+  done
+  CANDIDATE_RID="$rid"
+}
+
+check_raw_env_format() {  # 快照里的两个后端必须用 format: raw 读取 env_file（doc 16 §3.2、§3.3）
+  local file="$1"
+  $PYTHON_BIN - "$file" $BACKENDS <<'PY' || { log "Compose 快照未按 format: raw 读取后端 env_file，停止：$file"; return 1; }
+import re, sys
+
+path, *services = sys.argv[1:]
+lines = open(path, encoding="utf-8").read().splitlines()
+
+
+def uses_raw(service):
+    start = next(
+        (
+            i
+            for i, line in enumerate(lines)
+            if re.match(rf"^  {re.escape(service)}:\s*(#.*)?$", line)
+        ),
+        None,
+    )
+    if start is None:
+        return False
+    block = []
+    for line in lines[start + 1 :]:
+        if (
+            line.strip()
+            and not line.startswith("    ")
+            and not line.lstrip().startswith("#")
+        ):
+            break  # 下一个服务或顶级键
+        block.append(line)
+    for i, line in enumerate(block):
+        if not re.match(r"    env_file:\s*(#.*)?$", line):
+            continue
+        entries = []
+        for entry in block[i + 1 :]:
+            if (
+                entry.strip()
+                and not entry.startswith("      ")
+                and not entry.lstrip().startswith("#")
+            ):
+                break  # env_file 之后的下一个键
+            entries.append(entry)
+        text = "\n".join(entries)
+        return len(re.findall(r"^\s*-\s", text, re.M)) == 1 and re.search(
+            r"^\s*format:\s*raw\s*(#.*)?$", text, re.M
+        ) is not None
+    return False
+
+
+bad = [service for service in services if not uses_raw(service)]
+if bad:
+    print("未使用 format: raw 的后端：" + "、".join(bad), file=sys.stderr)
+sys.exit(1 if bad else 0)
+PY
+}
+
+compare_protected_app_config() {  # 候选的控制令牌与数据源加密密钥必须与正式值一致（doc 16 §4）
+  local svc key
+  for svc in $BACKENDS; do
+    for key in DEPLOY_CONTROL_TOKEN SOURCE_CREDENTIAL_KEY; do
+      if [ -z "$(raw_env_value "$CANDIDATE_APP_CONFIG_DIR/$svc.env" "$key")" ] || [ "$(raw_env_value "$CANDIDATE_APP_CONFIG_DIR/$svc.env" "$key")" != "$(raw_env_value "$(formal_env_file "$svc")" "$key")" ]; then
+        # 旧容器的排空和 apps_smoke 依赖正式令牌；密钥变了就解不开已登记的数据源凭据
+        log "$svc 的 $key 与正式配置不一致或无法确认，拒绝发布"
+        return 1
+      fi
+    done
+  done
+}
+
+check_shared_credential_key() {  # check_shared_credential_key <metaweave.env> <nl2sql.env>
+  # doc 16 §2、§4：两个服务使用同一把数据源加密密钥，否则 NL2SQL 解不开 MetaWeave 登记的数据源凭据。
+  # 各服务在目标配置预检里只能看到自己的值，所以两个服务之间是否一致在这里比较；日志只报结果。
+  local metaweave_key nl2sql_key
+  metaweave_key=$(raw_env_value "$1" SOURCE_CREDENTIAL_KEY)
+  nl2sql_key=$(raw_env_value "$2" SOURCE_CREDENTIAL_KEY)
+  if [ -z "$metaweave_key" ] || [ "$metaweave_key" != "$nl2sql_key" ]; then
+    log "两个服务的 SOURCE_CREDENTIAL_KEY 缺失或不一致，拒绝继续（doc 16 §2）"
+    return 1
+  fi
+}
+
+config_change_log() {  # 每个服务一行：只含服务名与新增、修改、删除的变量名（doc 16 §3.2）
+  local svc
+  for svc in $BACKENDS; do
+    $PYTHON_BIN - "$svc" "$CANDIDATE_APP_CONFIG_DIR/$svc.env" "$(formal_env_file "$svc")" <<'PY' || return 1
+import sys
+
+service, candidate, formal = sys.argv[1:4]
+
+
+def load(path):
+    values = {}
+    for line in open(path, encoding="utf-8").read().split("\n"):
+        key, sep, value = line.partition("=")  # raw 规则：第一个 = 之后直到行末都是值
+        if sep and not key.startswith("#"):
+            values[key] = value
+    return values
+
+
+new, old = load(candidate), load(formal)
+added = sorted(key for key in new if key not in old)
+changed = sorted(key for key in new if key in old and new[key] != old[key])
+removed = sorted(key for key in old if key not in new)
+parts = [
+    f"{label} {'、'.join(names)}"
+    for label, names in (("新增", added), ("修改", changed), ("删除", removed))
+    if names
+]
+print(f"{service}：" + ("；".join(parts) if parts else "无变化"))
+PY
+  done
+}
+
+promote_app_config() {  # 验收通过后更新正式配置（doc 16 §3.2 第 4 步）；调用方负责失败后的恢复
+  local rid="$1" svc backup tmp
+  backup="$CANDIDATE_APP_CONFIG_DIR/previous"
+  mkdir -m 0700 "$backup" || return 1
+  for svc in $BACKENDS; do
+    install -m 0600 "$(formal_env_file "$svc")" "$backup/$svc.env" || return 1
+  done
+  sync -f "$backup" || return 1  # 备份落盘之后才开始替换
+  state_write deploying "$(state_get current)" "$(state_get previous)" \
+    "$(state_get last_operation)" --pending "$rid" || return 1
+  for svc in $BACKENDS; do
+    tmp="$(formal_env_file "$svc").new-$rid"
+    install -m 0600 "$CANDIDATE_APP_CONFIG_DIR/$svc.env" "$tmp" || return 1
+    sync -f "$tmp" || return 1
+    mv -f -- "$tmp" "$(formal_env_file "$svc")" || return 1  # 同目录改名：单文件原子替换
+  done
+  return 0
+}
+
+replace_formal_app_config() {  # 用登记的备份（<候选目录>/previous）整组替换两份正式 env
+  local backup="$1" svc tmp rid="${1%/previous}"
+  rid="${rid##*/}"
+  # 先核对整组备份，通过后才开始改写：缺任何一份或读不了时，两份正式文件都保持原样（doc 16 §3.3）
+  for svc in $BACKENDS; do
+    { [ -f "$backup/$svc.env" ] && [ -r "$backup/$svc.env" ]; } \
+      || { log "登记的备份不完整或不可读，缺 $svc.env；两份正式文件均未改动：$backup"; return 1; }
+  done
+  for svc in $BACKENDS; do
+    tmp="$(formal_env_file "$svc").restore-$rid"
+    install -m 0600 "$backup/$svc.env" "$tmp" || return 1
+    mv -f -- "$tmp" "$(formal_env_file "$svc")" || return 1
+  done
+  return 0
+}
+
+remove_app_config_temps() {  # 只清理本脚本自己命名的临时文件（<服务>.env.new-*、.restore-*）
+  local svc
+  for svc in $BACKENDS; do
+    rm -f -- "$(formal_env_file "$svc").new-"* "$(formal_env_file "$svc").restore-"*
+  done
+}
+
+cleanup_candidate_app_config() {  # 候选目录通过归属核对（CANDIDATE_RID 非空）后才允许删除
+  if [ -n "$CANDIDATE_RID" ] && valid_release_id "$CANDIDATE_RID" \
+    && [ "$CANDIDATE_APP_CONFIG_DIR" = "$DEPLOY_ROOT/config/.pending/$CANDIDATE_RID" ]; then
+    rm -rf -- "$CANDIDATE_APP_CONFIG_DIR"
+  fi
+}
+
 # ---------------------------------------------------------------- 控制与排空（§7.5）
 
 control_call() {  # control_call <service> <enter|state|leave>
@@ -191,6 +410,7 @@ drain() {  # 写 marker → enter → 等 active==0；超时取消发布（不�
   printf '[deploy] 排空超时（%ss）：未替换任何容器\n' "$DRAIN_TIMEOUT" >&2
   current=$(state_get current); previous=$(state_get previous)
   # 原先已经维护的未知现场继续保持关闭；正常发布取消后须核验旧版本才可恢复 ready。
+  # （调用 drain 时一律已是正式 env，见 cmd_release、cmd_bootstrap、cmd_rollback）
   if [ "$had_marker" = 0 ] && [ -n "$current" ] && undrain \
      && load_release_snapshot "$current" && verify_current_release "$current"; then
     state_write ready "$current" "$previous" "排空超时，原版本已核验恢复" || return 1
@@ -358,7 +578,13 @@ cmd_bootstrap() {
   fi
   snapshot_release "$rid" || return 1
   load_release_snapshot "$rid" || return 1
+  # doc 16 §3.2：bootstrap 登记的快照就是此后每次 release 的 current 基线，必须按 format: raw 读取后端 env，
+  # 否则基线一旦登记，之后的 release 全部被拒绝。
+  check_raw_env_format "$COMPOSE_FILE" || return 1
   precheck_ports || return 1
+  # doc 16 §2、§4：全新开发栈和重新初始化都在这里经过（§4.1 第 3 步已把候选文件装到正式路径），
+  # 两个后端的数据源加密密钥必须非空且一致，在任何变更之前核对。
+  check_shared_credential_key "$(formal_env_file metaweave)" "$(formal_env_file nl2sql)" || return 1
   state_write deploying "" "" "bootstrap $rid"        # §7.3.1：任何变更前记录
   # 首次启动也先写维护标记；重试只排空 Docker 确认仍在运行的后端。
   drain
@@ -385,22 +611,37 @@ cmd_bootstrap() {
 # ---------------------------------------------------------------- release（§7.1/§7.4）
 
 cmd_release() {
-  local rid="$1" phase current previous
+  local rid="$1" phase current previous changes
   phase=$(state_get phase); current=$(state_get current); previous=$(state_get previous)
   [ "$phase" = ready ] || die "release 只接受 ready 现场（当前：${phase:-无状态}）"
-  if [ "$current" = "$rid" ]; then
-    check_same_version release "$rid" "$previous"; return $?
-  fi
+  # doc 16 §3.1：应用新配置必须用新的 release_id；同版本只读核验走 bootstrap/rollback
+  [ "$current" != "$rid" ] \
+    || die "release $rid 与当前 current 相同：应用新配置必须使用新的 release_id（doc 16 §3.1）"
   [ ! -e "$CONTROL_DIR/maintenance" ] || die "存在维护标记：先恢复（rollback）"
+  check_candidate_app_config "$rid"
   # 在变更前确认旧版本具备可用快照，不猜测旧格式里缺失的信息。
   check_release_snapshot "$current" || return 1
   snapshot_release "$rid" || return 1
   load_release_snapshot "$rid" || return 1
+  # doc 16：当前快照和候选快照都必须按 raw 读取后端 env，否则正式配置会被错误解析
+  check_raw_env_format "$RELEASES_DIR/$current/compose.yaml" || return 1
+  check_raw_env_format "$RELEASES_DIR/$rid/compose.yaml" || return 1
+  compare_protected_app_config || return 1
+  check_shared_credential_key "$CANDIDATE_APP_CONFIG_DIR/metaweave.env" \
+    "$CANDIDATE_APP_CONFIG_DIR/nl2sql.env" || return 1
+  changes=$(config_change_log) || return 1
+  use_candidate_app_config  # 目标配置预检、创建候选容器和验收使用候选配置
   precheck_ports || return 1
   preflight_existing_services "$rid" || return 1
+  # doc 16 §3.2 第 3 步：排空旧容器使用正式配置。旧容器是用当前快照和正式 env 创建的，
+  # 所以先切回当前快照和正式配置排空；排空后再载入候选快照、切到候选配置重建。
+  load_release_snapshot "$current" || return 1
+  use_formal_app_config
   state_write deploying "$current" "$previous" "release $rid"
   local ok=1
   drain
+  load_release_snapshot "$rid" || return 1
+  use_candidate_app_config
   bring_up_apps "$rid" || ok=0
   if [ "$ok" = 1 ]; then
     apps_smoke maintenance || ok=0
@@ -408,10 +649,24 @@ cmd_release() {
       if undrain; then apps_smoke public || ok=0; else ok=0; fi
     fi
     if [ "$ok" = 1 ]; then verify_running_images "$rid" || ok=0; fi
+    if [ "$ok" = 1 ] && ! promote_app_config "$rid"; then
+      # doc 16 §3.3 可处理的错误。登记待恢复 ID 成功之后正式文件才开始被替换，所以以状态里的登记为准：
+      # 已登记则先从登记的备份恢复两份正式文件；未登记则正式文件尚未改动，不需要恢复。
+      # 两种情况都走下面的原版本自动恢复。
+      if [ "$(state_get pending_config_release_id)" = "$rid" ]; then
+        log "更新正式配置失败：从登记的备份恢复两份正式文件"
+        replace_formal_app_config "$CANDIDATE_APP_CONFIG_DIR/previous" || return 1
+      else
+        log "更新正式配置失败：正式文件尚未改动"
+      fi
+      remove_app_config_temps
+      ok=0
+    fi
   fi
   if [ "$ok" = 0 ]; then
     log "发布失败：恢复 current=$current（§7.4）"
-    # 候选可能已经开放过入口；先重新关闭并排空，再做恢复预检。
+    # 候选可能已经开放过入口；先重新关闭并排空，再做恢复预检。恢复分支一律使用正式 env。
+    use_formal_app_config
     drain
     if [ -n "$current" ]; then
       precheck_ports || return 1
@@ -421,20 +676,24 @@ cmd_release() {
       apps_smoke maintenance
       undrain; apps_smoke public
       verify_running_images "$current" || return 1
-      state_write ready "$current" "$previous" "release $rid 失败已回退"
+      state_write ready "$current" "$previous" "release $rid 失败已回退" --clear-pending
+      cleanup_candidate_app_config
       die "原发布失败（已恢复 $current）"
     fi
     state_write recovery_required "" "" "release $rid 失败且无旧版本"
     die "首次安装失败：无旧版本可退（§7.4）"
   fi
-  state_write ready "$rid" "$current" "release $rid"
+  # 新 current、ready 与清除待恢复 ID 写入同一次状态更新（doc 16 §3.2 第 4 步）
+  state_write ready "$rid" "$current" "release $rid" --clear-pending
+  cleanup_candidate_app_config
+  while IFS= read -r line; do [ -n "$line" ] && log "配置变更 $line"; done <<< "$changes"
   log "发布完成：current=$rid previous=$current"
 }
 
 # ---------------------------------------------------------------- rollback（§7.3.1）
 
 cmd_rollback() {
-  local rid="$1" phase current previous
+  local rid="$1" phase current previous pending
   phase=$(state_get phase); current=$(state_get current); previous=$(state_get previous)
   [ "$rid" = "$current" ] || { [ -n "$previous" ] && [ "$rid" = "$previous" ]; } \
     || die "rollback 目标必须是 current($current) 或 previous($previous)（§7.3.1）"
@@ -451,6 +710,14 @@ cmd_rollback() {
     state_write recovery_required "$current" "$previous" "rollback $rid 现场不符，准备恢复"
     log "同版本现场不符，按目标快照实际恢复 $rid"
   fi
+  # doc 16 §3.3：有待恢复 ID 时，先从登记的备份恢复整组正式 env；备份不完整就保留现场等待人工核验
+  pending=$(state_get pending_config_release_id)
+  if [ -n "$pending" ]; then
+    valid_release_id "$pending" || { log "待恢复 ID 不合法：$pending"; return 1; }
+    replace_formal_app_config "$DEPLOY_ROOT/config/.pending/$pending/previous" || return 1
+  fi
+  # 正式 env 是 raw 文件：目标快照若不按 raw 读取，替换容器后会把它解析错
+  check_raw_env_format "$COMPOSE_FILE" || return 1
   precheck_ports || return 1
   preflight_existing_services "$rid" --allow-missing-backends || return 1
   state_write deploying "$current" "$previous" "rollback $rid"
@@ -460,15 +727,20 @@ cmd_rollback() {
   undrain; apps_smoke public
   verify_running_images "$rid" || return 1
   if [ "$rid" = "$current" ]; then
-    state_write ready "$current" "$previous" "rollback $current（实际恢复，保留 previous）"
+    state_write ready "$current" "$previous" "rollback $current（实际恢复，保留 previous）" --clear-pending
   else
-    state_write ready "$rid" "$current" "rollback $rid"
+    state_write ready "$rid" "$current" "rollback $rid" --clear-pending
   fi
+  remove_app_config_temps
+  if [ -n "$pending" ]; then rm -rf -- "$DEPLOY_ROOT/config/.pending/$pending"; fi  # 成功恢复后才清理备份
   log "rollback 完成：current=$(state_get current) previous=$(state_get previous)"
 }
 
 main() {
   lock_run
+  # doc 16：三类命令都从正式配置出发，Compose 与正式文件的比对、更新、恢复由此共用同一组路径；
+  # 只有 release 在预检后临时切到候选配置。
+  use_formal_app_config
   trap on_exit EXIT
   local cmd="${1:-}"; shift || true
   case "$cmd" in

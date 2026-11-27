@@ -41,15 +41,17 @@ PR 合并到公开仓 paulwxq/insightweave 的 main
 /home/iw-runner/insightweave-runtime/     ← DEPLOY_ROOT（持久，不入 Git）
 ├── deploy.env               # Compose 插值：数据库密码、镜像 tag
 ├── config/
-│   ├── metaweave.env        # MetaWeave 运行环境（含 LLM key、业务库连接）
-│   └── nl2sql.env           # NL2SQL 运行环境（同上 + LangGraph 持久化）
+│   ├── metaweave.env        # MetaWeave 运行环境（含 LLM key、业务库连接）；由发布程序生成，不手工编辑
+│   ├── nl2sql.env           # NL2SQL 运行环境（同上 + LangGraph 持久化）；由发布程序生成，不手工编辑
+│   ├── overrides/           # Docker 专用覆盖（metaweave.env、nl2sql.env），由维护者填写（doc 16 §2）
+│   └── .pending/<release_id>/   # 本次发布的候选配置与正式配置备份；发布结束后清理
 ├── control/                 # 维护标记（发布期间自动创建/移除）
 ├── state/deployment.json    # 当前/上一版本引用与 phase
 ├── releases/<release_id>/   # manifest.json、Compose、契约及必要相对配置
 └── logs/                    # 部署日志（保留最近 20 次）
 ```
 
-**所有含密钥的文件权限 0600、属主 iw-runner，不入 Git、不进镜像。**
+**所有含密钥的文件权限 0600、属主 iw-runner，不入 Git、不进镜像。** 两份运行环境 env 自 [doc 16](../docs/16_后端环境配置随发布同步设计.md) 起由每次发布生成：私有入口在构建前运行 `deploy/scripts/prepare_app_env.py`，读取开发工作区的 `metaweave/.env`、`nl2sql/.env`，叠加 `config/overrides/` 里同名优先的变量，写成本次 `release_id` 的候选配置；Compose 用 `format: raw` 读取，值里的 `$`、引号和反斜杠原样进容器。模板是 `deploy/env/metaweave.env.example`、`deploy/env/nl2sql.env.example`（只列 Docker 专用变量，复制到 `config/overrides/` 后填实值）。`deploy.sh` 始终把运行目录下的 `config/metaweave.env`、`config/nl2sql.env` 当作正式配置：排空、恢复时的 Compose 调用，以及这两份文件的比对、更新和恢复用的是同一组路径，不取 `deploy.env` 里 `METAWEAVE_ENV_FILE`、`NL2SQL_ENV_FILE` 的值。这两项仍须保留并指向同一组文件，供手工执行 Compose 命令时使用。
 
 ### 发布快照与旧格式过渡
 
@@ -67,11 +69,17 @@ CI 在三个应用镜像预检成功后生成 `deploy/candidate-<release_id>.jso
 
 随后分别使用目标 MetaWeave、NL2SQL 镜像及当前 env，调用已有的纯配置解析入口，检查平台数据库配置、MetaWeave CORS 及部署开关/令牌/契约；每项最多 30 秒，不启动 API、不连库或调用模型。两项通过后，再以 `docker compose run --rm --no-deps --pull never -T --entrypoint python metaweave /app/deploy/scripts/smoke.py --scope infra` 执行既有只读检查：两个 PG 库和必要对象、Neo4j/APOC、Milvus 目标库。上述短时检查容器不初始化数据、不发布宿主端口，完成后删除，不增加常驻服务；它们复用服务的卷挂载，检查代码不写这些卷。控制请求最多 10 秒，单次 Docker 状态读取最多 30 秒，infra 检查最多 60 秒；超时后按唯一容器名尝试清理，清理最多 10 秒。发布日志只报告失败组件，不回显配置解析或 SDK 原始异常及凭据。
 
+doc 16 起，日常 `release` 的目标配置预检改用本次发布的候选配置，并在同一阶段多核对四件事：候选目录必须是 `$DEPLOY_ROOT/config/.pending/<release_id>` 且两份文件权限为 `0600`；当前快照和候选快照都按 `format: raw` 读取两个后端的 env；候选里的 `DEPLOY_CONTROL_TOKEN`、`SOURCE_CREDENTIAL_KEY` 必须与当前正式值一致；两个候选服务的 `SOURCE_CREDENTIAL_KEY` 必须非空且相同，否则 NL2SQL 解不开 MetaWeave 登记的数据源凭据（`bootstrap` 在任何变更之前对两份正式 env 做同样的核对，全新开发栈因此也受这一条约束）。日志只报告哪个服务的哪一项不符，不输出值。任一不符即停止，同样不关闭入口、不替换容器。
+
+预检通过后，先用当前快照和正式 env 排空旧容器，再切到候选快照和候选配置重建容器；候选配置只用于目标配置预检、创建候选容器和验收。`bootstrap` 在写入 `deploying` 之前做同样的 raw 核对：它登记的快照就是此后发布的基线。
+
 首次 bootstrap 在完成库表初始化、四项上游启动后执行完整预检，再启动前端并冒烟。手动回退与失败恢复允许跳过 Docker 已确认不存在/已停止的后端；仍在运行但控制接口不可达或契约不符时拒绝恢复。排空阶段重新读取容器状态，只对当时仍运行的后端 enter，不将读取失败当作已经停止。每次排空轮询复用同一严格 JSON 解析，并要求 `maintaining=true`；传输失败、截断 JSON 或尚未进入维护均不能当作活动数 0，不替换容器。
 
 ### 同版本核验与恢复
 
-`bootstrap <current>`、`release <current>` 只核验，不替换容器或重新初始化。除镜像身份和普通请求外，还要求无维护标记、两个后端均已开放；失败保留 current/previous 并标记 `recovery_required`，提示执行 `rollback <current>`。
+`bootstrap <current>` 只核验，不替换容器或重新初始化。除镜像身份和普通请求外，还要求无维护标记、两个后端均已开放；失败保留 current/previous 并标记 `recovery_required`，提示执行 `rollback <current>`。
+
+doc 16 起 `release` 必须带本次发布的候选配置（`CANDIDATE_APP_CONFIG_DIR`），并且 `<release_id>` 不能等于当前 current：复用当前 ID 会直接报错，不替换容器、不改变状态引用。需要同版本只读核验时用 `bootstrap <current>` 或 ready 现场下的 `rollback <current>`。
 
 `rollback <current>` 在 ready 且现场核验通过时不做替换。发现维护标记残留、门闩未开放、镜像不符或普通冒烟失败时，进入已有的预检、排空、应用恢复及两阶段冒烟流程；恢复当前版本不改变 previous。存活后端控制不可达时仍拒绝替换，不以恢复为理由强杀。
 
@@ -132,6 +140,22 @@ git push -u origin <分支>         # 开 PR；云端 CI 通过后合并，无�
 
 **暂停自动发布**（维护或回退之前）：`gh workflow disable notify-deploy.yml --repo paulwxq/insightweave`，读回 `state` 为 `disabled_manually`。停用不取消已经在运行的部署，要等它正常收尾。维护结束并确认后，用 `gh workflow enable notify-deploy.yml --repo paulwxq/insightweave` 恢复。完整程序见 doc 15 §8.3、§8.5。
 
+**只改配置时的发布**（[doc 16](../docs/16_后端环境配置随发布同步设计.md) §3.1）：改了开发 `metaweave/.env`、`nl2sql/.env` 或 `config/overrides/` 之后，没有代码改动可以合并，须经维护者授权重跑一次私有部署。前提与重试相同：来源 CI 对当前 `main` 的最新 attempt 已成功，选定的私有运行已结束、绑定这个 attempt、使用实现 doc 16 的控制提交，本机现场是 `ready` 且没有未决发布。命令是上表第一行 `gh run rerun <私有运行ID> --repo paulwxq/insightweave-deploy`：完整重跑产生新的 attempt 和新的 `release_id`，重新读取当时的两份开发 `.env`，并照常构建、排空、重建和冒烟。没有新的代码改动时这次发布部署的仍是同一份源码。
+
+**发布在更新正式配置时被打断**（doc 16 §3.3）：`deployment.json` 里会留下 `pending_config_release_id`，现场处于 `deploying` 或 `recovery_required`。处理方式与其它非 ready 现场相同：核实后执行 `deploy.sh rollback <current>`；它先从登记的备份（`config/.pending/<那个 release_id>/previous/`）恢复两份正式 env，再恢复当前版本，成功后清除这个字段并清理备份。不要手工删除被引用的 `.pending/` 目录。
+
+发布日志在写入 `ready` 之后为两个服务各输出一行配置变更摘要，只列新增、修改、删除的变量名（没有变化时记"无变化"），不含任何值。
+
+### 网络故障排查与重跑
+
+私有部署出现 `early EOF`、下载超时或 `VERIFY_UNAVAILABLE` 时，先从该次 attempt 的日志定位第一处失败。确认旧运行已结束、相关发布没有排队或运行、现场为 `ready` 且当前版本健康。记录目标 `source_sha`、来源 CI 的 run ID 和 attempt。重跑前逐条核对下面三条路径。
+
+1. **Runner 从 GitHub 检出源码。** 用 `iw-runner` 在临时仓库将 `origin` 指向发布使用的公开源码仓，按发布使用的网络路径执行 `git -c protocol.version=2 fetch --no-tags --depth=1 origin "$SOURCE_SHA"`，再核对 `git rev-parse FETCH_HEAD`。以完整传输成功为准。若 GitHub 连接能建立，但反复在传包途中断开，可经维护者授权，从可信本地检出预热闲置 Runner 的 Git 对象缓存。导入前确认这个 SHA 与远端 `main` 和成功的来源 CI 一致，导入后核对对象完整性。正式工作流仍从原 `origin` 检出并核对该 SHA。
+2. **Docker 构建环境下载锁定依赖。** 用与发布构建相同的 Docker 网络路径，从构建日志和锁文件定位失败的依赖，测试完整下载并核对锁定哈希。宿主机、Runner 和 Docker 内的代理分别核对。`ci.sh` 通过 `INSIGHTWEAVE_BUILD_PROXY_URL` 向构建传递代理。若原线路不稳定，可经维护者授权使用已验证的直连或限目标站点的临时转发，用相同提交、Dockerfile、builder 和平台执行 `docker buildx build --output type=cacheonly` 预热构建缓存。发布时确认相应的依赖安装层命中缓存。
+3. **Runner 调用 GitHub API 复核来源。** 用 `iw-runner` 和发布所用的 Python 运行私有仓 `scripts/verify_source_request.py recheck --sha "$SOURCE_SHA" --run-id "$SOURCE_RUN_ID" --attempt "$SOURCE_RUN_ATTEMPT"`。比较代理和直连，以该脚本实际读到目标 SHA 和来源最新 attempt 为准。正式发布会在构建前和切换前各复核一次。若需临时调整 Runner 代理，先取得授权并确认 Runner 空闲，只调整已验证的目标域名，在发布结束后恢复配置，确认 Runner 重新在线。
+
+诊断和预热期间保留 TLS 校验、依赖锁定和来源核验，记录失败步骤、所用线路和验证结果。确认目标仍是远端 `main` 的 HEAD，且来源 CI 的最新 attempt 已成功并与原发布请求一致，再按上节完整重跑对应的私有部署。成功以 `finalize` 通过、现场为 `ready`、发布清单 SHA 与目标一致、三个应用容器运行新版且健康、站点返回 HTTP 200 为准。收尾时关闭临时转发并清理为本次重跑创建的临时 Git 引用。
+
 ### 手动发布/回退
 
 自动发布停用或不可用时才手动操作，并且先暂停自动发布。工具用独立运维检出 `/home/iw-runner/insightweave-ops/source/`，不依赖 Runner 的 `_work`。每次操作前把它固定到**当前线上版本**（`deployment.json` 的 current）的来源提交，核对 HEAD 和干净状态；脚本写绝对路径。占位值替换为已核实的值：
@@ -151,16 +175,48 @@ sudo -u iw-runner env DEPLOY_ROOT="$D" ENV_FILE="$D/deploy.env" \
   bash "$OPS_SOURCE/deploy/scripts/deploy.sh" rollback "$TARGET_RELEASE_ID"   # 回退（仅 current/previous）
 ```
 
-手动发布先在同一检出里用 `ci.sh` 生成镜像和候选清单，再执行 `deploy.sh release`；完整命令和注意事项见 `/home/iw-runner/insightweave-ops/README.md` 与 doc 15 §8.4。
+手动发布（[doc 16](../docs/16_后端环境配置随发布同步设计.md) 起）先暂停自动发布，把运维检出固定到**要发布的版本**（须是已实现 doc 16 的提交），再依次做三步。`OPS_SOURCE`、`D` 沿用上面的取值。生成候选配置的解释器须已装 `python-dotenv==1.2.4`（准备方法见私有部署仓 README 的 Runner 一节）：
+
+```bash
+RELEASE_ID=<新的发布 ID；唯一，只含字母、数字、_ . ->
+OPS_PYTHON=<装有 python-dotenv==1.2.4 的解释器绝对路径>   # 本机可用 /home/iw-runner/.venv-smoke/bin/python
+CANDIDATE_DIR="$D/config/.pending/$RELEASE_ID"
+CANDIDATE_MANIFEST="$OPS_SOURCE/deploy/candidate-$RELEASE_ID.json"
+
+# ① 生成候选配置：开发 .env 叠加 Docker 覆盖文件，写入本次发布的候选目录
+sudo -u iw-runner env DEPLOY_ROOT="$D" \
+  "$OPS_PYTHON" "$OPS_SOURCE/deploy/scripts/prepare_app_env.py" \
+  --dev-root <开发工作区绝对路径；本机为 /opt/projects/insightweave> --deploy-root "$D" \
+  --release-id "$RELEASE_ID"
+```
+
+② 在同一检出按运维 README 的手动构建步骤运行 `ci.sh "$RELEASE_ID"`（离线检查、构建三个镜像、候选预检），并把环境变量 `MANIFEST_OUT` 设为 `$CANDIDATE_MANIFEST`，写出本次发布的候选清单。
+
+```bash
+# ③ 发布：把候选清单和候选配置目录一并传给 deploy.sh
+sudo -u iw-runner env DEPLOY_ROOT="$D" ENV_FILE="$D/deploy.env" \
+  PROJECT=insightweave-local \
+  PYTHON_BIN=/home/iw-runner/.venv-smoke/bin/python \
+  CANDIDATE_MANIFEST="$CANDIDATE_MANIFEST" CANDIDATE_APP_CONFIG_DIR="$CANDIDATE_DIR" \
+  bash "$OPS_SOURCE/deploy/scripts/deploy.sh" release "$RELEASE_ID"
+```
+
+`deploy.sh release` 不带 `CANDIDATE_APP_CONFIG_DIR` 会直接报错。完整命令和注意事项见 `/home/iw-runner/insightweave-ops/README.md` 与 doc 15 §8.4；首次启动开发栈（先生成两份正式 env，再 `bootstrap`）的步骤见 doc 16 §4.1。
 
 ### 修改配置（换 LLM key、改业务库连接等）
 
-```bash
-sudo nano /home/iw-runner/insightweave-runtime/config/metaweave.env
-sudo nano /home/iw-runner/insightweave-runtime/config/nl2sql.env
-```
+doc 16 起运行目录里的 `config/metaweave.env`、`config/nl2sql.env` 由发布程序生成，**不要手工编辑**（下一次发布会覆盖）。按变量归属改对应的位置：
 
-**生效方式**：后端容器必须真正重建才会读取新配置。由维护者决定是否对最新 main 再执行一次完整发布：新发布生成新的 release_id，排空在途任务、重新创建后端容器（读取新配置），两阶段冒烟通过后标记就绪。它同时会发布最新 main 的代码；当前运行版本与 main 不同时，不会只为了改配置而升级代码。专门的配置重发入口（`reconfigure`）尚未实现。重新触发的方法见上面"追踪、重试与暂停"和 doc 15 §8.4、§8.5。
+| 要改的变量 | 改哪里 |
+|---|---|
+| 应用变量：LLM 密钥与供应商配置、LangSmith、`NL2SQL_LOG_LEVEL`、默认的业务库连接 `DB_*` | 开发工作区的 `metaweave/.env`、`nl2sql/.env` |
+| Docker 专用变量：平台库与 LangGraph 持久化连接、容器内 Neo4j 与 Milvus 连接、CORS 与 Host、`SOURCE_CREDENTIAL_KEY`、`DEPLOY_CONTROL_ENABLED`、`DEPLOY_CONTROL_TOKEN` | `/home/iw-runner/insightweave-runtime/config/overrides/metaweave.env`、`nl2sql.env`（模板是 `deploy/env/*.env.example`） |
+
+两份开发 `.env` 须对 `iw-runner` 可读（`0640` 配合受控组，或只给 `iw-runner` 读权限的 ACL）。
+
+**生效方式**：后端容器必须真正重建才会读取新配置。经维护者授权，按上面"只改配置时的发布"对最新 main 完整发布一次：新发布生成新的 release_id，排空在途任务、重新创建后端容器（读取新配置），两阶段冒烟通过后标记就绪。它同时会发布最新 main 的代码；当前运行版本与 main 不同时，不会只为了改配置而升级代码。专门的配置重发入口（`reconfigure`）尚未实现。重新触发的方法见上面"追踪、重试与暂停"和 doc 15 §8.4、§8.5。
+
+发布时会拒绝三类情况：候选配置里的控制令牌或数据源加密密钥与当前正式值不一致；两个服务的 `SOURCE_CREDENTIAL_KEY` 不一致或缺失。令牌轮换、密钥轮换属于单独的维护操作（doc 16 §4）。
 
 **注意**：`docker compose restart` 不会加载新配置（沿用创建时的 env）；手动 `--force-recreate` 会使用 deploy.env 中的镜像 tag（可能指向旧版本）且跳过排空与冒烟。**不推荐绕过流水线手动操作**；确需手动时理解上述风险。
 
@@ -189,7 +245,7 @@ CLI JSON 输出单测仍运行真实子进程，但对 doctor 的业务库/平�
 
 Docker 镜像默认 `NL2SQL_LOG_LEVEL=INFO`（覆盖 YAML 的 DEBUG），完整提示词不输出、日志量大幅减少。
 
-**临时排查**：编辑 `/home/iw-runner/insightweave-runtime/config/nl2sql.env`，取消注释 `NL2SQL_LOG_LEVEL=DEBUG`，然后按上面"修改配置"的生效方式对最新 main 再执行一次完整发布（自动排空+重建+冒烟）。恢复时改回 INFO，再执行一次。
+**临时排查**（doc 16 起）：在开发 `nl2sql/.env` 里设置 `NL2SQL_LOG_LEVEL=DEBUG`，然后按上面"修改配置"的生效方式对最新 main 完整发布一次（自动排空+重建+冒烟）。恢复时把它改回 `INFO` 或删去这一行，再发布一次。doc 16 生效前，这一项是直接改运行目录的 `config/nl2sql.env`；该文件现在由发布生成，改它不会生效。
 
 **注意**：修改后需**重新创建容器**（`--force-recreate`），`restart` 不加载新 env（见上）。
 
