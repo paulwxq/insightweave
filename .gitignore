@@ -45,9 +45,9 @@ logs/
 *.pkl
 
 # ===== 运行产物目录 =====
-# 用 **/output/**（匹配 output 内部内容）而非 output/（排除目录本身），
-# 以免父目录被忽略导致 metaweave/.gitignore 中对人工维护文件的
-# 例外规则（output/domains/db_domains.yaml、output/dim_config/dim_tables.yaml）失效。
+# **/output/** 匹配任意位置 output 目录内的文件（不含目录本身），全部按运行产物忽略，不设例外。
+# metaweave/output/domains/db_domains.yaml、metaweave/output/dim_config/dim_tables.yaml
+# 曾作为例外入库跟踪，现已取消跟踪、只保留在本地（生成方式见 metaweave/AGENTS.md）。
 **/output/**
 
 # ===== 含真实凭据的本地配置（安全模板除外）=====

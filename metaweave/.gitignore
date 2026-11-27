@@ -25,14 +25,7 @@ env/
 !.env.example
 
 # Runtime output / logs / cache
-# output/ 整体忽略，但保留 db_domains.yaml 与 dim_tables.yaml（正式产物，需入库跟踪）
 output/*
-!output/domains/
-output/domains/*
-!output/domains/db_domains.yaml
-!output/dim_config/
-output/dim_config/*
-!output/dim_config/dim_tables.yaml
 logs/
 cache/
 .cache/
