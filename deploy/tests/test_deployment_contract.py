@@ -11,6 +11,7 @@ import os
 import re
 import stat
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -249,7 +250,11 @@ case "$(basename "$0")" in
     [[ " $* " == *" -c import sys; assert sys.version_info"* ]] && exit "${CI_PY_EXIT:-0}"
     [[ " $* " == *" -m pytest src/tests/db_deepagent "* ]] && exit "${CI_CORE_EXIT:-0}" ;;
   node) [ "$1" != --version ] || echo "${CI_NODE_VERSION:-v22.23.0}" ;;
-  docker) exit 47 ;; # 禁止实际构建；证明已经进入构建阶段即可
+  docker)
+    if [[ "${CI_PROBE_FRONTEND:-0}" == 1 && " $* " != *" -f frontend/Dockerfile "* ]]; then
+      exit 0
+    fi
+    exit 47 ;; # 停在被测构建调用，不实际构建
 esac
 exit 0
 """
@@ -260,6 +265,8 @@ SUITES = ("nl2sql", "agent_core", "deploy_tests", "metaweave", "frontend")
 def make_ci_repo(tmp_path, scripts=("ci.sh", "check.sh")):
     """干净临时仓库（含工作区里的真实脚本）+ 外部命令替身；返回仓库、命令日志、运行环境。"""
     repo = tmp_path / "repo"
+    if "ci.sh" in scripts:
+        scripts = (*scripts, "prepare_app_env.py")
     for name in scripts:
         target = repo / "deploy" / "scripts" / name
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -313,6 +320,16 @@ def make_ci_repo(tmp_path, scripts=("ci.sh", "check.sh")):
         "CI_PROBE_CALLS": str(calls),
         "CI_CORE_EXIT": "0",
     }
+    if "ci.sh" in scripts:
+        dev_root = tmp_path / "dev"
+        frontend_env = dev_root / "frontend" / ".env.docker.local"
+        frontend_env.parent.mkdir(parents=True)
+        frontend_env.write_text(
+            'VITE_API_BASE_URL="http://127.0.0.1:18081"\n'
+            "VITE_NL2SQL_API_BASE_URL=http://127.0.0.1:18082 # NL2SQL\n"
+        )
+        env["INSIGHTWEAVE_DEV_PROJECT_ROOT"] = str(dev_root)
+        env["INSIGHTWEAVE_ENV_SYNC_PYTHON"] = sys.executable
     return repo, calls, env
 
 
@@ -449,6 +466,40 @@ class TestCiSh:
         else:
             assert builds and commands.index(core[0]) < commands.index(builds[0])
             assert "镜像构建失败" in result.stderr
+
+    def test_frontend_build_reads_current_development_env(self, tmp_path):
+        repo, calls, env = make_ci_repo(tmp_path)
+        env["CI_PROBE_FRONTEND"] = "1"
+        env["VITE_API_BASE_URL"] = "http://127.0.0.1:18888"
+        env["VITE_NL2SQL_API_BASE_URL"] = "http://127.0.0.1:18889"
+        result = run_ci_script(repo / "deploy/scripts/ci.sh", env, "probe-rid")
+        builds = [
+            line for line in calls.read_text().splitlines() if "|docker buildx build " in line
+        ]
+        assert len(builds) == 3, result.stderr
+        assert all("VITE_" not in line for line in builds[:2])
+        assert "-f frontend/Dockerfile" in builds[2]
+        assert "--build-arg VITE_API_BASE_URL=http://127.0.0.1:18081" in builds[2]
+        assert "--build-arg VITE_NL2SQL_API_BASE_URL=http://127.0.0.1:18082" in builds[2]
+
+    @pytest.mark.parametrize("missing_file", [True, False])
+    def test_missing_frontend_build_config_stops_before_docker(
+        self, tmp_path, missing_file
+    ):
+        repo, calls, env = make_ci_repo(tmp_path)
+        path = Path(env["INSIGHTWEAVE_DEV_PROJECT_ROOT"]) / "frontend" / ".env.docker.local"
+        if missing_file:
+            path.unlink()
+        else:
+            path.write_text(
+                "VITE_API_BASE_URL=http://127.0.0.1:18081\nVITE_NL2SQL_API_BASE_URL=\n"
+            )
+        result = run_ci_script(repo / "deploy/scripts/ci.sh", env, "probe-rid")
+        assert result.returncode != 0
+        assert ".env.docker.local" in result.stderr
+        if not missing_file:
+            assert "VITE_NL2SQL_API_BASE_URL" in result.stderr
+        assert "|docker buildx build " not in calls.read_text()
 
 
 class TestCheckSh:
@@ -801,8 +852,8 @@ class TestDockerfiles:
         assert f"FROM {self.NODE_DIGEST}" in text
         assert f"FROM {self.NGINX_DIGEST}" in text
         assert "npm ci --include=dev" in text
-        assert "VITE_API_BASE_URL=http://localhost:18080" in text
-        assert "VITE_NL2SQL_API_BASE_URL=http://localhost:18080" in text
+        for key in ("VITE_API_BASE_URL", "VITE_NL2SQL_API_BASE_URL"):
+            assert re.findall(rf"(?m)^ARG {key}(.*)$", text) == [""]
         assert "deploy/nginx/default.conf" in text
         assert "--from=build" in text
 

@@ -210,9 +210,19 @@ doc 16 起运行目录里的 `config/metaweave.env`、`config/nl2sql.env` 由发
 | 要改的变量 | 改哪里 |
 |---|---|
 | 应用变量：LLM 密钥与供应商配置、LangSmith、`NL2SQL_LOG_LEVEL`、默认的业务库连接 `DB_*` | 开发工作区的 `metaweave/.env`、`nl2sql/.env` |
+| 前端构建用的 `VITE_API_BASE_URL`、`VITE_NL2SQL_API_BASE_URL` | 开发工作区的 `frontend/.env.docker.local` |
 | Docker 专用变量：平台库与 LangGraph 持久化连接、容器内 Neo4j 与 Milvus 连接、CORS 与 Host、`SOURCE_CREDENTIAL_KEY`、`DEPLOY_CONTROL_ENABLED`、`DEPLOY_CONTROL_TOKEN` | `/home/iw-runner/insightweave-runtime/config/overrides/metaweave.env`、`nl2sql.env`（模板是 `deploy/env/*.env.example`） |
 
 两份开发 `.env` 须对 `iw-runner` 可读（`0640` 配合受控组，或只给 `iw-runner` 读权限的 ACL）。
+
+前端打包时，`ci.sh` 从 `INSIGHTWEAVE_DEV_PROJECT_ROOT/frontend/.env.docker.local` 读取以下两个地址。该文件也须对 `iw-runner` 可读。手动构建同样需要传入 `INSIGHTWEAVE_DEV_PROJECT_ROOT` 和 `INSIGHTWEAVE_ENV_SYNC_PYTHON`。
+
+```dotenv
+VITE_API_BASE_URL=http://127.0.0.1:18080
+VITE_NL2SQL_API_BASE_URL=http://127.0.0.1:18080
+```
+
+两个值使用浏览器可访问的 Nginx 入口。发布脚本将地址作为构建参数传给 Docker，Vite 将值写入前端 JavaScript。env 文件留在开发工作区。本地 `npm run dev` 继续使用 Vite 的开发配置。以后改宿主机端口时，同时核对这两个地址、Compose 端口映射和后端 Origin 白名单，再构建并发布新镜像。
 
 **生效方式**：后端容器必须真正重建才会读取新配置。经维护者授权，按上面"只改配置时的发布"对最新 main 完整发布一次：新发布生成新的 release_id，排空在途任务、重新创建后端容器（读取新配置），两阶段冒烟通过后标记就绪。它同时会发布最新 main 的代码；当前运行版本与 main 不同时，不会只为了改配置而升级代码。专门的配置重发入口（`reconfigure`）尚未实现。重新触发的方法见上面"追踪、重试与暂停"和 doc 15 §8.4、§8.5。
 
@@ -513,7 +523,7 @@ restore_volume nl2sql-workspace
   exec pg_restore -U "$POSTGRES_USER" -d "$LANGGRAPH_DB_NAME" --exit-on-error --single-transaction --no-owner --no-acl' < "$BACKUP/lg_persist.dump"
 ```
 
-演练前端的构建 API origin 仍可能固定为 `localhost:18080`；只改宿主映射不改变 JavaScript 请求地址。不要直接在演练 Vue 页面操作，以免请求生产 API。首轮以内部 SDK/后端检查和显式演练地址的 HTTP 验收为主；如需浏览器演练，应另行准备 API origin 与演练入口一致的前端。演练结束只按独立项目及明确列出的新卷清理，不运行生产 `down -v` 或全局 prune。
+复用发布镜像时，演练前端的 JavaScript 仍包含该镜像构建时的 API origin，例如 `http://127.0.0.1:18080`。首轮以内部 SDK/后端检查和显式演练地址的 HTTP 验收为主。如需浏览器演练，先构建 API origin 与演练入口一致的前端镜像。演练结束只按独立项目及明确列出的新卷清理，不运行生产 `down -v` 或全局 prune。
 
 恢复成功后记录备份标识、实际镜像 ID、独立项目/卷/端口、验收结果和失败项，再将“恢复未验证”改为相应的已验证范围。命令静态检查、归档存在、应用启动或健康检查通过，都不足以单独证明数据、历史、结果文件和解密能力已经恢复。
 

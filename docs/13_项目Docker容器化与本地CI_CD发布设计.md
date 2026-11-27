@@ -140,7 +140,7 @@ PostgreSQL 的宿主端口固定为 6432，容器内部仍为 5432。部署环�
 
 当前两个前端 API 地址配置只接受完整 origin，不接受 `/api` 相对路径。本次不重写客户端配置机制。
 
-构建前端时把 `VITE_API_BASE_URL` 和 `VITE_NL2SQL_API_BASE_URL` 都设为 `http://localhost:18080`。Nginx 路由：
+构建前端时，`ci.sh` 从开发工作区的 `frontend/.env.docker.local` 读取 `VITE_API_BASE_URL` 和 `VITE_NL2SQL_API_BASE_URL`。本机发布可将两个地址都设为 `http://127.0.0.1:18080`。Nginx 按以下规则转发。
 
 | 请求路径 | 目标 | 注意事项 |
 | --- | --- | --- |
@@ -150,9 +150,9 @@ PostgreSQL 的宿主端口固定为 6432，容器内部仍为 5432。部署环�
 
 代理传递浏览器 Host，NL2SQL `NL2SQL_ALLOWED_HOSTS` 允许 `localhost`、`127.0.0.1`；两个后端的 Origin 白名单包含实际浏览器 origin。Nginx 查询代理读取超时设为 600 秒，覆盖现有前端 480 秒查询超时，不能让代理默认超时先截断请求。
 
-两个后端从首版同时放行 `http://localhost:18080,http://127.0.0.1:18080`。前端构建的两个 API origin 仍固定为 `http://localhost:18080`；用户从 `127.0.0.1:18080` 打开页面时，会跨 Origin 请求该固定 API 地址，因此同样需要这两个精确白名单，不使用通配符。未放行时，NL2SQL 的 Origin 守卫可能返回 403，MetaWeave 则可能因缺少允许头被浏览器拦截，并非两个后端都会返回 403。
+两个后端同时放行 `http://localhost:18080` 和 `http://127.0.0.1:18080`。前端 API 地址设为 `http://127.0.0.1:18080` 时，从该地址打开页面会发起同源请求，从 `localhost:18080` 打开则仍需相应的精确白名单。未放行时，NL2SQL 的 Origin 守卫可能返回 403，MetaWeave 的请求可能因缺少允许头被浏览器拦截。
 
-用户当前的开发启动方式是：Vue `127.0.0.1:5173` 直连 MetaWeave `127.0.0.1:8001`、NL2SQL `127.0.0.1:8002`，两个后端放行 `http://127.0.0.1:5173,http://localhost:5173`。Docker 仍复用 MetaWeave 的 `--factory backend.api.logged_app:create_logged_app` 和 NL2SQL 的 `src.api.main:app` 入口，但监听 `0.0.0.0`，内部端口按本节定为 8001/8008；NL2SQL 的开发端口 8002 不必照搬为容器端口。浏览器改经 `localhost:18080` 访问，Vite 构建值和后端白名单必须一起切换，不修改当前开发服务。
+本地开发时，Vue 在 `127.0.0.1:5173` 运行，按开发配置直连 MetaWeave 的 `127.0.0.1:8001` 和 NL2SQL 的 `127.0.0.1:8008`。两个后端放行 `http://127.0.0.1:5173` 和 `http://localhost:5173`。Docker 复用 MetaWeave 的 `--factory backend.api.logged_app:create_logged_app` 和 NL2SQL 的 `src.api.main:app` 入口，分别在容器内监听 `0.0.0.0:8001` 和 `0.0.0.0:8008`。浏览器通过 `http://127.0.0.1:18080` 访问部署栈的 Nginx。
 
 采用静态 upstream 名称时，实际发布/恢复必须在后端就绪后刷新代理解析：前端新建容器会重新解析；前端容器被保留时执行 `nginx -t` 并 reload，再做入口冒烟，避免沿用被替换后端的旧 IP。保留须同时核对镜像引用与实际 image ID；标签相同但实际 ID 不符时强制重建，不能仅凭标签沿用。
 
@@ -414,10 +414,10 @@ PG 官方镜像的入口初始化脚本只在空数据目录运行，后续表�
 - NL2SQL 受维护离线清单至少包含 `src/tests/db_deepagent`、`src/tests/unit/api`、`src/tests/unit/services`、`tests/unit/db_deepagent/test_independent_summarizer.py`，不传 `--run-db`、`--run-llm`。在 `ci.sh` 显式列出路径，并将已知历史套件排除原因写入 README；这些目录的存在已核实，新增范围是否全绿仍需实际执行，不虚报通过。
 - **额外显式执行 `deploy/tests/` 公共离线套件**，它不在两个后端现有 pytest 默认收集目录内，不能因后端套件全绿就跳过部署测试。公共套件在 NL2SQL 测试环境运行并配置仓库根导入路径；两个 API 的实际接线回归分别放入其所属后端的受维护套件，不在一个测试进程中混装两套项目依赖。Docker/外部数据库边界用替身，真实联调不混入默认离线 CI。
 - 前端按锁文件 `npm ci`，执行全部现有 `.test.cjs` 和 `.test.ts` 测试、类型检查；使用 Node 22.18 及以上的 22.x，按 [doc 13.1 §6.1](13.1_镜像与依赖安装明细.md) 的 NUL 分隔枚举命令执行 `node --test`。该版本范围默认支持类型剥离，无需强制添加实验参数；当前没有 `npm test` 脚本，`ci.sh` 直接使用已验证命令，拒绝空测试清单并记录 Node 版本。
-- 正式前端产物在 Dockerfile 中再次按冻结输入构建，最终镜像不依赖宿主已有 `dist/`。
+- 正式前端产物由 Dockerfile 构建。源码和依赖取自固定提交，两个 API origin 由 `ci.sh` 读取开发工作区的构建配置后显式传入。
 - 失败即停止，不能为通过流水线删除失败用例；网络下载可有限重试，业务测试失败不盲目重试。
 - 手动构建同样要求可追溯：`ci.sh` 默认拒绝 tracked 修改、暂存修改及未跟踪源码，不提供跳过开关。先用 `git ls-files --others --exclude-standard` 检查，再从指定 SHA 的干净独立 checkout 构建；构建上下文以该提交的受跟踪文件为准，不吸入本地被忽略的 `.env` 等文件。
-- 三个应用镜像替换前进行最小预检：静态文件/代理配置及固定 API origin、Python 导入、必需配置/Skill 路径、配置解析、启动入口和本机环回健康请求。临时预检容器使用候选应用镜像、无宿主端口、无现有数据卷及外网连接；MetaWeave 的启动恢复扫描在此步骤关闭。它能发现打包/入口错误，不能代替真实数据库联调；不建设并行候选集群。
+- 三个应用镜像替换前检查静态文件、代理配置、Python 导入、必需配置/Skill 路径、配置解析、启动入口和本机环回健康请求。临时预检容器使用候选应用镜像、无宿主端口、无现有数据卷及外网连接；MetaWeave 的启动恢复扫描在此步骤关闭。它能发现打包/入口错误，不能代替真实数据库联调；不建设并行候选集群。
 - 前端独立预检时，Nginx 的静态 upstream 名称仍须可解析。使用 `--network none --add-host metaweave:127.0.0.1 --add-host nl2sql:127.0.0.1`，先执行 `nginx -t`，再启动 Nginx 检查本机环回静态页/资源及 SPA 回退；不把未启动的后端当作可用服务，不在这一步请求 API 代理。真实服务名解析和 API 连通性由七服务联调及发布冒烟验证。这样不需要为包装检查启动一套三应用临时集群。依据：[Docker hosts 映射](https://docs.docker.com/reference/cli/docker/container/run/#add-host)、[Nginx 配置检查](https://nginx.org/en/docs/switches.html)。
 
 此处测试结果是待实施要求，不沿用历史 1364 / 58 等数字冒充 CI 已运行。实际报告记录当前收集数、跳过原因和结果。
