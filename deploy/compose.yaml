@@ -104,8 +104,10 @@ services:
     platform: linux/amd64
     pull_policy: never
     restart: unless-stopped
+    # doc 16 §4：后端 env 由发布程序生成，按 raw 读取，值里的 $、引号和反斜杠原样进容器
     env_file:
-      - ${METAWEAVE_ENV_FILE:?deploy.env 需提供 METAWEAVE_ENV_FILE}
+      - path: ${METAWEAVE_ENV_FILE:?deploy.env 需提供 METAWEAVE_ENV_FILE}
+        format: raw
     environment:
       <<: *proxy-cleared
       # 容器内 marker 目录（§5.2；部署目录 control/ 只读挂载）
@@ -149,7 +151,8 @@ services:
     pull_policy: never
     restart: unless-stopped
     env_file:
-      - ${NL2SQL_ENV_FILE:?deploy.env 需提供 NL2SQL_ENV_FILE}
+      - path: ${NL2SQL_ENV_FILE:?deploy.env 需提供 NL2SQL_ENV_FILE}
+        format: raw
     environment:
       <<: *proxy-cleared
       DEPLOY_CONTROL_DIR: /run/insightweave-deploy

@@ -607,9 +607,9 @@ sudo -u iw-runner env DEPLOY_ROOT="$D" ENV_FILE="$D/deploy.env" \
 
 上述 Python 路径沿用既有部署手册，准备目录时还须确认 iw-runner 可读取工具、执行该 Python 及现有 Docker/端口检查；目录存在或 HEAD 匹配不等于回退已验收。这里只核对源码目录，不将运行凭据复制进检出，也不在外层持有 deploy.sh 的非重入部署锁。
 
-现有 release <current> 和 ready 下 rollback <current> 成功时仅只读核验，不能依此让新 env 生效。配置修改需要真正重新创建后端。首期如由维护者明确选择对最新 main 再执行一次完整发布，新 release_id 的构建/发布会重建后端并读取 env；这也会发布最新 main 的代码，不能称为只配置重发。当前版本与 main 不同且只想改配置时，不自动升级代码。
+[Doc 16](16_后端环境配置随发布同步设计.md) 生效后，`deploy.sh release <current>` 直接报错，不再作为只读核验；同版本只读核验改用 `bootstrap <current>`，或 ready 现场下的 `rollback <current>`。两者成功时都不替换容器，不能依此让新 env 生效。应用新配置必须使用新的 release_id，配置修改需要真正重新创建后端。首期如由维护者明确选择对最新 main 再执行一次完整发布，新 release_id 的构建/发布会重建后端并读取 env；这也会发布最新 main 的代码，不能称为只配置重发。当前版本与 main 不同且只想改配置时，不自动升级代码。
 
-独立的 reconfigure <expected_current>、纯 capabilities 及固定维护工具自动选择延后，另行实现后才开放配置专用入口；届时仍须固定当前镜像/Compose、锁内复核目标、排空、强制重建、两阶段冒烟，保持 current/previous，不因使用同镜像就声称旧配置已恢复。当前快照不保存旧凭据，配置失败没有自动旧配置回退保证。不得制造维护标记、篡改 phase 或跳过预检来强迫现有只读分支变更。
+独立的 reconfigure <expected_current>、纯 capabilities 及固定维护工具自动选择延后，另行实现后才开放配置专用入口；届时仍须固定当前镜像/Compose、锁内复核目标、排空、强制重建、两阶段冒烟，保持 current/previous，不因使用同镜像就声称旧配置已恢复。当前快照不保存旧凭据。Doc 16 起，发布验收失败时恢复原版本并切回原正式 env；正式文件替换过程被打断时，由登记的备份恢复（[Doc 16](16_后端环境配置随发布同步设计.md) §3.3）。不得制造维护标记、篡改 phase 或跳过预检来强迫现有只读分支变更。
 
 ### 8.5 维护者的简短操作程序
 

@@ -248,7 +248,7 @@ NL2SQL：uvicorn src.api.main:app --host 0.0.0.0 --port 8008 --timeout-graceful-
 
 ### 5.2 本机配置
 
-部署目录保存两个后端的独立环境文件和一份部署配置，模板入库、实值不入库。重点配置：
+部署目录保存两个后端的独立环境文件和一份部署配置，实值不入库。自 [doc 16](16_后端环境配置随发布同步设计.md) 起，两个后端的运行环境文件不再手工填写：每次发布由 `deploy/scripts/prepare_app_env.py` 从开发工作区的 `metaweave/.env`、`nl2sql/.env` 叠加 Docker 覆盖文件（`config/overrides/`）生成；`deploy/env/metaweave.env.example`、`nl2sql.env.example` 是覆盖文件的模板，只列 Docker 部署专用的变量。本节下列的连接、凭据与浏览器访问要求不变，其中属于 Docker 部署专用的变量（平台库与持久化库连接、容器内 Neo4j 与 Milvus 连接、CORS 与 Host、`SOURCE_CREDENTIAL_KEY`、部署控制）写在覆盖文件里，其余来自开发 `.env`。重点配置：
 
 - `PLATFORM_DB_*` 与 `LANGGRAPH_DB_*` 正确指向同一 PG 容器中的不同逻辑库。
 - 两个后端使用相同的 `SOURCE_CREDENTIAL_KEY`，该密钥在容器替换后保留，不每次生成。
