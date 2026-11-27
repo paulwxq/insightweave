@@ -21,9 +21,6 @@ COPY deploy/scripts/smoke.py /app/deploy/scripts/smoke.py
 
 ENV PATH="/app/nl2sql/.venv/bin:$PATH"
 ENV PYTHONPATH="/app:/app/nl2sql"
-# Docker 默认 INFO（覆盖 YAML 的 DEBUG，减少生产日志噪音与提示词泄漏；
-# 临时排查时在部署 env 设 NL2SQL_LOG_LEVEL=DEBUG 并重新创建容器）
-ENV NL2SQL_LOG_LEVEL=INFO
 
 EXPOSE 8008
 CMD ["uvicorn", "src.api.main:app", "--host", "0.0.0.0", "--port", "8008", "--timeout-graceful-shutdown", "120"]

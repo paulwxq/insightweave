@@ -36,10 +36,9 @@ def setup_logging_from_yaml(yaml_path: str) -> None:
     从 YAML 文件加载 logging 配置（dictConfig）。
     支持同时输出到控制台与文件，并允许通过 YAML 设置日志级别。
 
-    NL2SQL_LOG_LEVEL 环境变量（可选）：设置后覆盖业务 logger（nl2sql.*）
-    和 nl2sql_file handler 的级别。未设置时沿用 YAML 默认（本地开发
-    为 DEBUG）。Docker 镜像默认 INFO（见 Dockerfile ENV）。非法值启动
-    时明确报错。nl2sql.api 和 console 不受影响。
+    可选的 NL2SQL_LOG_LEVEL 环境变量仅覆盖 nl2sql 业务 logger 和
+    nl2sql_file handler 的级别。变量未设置或为空时使用 YAML 中的级别。
+    非法值会在初始化时抛出 ValueError。
     """
     if not os.path.exists(yaml_path):
         raise FileNotFoundError(f"Logging config YAML 不存在: {yaml_path}")

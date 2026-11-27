@@ -19,7 +19,7 @@
 - 日志时间精确到毫秒；每次工具调用记录 `elapsed_ms`，耗时使用 `time.monotonic()` 计算。
 - 不修改工具参数、返回值、预算计数、任务账本、SQL 执行、异常抛出及最终答案行为。
 - 日志构造或序列化失败不得影响工具执行，不得把原工具异常替换为日志异常。
-- Docker 镜像与部署示例默认 `NL2SQL_LOG_LEVEL=INFO` 保持不变；DEBUG 仅作为经授权的临时排障选项，console 与 `nl2sql.api` 始终保持 INFO。
+- 本地与容器均以 `logging.yaml` 为默认配置。业务文件日志为 `DEBUG`，console 与 `nl2sql.api` 为 `INFO`。可在运行环境中显式覆盖业务日志级别。
 - 本次不依赖 LangSmith；LangSmith 开启或关闭均不改变本地日志行为。
 - 未经用户另行授权，不提交、不推送、不部署。
 
@@ -61,21 +61,19 @@ datefmt: "%Y-%m-%d %H:%M:%S"
 
 ### 1.3 DEBUG 的实际去向
 
-`nl2sql/src/configs/logging.yaml:31-35` 使本地非 Docker 运行默认 DEBUG；`nl2sql/src/utils/logger.py:39-42` 和 `nl2sql/Dockerfile:24-26` 使 Docker 默认 INFO，本方案保留这两个默认行为。运行环境显式设置级别后，业务 Logger 与 `nl2sql_file` Handler 才输出对应级别，console Handler 始终保持 INFO。
+`logging.yaml` 将 `nl2sql` 业务 Logger 和 `nl2sql_file` Handler 配置为 `DEBUG`，将 console Handler 和 `nl2sql.api` 配置为 `INFO`。`logger.py` 在运行环境显式设置 `NL2SQL_LOG_LEVEL` 时，仅覆盖前两项。[日志配置](../src/configs/logging.yaml) [初始化代码](../src/utils/logger.py)
 
-因此，本方案不会因为增加 DEBUG 详情而让容器控制台出现大段工具返回，console/API 的 INFO 默认值不变。验收时不能假设本地也是 INFO，必须按 Task 3 的命令显式控制级别。
+工具调用的 DEBUG 详情写入 `nl2sql.log`。本地验收按 Task 3 分别运行 INFO 和 DEBUG 用例。
 
-### 1.4 普通发布保持 INFO，按需临时 DEBUG
+### 1.4 容器日志级别与验收
 
-本次不单独进行 Docker 验收、不修改当前容器，也不触发部署。Dockerfile 与部署示例继续默认 INFO，不要求为了 Doc 23 的普通发布预置 DEBUG。
+**调整容器日志级别。**在开发 `nl2sql/.env` 显式设置 `NL2SQL_LOG_LEVEL` 后，按 Doc 16 §3.1 发布，重建容器时载入新值。删除这一项后再发布，恢复 YAML 中的 `DEBUG`。[Doc 16](../../docs/16_后端环境配置随发布同步设计.md)
 
-**普通发布验收。**Doc 23 自动部署完成后，先直接核对新容器的 `NL2SQL_LOG_LEVEL=INFO`，防止前一次排障遗留的 DEBUG 被 INFO 摘要误判为通过。再复用该版本上线后已经发生且确实触发工具的问数；如果没有这样的记录，就在**包含 Doc 22 改动的新容器**上用第一条实际触发工具的问数补验，Doc 23 测试环境联调和自动发布健康/会话冒烟不算这份证据。在同一 `/app/nl2sql/logs/nl2sql.log` 按该请求的 `request_id` 核对本次新增的工具 started、对应终态和 `elapsed_ms`，并检查毫秒时间戳及 INFO 无完整参数/结果。DEBUG 输入输出的级别隔离和正文正确性继续由 Doc 22 本地测试与本地 CLI 覆盖，普通发布无需开启生产 DEBUG。
+**INFO 模式验收。**在开发 `nl2sql/.env` 显式设置 `NL2SQL_LOG_LEVEL=INFO` 后发布，核对新容器内的变量值及业务 Logger、文件 Handler 的有效级别。复用**包含 Doc 22 改动的新容器**中已实际触发工具的问数，或用该容器中的第一条实际工具问数补验。在 `/app/nl2sql/logs/nl2sql.log` 按 `request_id` 核对工具 started、对应终态、`elapsed_ms` 和毫秒时间戳，并确认 INFO 记录只有摘要。
 
-**需要容器排障时才临时开启。**[Doc 16](../docs/16_后端环境配置随发布同步设计.md) 生效后，容器的环境文件由每次发布从开发 `nl2sql/.env` 和 Docker 覆盖文件生成，不再手工编辑运行目录里的 env。排障时经维护者授权，只在开发 `nl2sql/.env` 里把 `NL2SQL_LOG_LEVEL` 设为 `DEBUG`，再按 Doc 16 §3.1 完整发布一次；配置在容器重建时生效，单纯 restart 仍沿用创建时的环境变量。普通发布没有排障需求时，开发 `nl2sql/.env` 里保持 `INFO`（不写则沿用镜像默认的 INFO）。
+**DEBUG 模式验收。**先核对业务 Logger 和文件 Handler 的有效级别是 `DEBUG`。排障时从原入口复现一次，按同一 `request_id` 和同一工具调用核对 `TOOL_INPUT` 及 `TOOL_OUTPUT`，工具抛异常时核对 `failed` 和对应的 DEBUG 堆栈。DEBUG 详情在 `nl2sql.log` 中查看。
 
-**原问题复现即 DEBUG 生效验收。**先确认新容器的环境值为 DEBUG，再从原来遇到问题的入口复现一次：Web 问题就走 Web，按这次请求的 ID 在同一日志文件核对新增 TOOL_INPUT；工具正常返回时核对 TOOL_OUTPUT，工具抛异常时核对 failed 及对应 DEBUG 堆栈。此次复现同时证明级别与日志链路生效，不再额外跑一轮问数。console 仍固定 INFO，DEBUG 详情只看 `nl2sql.log`。
-
-**排障后恢复。**经授权把开发 `nl2sql/.env` 的 `NL2SQL_LOG_LEVEL` 改回 `INFO`（或删去这一行），再按 Doc 16 §3.1 完整发布一次，然后核对新容器的环境值。文件改回 INFO 到容器重建之间，运行中的旧容器仍保持 DEBUG，不把文件已修改误认为运行级别已恢复。
+**排障后恢复。**如果为排障改过环境变量，在开发 `nl2sql/.env` 恢复先前的显式设置或删除临时覆盖，按 Doc 16 §3.1 发布后核对新容器的有效级别。恢复到 `INFO` 必须显式设置 `NL2SQL_LOG_LEVEL=INFO`。
 
 ## 2. 修改范围
 
@@ -238,7 +236,7 @@ datefmt: "%Y-%m-%d %H:%M:%S"
 
 - [ ] **Step 1: 编写失败测试 `test_standard_formatter_includes_milliseconds`**
 
-从现有 YAML 构造 standard formatter，格式化固定 `LogRecord`，断言时间部分匹配 `^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}$`。保留现有 INFO/DEBUG 环境变量覆盖测试，不新增 Dockerfile 默认级别测试。
+从现有 YAML 构造 standard formatter，格式化固定 `LogRecord`，断言时间部分匹配 `^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}$`。保留现有 INFO/DEBUG 环境变量覆盖测试。
 
 - [ ] **Step 2: 验证测试在旧格式下失败**
 
@@ -248,13 +246,13 @@ Expected: FAIL，旧值只有秒。
 
 - [ ] **Step 3: 修改 standard formatter**
 
-仅按 §4.1 修改 `format`，保留现有 `datefmt` 和所有 Handler 配置。确认 console、`nl2sql.log`、`api.log` 均变为毫秒格式；遗留历史分析脚本按 §2 说明保持不动，Dockerfile、部署示例和 `logger.py` 默认级别说明均不修改。
+按 §4.1 修改 `format`，保留现有 `datefmt` 和所有 Handler 配置。确认 console、`nl2sql.log`、`api.log` 均变为毫秒格式。
 
 - [ ] **Step 4: 运行完整日志配置测试**
 
 Run: `cd nl2sql && .venv/bin/python -m pytest src/tests/unit/utils/test_log_level_env.py -v`
 
-Expected: 全部 PASS，环境变量覆盖逻辑及 Docker 默认 INFO 行为不变。
+Expected: 全部 PASS。未设置环境变量时，业务 Logger 和文件 Handler 使用 YAML 的 `DEBUG`。显式设为 `INFO` 时，两者使用 `INFO`。
 
 ### Task 2: 在现有工具拦截器补充日志
 
@@ -355,11 +353,11 @@ Run: `cd nl2sql && REQ_ID="req-doc22-info-$(date +%Y%m%d%H%M%S)"; printf 'REQUES
 
 - [ ] **Step 3: 在本地 CLI 的 DEBUG 模式执行一次针对性验证**
 
-本地非 Docker 默认已是 DEBUG；确保当前 shell 未覆盖级别后运行同一 CLI：
+在 shell 中显式设置 DEBUG 后运行同一 CLI：
 
-Run: `cd nl2sql && REQ_ID="req-doc22-debug-$(date +%Y%m%d%H%M%S)"; printf 'REQUEST_ID=%s\n' "$REQ_ID"; env -u NL2SQL_LOG_LEVEL .venv/bin/python -m src.modules.db_deepagent.cli query --source-id db_src_1 --request-id "$REQ_ID" "请问订单数量最多的产品是哪个？"`
+Run: `cd nl2sql && REQ_ID="req-doc22-debug-$(date +%Y%m%d%H%M%S)"; printf 'REQUEST_ID=%s\n' "$REQ_ID"; NL2SQL_LOG_LEVEL=DEBUG .venv/bin/python -m src.modules.db_deepagent.cli query --source-id db_src_1 --request-id "$REQ_ID" "请问订单数量最多的产品是哪个？"`
 
-按本轮 REQUEST_ID 至少找到一对同一 ID 的 started/finished，并确认该调用的普通字符串参数与实际 ToolMessage 返回进入 DEBUG，console 仍保持 INFO。该真实问数只验收真实日志链路，**不要求出现大结果转存**；转存前全文及 `output_chars` 的确定性验收由 Task 2 Step 5 的既有离线大结果用例完成。验证结束后恢复调用前的环境变量状态，不修改 `.env` 或部署默认配置。本步骤只使用本地 CLI，**不进行 Docker 验收、不重建容器、不触发部署**。Doc 23 普通发布后的 INFO 问数验收复用其既有问数并按 §1.4 核对 request_id；只有实际排障时才临时开启容器 DEBUG，并以原问题的同一次复现核对 TOOL_INPUT/TOOL_OUTPUT 或异常堆栈。
+按本轮 REQUEST_ID 至少找到一对同一 ID 的 started/finished，并确认该调用的普通字符串参数与实际 ToolMessage 返回进入 DEBUG，console 仍保持 INFO。该真实问数只验收真实日志链路，**不要求出现大结果转存**；转存前全文及 `output_chars` 的确定性验收由 Task 2 Step 5 的既有离线大结果用例完成。命令中的 `NL2SQL_LOG_LEVEL=DEBUG` 仅用于本次 CLI 调用。容器内的日志验收见 §1.4。
 
 - [ ] **Step 4: 核对交付范围**
 
@@ -381,6 +379,6 @@ Run: `cd nl2sql && REQ_ID="req-doc22-debug-$(date +%Y%m%d%H%M%S)"; printf 'REQUE
 - [ ] 并行或交错调用不共享计时状态，可根据 ID 和时间区间分析；双线程测试按 ID 分别验证不同的精确 `elapsed_ms`，不只检查非负；
 - [ ] 工具返回、预算计数和异常行为与修改前一致；
 - [ ] 相关测试通过；真实问数使用唯一 `--request-id` 过滤日志，至少核验到一对同一 `tool_call_id` 的 started/finished，零工具日志不得判为通过；
-- [ ] 未新增日志模块，Dockerfile 与部署示例默认 INFO、console/API 级别保持 INFO，未纳入无关功能；
-- [ ] Doc 23 普通发布先核对新容器 `NL2SQL_LOG_LEVEL=INFO`；问数必须发生在包含 Doc 22 改动的新容器上，有则复用、没有则用上线后的第一条实际工具问数补验，再按 request_id 核对 started、终态和 `elapsed_ms`，不要求预置或开启生产 DEBUG；
-- [ ] 只有明确排障时才临时修改 Runner 实际 `NL2SQL_ENV_FILE` 为 DEBUG 并经正常发布重建；先核对新容器环境值，再从原入口复现，按同一请求核对 TOOL_INPUT、TOOL_OUTPUT 或 failed 对应 DEBUG 堆栈，不额外重复问数；排障后改回 INFO 并正常发布重建、核对恢复。
+- [ ] 未设置 `NL2SQL_LOG_LEVEL` 时，容器按 YAML 使用业务文件 `DEBUG` 和 console/API `INFO`。
+- [ ] INFO 模式验收显式设置 `NL2SQL_LOG_LEVEL=INFO`，并按 §1.4 在包含 Doc 22 改动的容器中核对级别及真实工具调用日志。
+- [ ] 容器 DEBUG 排障按 §1.4 从原入口复现，按同一调用核对输入、输出或异常堆栈。若曾临时修改覆盖值，排障后恢复先前设置并重新发布，核对实际级别。
